@@ -49,7 +49,28 @@ if ((Test-Path $vsPath) -and -not $env:VSINSTALLDIR) {
     }
 }
 
+$env:PATH = "C:\ProgramData\chocolatey\bin;" + $env:PATH
+$depsDir = "$WP\deps\build"
+
 Write-Host "=== Building slicer (incremental) ==="
 Invoke-IdlePriority -Exe "cmake" -ArgString '--build . --config Release' -WorkDir $buildDir
 
+Write-Host "=== Installing ==="
+Invoke-IdlePriority -Exe "cmake" -ArgString '--build . --target install --config Release' -WorkDir $buildDir
+
+# Copy dependency DLLs that the install target misses
+$installDir = "$buildDir\OrcaSlicer"
+$depBinDir = "$depsDir\OrcaSlicer_dep\usr\local\bin"
+if (Test-Path $depBinDir) {
+    Copy-Item "$depBinDir\*.dll" $installDir -Force -ErrorAction SilentlyContinue
+    if (Test-Path "$depBinDir\occt") {
+        Copy-Item "$depBinDir\occt\*.dll" $installDir -Force -ErrorAction SilentlyContinue
+    }
+}
+$webview2Dll = "$WP\deps\WebView2\lib\win-x64\WebView2Loader.dll"
+if (Test-Path $webview2Dll) {
+    Copy-Item $webview2Dll $installDir -Force
+}
+
 Write-Host "=== BUILD COMPLETE ==="
+Write-Host "Run: $installDir\orca-slicer.exe"
