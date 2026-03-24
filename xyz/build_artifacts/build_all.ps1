@@ -57,6 +57,7 @@ $srcPath = $WP
 $depPath = $depsDir
 
 # --- Phase 1: Dependencies ---
+# Deps must use VS generator (OpenSSL uses nmake/msbuild internally)
 Write-Host "=== Phase 1: Dependencies ==="
 if (-not (Test-Path $depsDir)) { New-Item -ItemType Directory -Path $depsDir }
 
@@ -67,14 +68,25 @@ Write-Host "=== Building deps (no parallel MSBuild - OpenSSL PDB contention) ===
 Invoke-IdlePriority -Exe "cmake" -ArgString '--build . --config Release --target deps' -WorkDir $depsDir
 
 # --- Phase 2: Slicer ---
-Write-Host "=== Phase 2: Slicer ==="
+# Use Ninja for faster incremental builds (requires vcvars64 environment)
+Write-Host "=== Phase 2: Slicer (Ninja) ==="
 if (-not (Test-Path $buildDir)) { New-Item -ItemType Directory -Path $buildDir }
 
-Write-Host "=== Configuring slicer ==="
-# Must use -S/-B flags; passing source as positional arg generates in-source
-Invoke-IdlePriority -Exe "cmake" -ArgString "-S `"$srcPath`" -B `"$buildDir`" -G `"Visual Studio 17 2022`" -A x64 -DORCA_TOOLS=ON -DCMAKE_BUILD_TYPE=Release -DDEP_BUILD_DIR=`"$depPath`""
+# Source vcvars64 so Ninja can find cl.exe
+$vsPath = "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+if (Test-Path $vsPath) {
+    Write-Host "Sourcing VS2022 environment for Ninja..."
+    cmd /c "`"$vsPath`" amd64 >nul 2>&1 && set" | ForEach-Object {
+        if ($_ -match '^([^=]+)=(.*)$') {
+            [System.Environment]::SetEnvironmentVariable($matches[1], $matches[2], 'Process')
+        }
+    }
+}
 
-Write-Host "=== Building slicer (parallel OK here) ==="
-Invoke-IdlePriority -Exe "cmake" -ArgString '--build . --config Release --target ALL_BUILD -- -m' -WorkDir $buildDir
+Write-Host "=== Configuring slicer ==="
+Invoke-IdlePriority -Exe "cmake" -ArgString "-S `"$srcPath`" -B `"$buildDir`" -G Ninja -DCMAKE_BUILD_TYPE=Release -DORCA_TOOLS=ON -DDEP_BUILD_DIR=`"$depPath`""
+
+Write-Host "=== Building slicer ==="
+Invoke-IdlePriority -Exe "cmake" -ArgString '--build . --config Release' -WorkDir $buildDir
 
 Write-Host "=== FULL BUILD COMPLETE ==="
