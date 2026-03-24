@@ -483,22 +483,29 @@ std::vector<unsigned int> Print::support_material_extruders() const
     // BBS
     auto num_extruders = (unsigned int)m_config.filament_diameter.size();
 
+    auto add_extruder_for_support_value = [&](int support_val) {
+        if (support_val == 0) {
+            support_uses_current_extruder = true;
+        } else if (is_support_filament_any_type(support_val)) {
+            // "Any (Type)": add all filaments of the matching type as potential extruders
+            std::string type_name = support_filament_any_type_name(support_val);
+            for (unsigned int i = 0; i < num_extruders; ++i) {
+                if (i < m_config.filament_type.values.size() &&
+                    m_config.filament_type.values[i] == type_name)
+                    extruders.emplace_back(i);
+            }
+        } else {
+            unsigned int i = (unsigned int)support_val - 1;
+            extruders.emplace_back((i >= num_extruders) ? 0 : i);
+        }
+    };
+
     for (PrintObject *object : m_objects) {
         if (object->has_support_material()) {
-        	assert(object->config().support_filament >= 0);
-            if (object->config().support_filament == 0)
-                support_uses_current_extruder = true;
-            else {
-            	unsigned int i = (unsigned int)object->config().support_filament - 1;
-                extruders.emplace_back((i >= num_extruders) ? 0 : i);
-            }
-        	assert(object->config().support_interface_filament >= 0);
-            if (object->config().support_interface_filament == 0)
-                support_uses_current_extruder = true;
-            else {
-            	unsigned int i = (unsigned int)object->config().support_interface_filament - 1;
-                extruders.emplace_back((i >= num_extruders) ? 0 : i);
-            }
+            assert(object->config().support_filament >= 0);
+            add_extruder_for_support_value(object->config().support_filament.value);
+            assert(object->config().support_interface_filament >= 0);
+            add_extruder_for_support_value(object->config().support_interface_filament.value);
         }
     }
 
@@ -1114,12 +1121,20 @@ StringObjectException Print::check_multi_filament_valid(const Print& print)
 
             if (print_object->has_support_material()) { // extruder used by supports
                 auto num_extruders                 = (unsigned int) print_config.filament_diameter.size();
-                assert(print_object->config().support_filament >= 0);
-                if (print_object->config().support_filament >= 1 && (unsigned int)print_object->config().support_filament < num_extruders + 1)
-                    obj_used_extruder_ids.insert((unsigned int) print_object->config().support_filament - 1);//0-based extruder id
-                assert(print_object->config().support_interface_filament >= 0);
-                if (print_object->config().support_interface_filament >= 1 && (unsigned int)print_object->config().support_interface_filament < num_extruders + 1)
-                    obj_used_extruder_ids.insert((unsigned int) print_object->config().support_interface_filament - 1);
+                for (int support_val : { print_object->config().support_filament.value,
+                                          print_object->config().support_interface_filament.value }) {
+                    if (is_support_filament_any_type(support_val)) {
+                        // "Any (Type)": add all filaments of the matching type
+                        std::string type_name = support_filament_any_type_name(support_val);
+                        for (unsigned int i = 0; i < num_extruders; ++i) {
+                            if (i < print_config.filament_type.values.size() &&
+                                print_config.filament_type.values[i] == type_name)
+                                obj_used_extruder_ids.insert(i);
+                        }
+                    } else if (support_val >= 1 && (unsigned int)support_val < num_extruders + 1) {
+                        obj_used_extruder_ids.insert((unsigned int)support_val - 1);
+                    }
+                }
             }
             std::vector<std::string> filament_types;
             filament_types.reserve(obj_used_extruder_ids.size());
@@ -1193,6 +1208,26 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
 
     if (extruders.empty())
         return { L("No extrusions under current settings.") };
+
+    // Validate "Any (Type)" support filament selections: the matching type must exist in the project.
+    for (const PrintObject *object : m_objects) {
+        for (int support_val : { object->config().support_filament.value,
+                                  object->config().support_interface_filament.value }) {
+            if (is_support_filament_any_type(support_val)) {
+                std::string type_name = support_filament_any_type_name(support_val);
+                if (type_name.empty())
+                    return { L("Invalid support filament type selection.") };
+                // Check that at least one filament of this type exists in the project
+                bool found = false;
+                for (const auto &ft : m_config.filament_type.values) {
+                    if (ft == type_name) { found = true; break; }
+                }
+                if (!found)
+                    return { format(L("Support filament is set to \"Any %1%\" but no %1% filament is available in the project. "
+                                      "Please add a %1% filament or select a different support material."), type_name) };
+            }
+        }
+    }
 
     if (nozzles < 2 && extruders.size() > 1) {
         auto ret = check_multi_filament_valid(*this);
@@ -1564,9 +1599,10 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
             double first_layer_min_nozzle_diameter;
             if (object->has_raft()) {
                 // if we have raft layers, only support material extruder is used on first layer
-                size_t first_layer_extruder = object->config().raft_layers == 1
-                    ? object->config().support_interface_filament-1
-                    : object->config().support_filament-1;
+                int raft_filament_val = object->config().raft_layers == 1
+                    ? object->config().support_interface_filament.value
+                    : object->config().support_filament.value;
+                size_t first_layer_extruder = resolve_support_filament_for_nozzle(raft_filament_val, m_config);
                 first_layer_min_nozzle_diameter = (first_layer_extruder == size_t(-1)) ?
                     min_nozzle_diameter :
                     m_config.nozzle_diameter.get_at(first_layer_extruder);
@@ -1913,7 +1949,7 @@ Flow Print::skirt_flow() const
         frPerimeter,
         // Flow::new_from_config_width takes care of the percent to value substitution
 		width,
-		(float)m_config.nozzle_diameter.get_at(m_objects.front()->config().support_filament-1),
+		(float)m_config.nozzle_diameter.get_at(resolve_support_filament_for_nozzle(m_objects.front()->config().support_filament.value, m_config)),
 		(float)this->skirt_first_layer_height());
 }
 

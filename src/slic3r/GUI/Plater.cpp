@@ -760,6 +760,14 @@ std::vector<int> get_min_flush_volumes(const DynamicPrintConfig &full_config, si
 struct DynamicFilamentList : DynamicList
 {
     std::vector<std::pair<wxString, wxBitmap *>> items;
+    // "Any (Type)" entries appended after normal filaments.
+    // Each entry is {type_name, config_value} where config_value uses the stable
+    // MaterialType::all() index encoding (SUPPORT_FILAMENT_ANY_TYPE_BASE + material_type_index).
+    struct AnyTypeEntry {
+        std::string type_name;
+        int         config_value; // SUPPORT_FILAMENT_ANY_TYPE_BASE + index in MaterialType::all()
+    };
+    std::vector<AnyTypeEntry> any_type_entries;
 
     void apply_on(Choice *c) override
     {
@@ -772,6 +780,11 @@ struct DynamicFilamentList : DynamicList
         cb->Append(_L("Default"));
         for (auto i : items) {
             cb->Append(i.first, i.second ? *i.second : wxNullBitmap);
+        }
+        // Append "Any (Type)" entries after the regular filament list
+        for (const auto &entry : any_type_entries) {
+            wxString label = wxString::Format(_L("Any %s"), wxString::FromUTF8(entry.type_name));
+            cb->Append(label);
         }
 
         if (old_index >= 0 && (unsigned int) old_index < cb->GetCount()) {
@@ -790,6 +803,18 @@ struct DynamicFilamentList : DynamicList
     }
     wxString get_value(int index) override
     {
+        // index 0 = "Default" (value 0)
+        // index 1..N = filament 1..N (value = index)
+        // index N+1..N+T = "Any (Type)" entries (value from any_type_entries[].config_value)
+        int num_filaments = (int)items.size();
+        if (index > num_filaments) {
+            int any_idx = index - num_filaments - 1;
+            if (any_idx >= 0 && any_idx < (int)any_type_entries.size()) {
+                wxString str;
+                str << any_type_entries[any_idx].config_value;
+                return str;
+            }
+        }
         wxString str;
         str << index;
         return str;
@@ -797,21 +822,55 @@ struct DynamicFilamentList : DynamicList
     int index_of(wxString value) override
     {
         long n = 0;
-        return (value.ToLong(&n) && n <= items.size()) ? int(n) : -1;
+        if (!value.ToLong(&n))
+            return -1;
+        if (Slic3r::is_support_filament_any_type((int)n)) {
+            // Find which any_type_entry has this config value
+            for (int i = 0; i < (int)any_type_entries.size(); ++i) {
+                if (any_type_entries[i].config_value == (int)n)
+                    return (int)items.size() + 1 + i;
+            }
+            // Value is a valid "Any (Type)" but the type isn't in the current dropdown.
+            // This can happen when a saved preset references a type not in current filaments.
+            // Return -1 to indicate not found; the dropdown will reset to "Default".
+            // To preserve the selection, we'd need to add it dynamically.
+            // For now, add it on the fly if the type name is valid.
+            std::string type_name = Slic3r::support_filament_any_type_name((int)n);
+            if (!type_name.empty()) {
+                any_type_entries.push_back({type_name, (int)n});
+                return (int)items.size() + (int)any_type_entries.size();
+            }
+            return -1;
+        }
+        return (n >= 0 && n <= (long)items.size()) ? int(n) : -1;
     }
     void update(bool force = false)
     {
         items.clear();
+        any_type_entries.clear();
         if (!force && m_choices.empty())
             return;
         auto icons = get_extruder_color_icons(true);
         auto presets = wxGetApp().preset_bundle->filament_presets;
+        // Collect unique filament types for "Any (Type)" entries
+        std::vector<std::string> unique_types;
         for (int i = 0; i < presets.size(); ++i) {
             wxString str;
             std::string type;
             wxGetApp().preset_bundle->filaments.find_preset(presets[i])->get_filament_type(type);
             str << type;
             items.push_back({str, i < icons.size() ? icons[i] : nullptr});
+            if (std::find(unique_types.begin(), unique_types.end(), type) == unique_types.end())
+                unique_types.push_back(type);
+        }
+        // Only add "Any (Type)" entries when there are multiple filaments
+        // (single-filament setups don't benefit from dynamic selection)
+        if (presets.size() > 1) {
+            for (const auto &type_name : unique_types) {
+                int config_val = Slic3r::support_filament_any_type_value_for_name(type_name);
+                if (config_val >= 0)
+                    any_type_entries.push_back({type_name, config_val});
+            }
         }
         DynamicList::update();
     }

@@ -30,6 +30,53 @@
 
 namespace Slic3r {
 
+// "Any (Type)" support filament selection.
+// When support_filament is set to SUPPORT_FILAMENT_ANY_TYPE_BASE + material_type_index,
+// the slicer dynamically picks the lowest-cost filament of that type
+// already in use on each layer, reducing unnecessary filament changes.
+// material_type_index is the position in MaterialType::all() - a fixed, stable list
+// of all known material types, ensuring the saved value is persistent across sessions
+// regardless of which filaments are currently in the project.
+constexpr int SUPPORT_FILAMENT_ANY_TYPE_BASE = 1000;
+
+// Returns true if the support_filament value represents an "Any (Type)" selection.
+inline bool is_support_filament_any_type(int value) {
+    return value >= SUPPORT_FILAMENT_ANY_TYPE_BASE;
+}
+
+// Extracts the material type index (into MaterialType::all()) from an "Any (Type)" value.
+inline int support_filament_any_type_index(int value) {
+    return value - SUPPORT_FILAMENT_ANY_TYPE_BASE;
+}
+
+// Encodes a material type index (into MaterialType::all()) into an "Any (Type)" value.
+inline int support_filament_any_type_value(int material_type_index) {
+    return SUPPORT_FILAMENT_ANY_TYPE_BASE + material_type_index;
+}
+
+// Forward declarations for GCodeConfig (defined later in this header).
+class GCodeConfig;
+
+// Get the material type name for an "Any (Type)" support_filament value.
+// Returns empty string if the value is not an "Any (Type)" value or the index is out of range.
+std::string support_filament_any_type_name(int support_filament_value);
+
+// Get the "Any (Type)" support_filament value for a given material type name.
+// Returns -1 if the type name is not found in MaterialType::all().
+int support_filament_any_type_value_for_name(const std::string &type_name);
+
+// Resolve an "Any (Type)" support_filament value to a concrete 0-based extruder ID
+// for a given layer. Returns (unsigned int)-1 if no filament of the matching type exists.
+unsigned int resolve_any_type_support_filament(
+    int                                  support_filament_value,
+    const GCodeConfig                   &config,
+    const std::vector<unsigned int>     &layer_extruders);
+
+// Resolve a support_filament value to a 0-based extruder index for nozzle diameter lookups.
+// Handles "Any (Type)" by resolving to the cheapest matching filament overall (no layer context).
+// For value 0 ("Default"), returns 0. For normal values, returns value-1.
+unsigned int resolve_support_filament_for_nozzle(int support_filament_value, const GCodeConfig &config);
+
 enum GCodeFlavor : unsigned char {
     gcfMarlinLegacy, gcfKlipper, gcfRepRapFirmware, gcfMarlinFirmware, gcfRepRapSprinter, gcfRepetier, gcfTeacup, gcfMakerWare, gcfSailfish, gcfMach3, gcfMachinekit,
     gcfSmoothie, gcfNoExtrusion
