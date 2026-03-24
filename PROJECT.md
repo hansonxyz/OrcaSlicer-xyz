@@ -108,10 +108,16 @@ Remove-Item -Recurse -Force $emptyDir -ErrorAction SilentlyContinue
 
 ### Phase 2: Slicer (after deps, faster for incremental rebuilds)
 ```
-cd build
-cmake .. -G "Visual Studio 17 2022" -A x64 -DORCA_TOOLS=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build . --config Release --target ALL_BUILD -- -m
+cmake -S <repo_root> -B <repo_root>/build -G "Visual Studio 17 2022" -A x64 -DORCA_TOOLS=ON -DCMAKE_BUILD_TYPE=Release -DDEP_BUILD_DIR=<repo_root>/deps/build
+cmake --build build --config Release --target ALL_BUILD -- -m
 ```
+**Must use `-S`/`-B` flags** for the configure step. Passing the source dir as a positional argument causes CMake to generate in-source instead of in `build/`.
+
+**Must pass `-DDEP_BUILD_DIR`** pointing to `deps/build`. Without it, CMake infers the wrong path and can't find the built dependencies.
+
+The slicer build **can** use `-- -m` (parallel) safely, unlike deps.
+
+Output binary: `build/src/Release/orca-slicer.exe`
 
 The `build_release_vs2022.bat` script automates both phases but doesn't work well from Git Bash - use the PowerShell approach instead.
 
