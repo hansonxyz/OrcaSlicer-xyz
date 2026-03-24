@@ -1,6 +1,7 @@
 #include <vector>
 #include <iostream>
 #include <fstream>
+#include <string>
 #include <cstdlib>
 
 
@@ -69,39 +70,40 @@ unsigned char *utf8_check(unsigned char *s)
 }
 
 
-int main(int argc, char const *argv[])
+// Check a single file for valid UTF-8 encoding and absence of BOM.
+// Returns true on success, false on failure (with error printed to stderr).
+bool check_file(const char* target, const char* filename)
 {
-    if (argc != 3) {
-        std::cerr << "Usage: " << argv[0] << " <program/library> <file>" << std::endl;
-        return -1;
+    std::ifstream file(filename, std::ios::binary | std::ios::ate);
+    if (!file.is_open()) {
+        std::cerr << "\n\tError: Could not open source file: " << filename << "\n"
+            << "\tTarget: " << target << "\n" << std::endl;
+        return false;
     }
 
-    const char* target = argv[1];
-    const char* filename = argv[2];
+    const auto pos = file.tellg();
+    if (pos < 0) {
+        std::cerr << "\n\tError: Could not determine file size: " << filename << "\n"
+            << "\tTarget: " << target << "\n" << std::endl;
+        return false;
+    }
 
-    const auto error_exit = [=](const char* error) {
-        std::cerr << "\n\tError: " << error << ": " << filename << "\n"
-            << "\tTarget: " << target << "\n"
-            << std::endl;
-        std::exit(-2);
-    };
-
-    std::ifstream file(filename, std::ios::binary | std::ios::ate);
-    const auto size = file.tellg();
-
+    const auto size = static_cast<std::streamsize>(pos);
     if (size == 0) {
-        return 0;
+        return true;
     }
 
     file.seekg(0, std::ios::beg);
-    std::vector<char> buffer(size);
+    std::vector<char> buffer(static_cast<size_t>(size));
 
     if (file.read(buffer.data(), size)) {
         buffer.push_back('\0');
 
         // Check UTF-8 validity
         if (utf8_check(reinterpret_cast<unsigned char*>(buffer.data())) != nullptr) {
-            error_exit("Source file does not contain (valid) UTF-8");
+            std::cerr << "\n\tError: Source file does not contain (valid) UTF-8: " << filename << "\n"
+                << "\tTarget: " << target << "\n" << std::endl;
+            return false;
         }
 
         // Check against a BOM mark
@@ -109,11 +111,58 @@ int main(int argc, char const *argv[])
             && buffer[0] == '\xef'
             && buffer[1] == '\xbb'
             && buffer[2] == '\xbf') {
-            error_exit("Source file is valid UTF-8 but contains a BOM mark");
+            std::cerr << "\n\tError: Source file is valid UTF-8 but contains a BOM mark: " << filename << "\n"
+                << "\tTarget: " << target << "\n" << std::endl;
+            return false;
         }
     } else {
-        error_exit("Could not read source file");
+        std::cerr << "\n\tError: Could not read source file: " << filename << "\n"
+            << "\tTarget: " << target << "\n" << std::endl;
+        return false;
     }
 
-    return 0;
+    return true;
+}
+
+
+int main(int argc, char const *argv[])
+{
+    if (argc < 3) {
+        std::cerr << "Usage: " << argv[0] << " <target> <file> [<file> ...]" << std::endl;
+        std::cerr << "       " << argv[0] << " <target> @<response-file>" << std::endl;
+        return -1;
+    }
+
+    const char* target = argv[1];
+    bool all_ok = true;
+
+    for (int i = 2; i < argc; ++i) {
+        std::string arg(argv[i]);
+
+        if (!arg.empty() && arg[0] == '@') {
+            // Response file: read list of filenames from the file
+            std::string rsp_path = arg.substr(1);
+            std::ifstream rsp(rsp_path);
+            if (!rsp.is_open()) {
+                std::cerr << "Error: Could not open response file: " << rsp_path << std::endl;
+                return -1;
+            }
+            std::string line;
+            while (std::getline(rsp, line)) {
+                // Skip empty lines
+                if (line.empty()) continue;
+                // Trim trailing whitespace/CR
+                while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' '))
+                    line.pop_back();
+                if (line.empty()) continue;
+                if (!check_file(target, line.c_str()))
+                    all_ok = false;
+            }
+        } else {
+            if (!check_file(target, arg.c_str()))
+                all_ok = false;
+        }
+    }
+
+    return all_ok ? 0 : -2;
 }
