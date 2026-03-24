@@ -223,9 +223,9 @@ if (MSVC)
            add_compile_options(/MP)
     endif ()
     # /bigobj (Increase Number of Sections in .Obj file)
-    # error C3859: virtual memory range for PCH exceeded; please recompile with a command line option of '-Zm90' or greater
-    # Generate symbols at every build target, even for the release.
-    add_compile_options(-bigobj -Zm520 /Zi)
+    # -Zm520 fixes error C3859 but forces the compiler to pre-allocate that memory for every translation unit.
+    # Combining /Zi with /FS frees up memory pressure across all parallel compile jobs and makes /MP faster.
+    add_compile_options(-bigobj /Zi /FS)
     # Disable STL4007: Many result_type typedefs and all argument_type, first_argument_type, and second_argument_type typedefs are deprecated in C++17.
     #FIXME Remove this line after eigen library adapts to the new C++17 adaptor rules.
     add_compile_options(-D_SILENCE_CXX17_ADAPTOR_TYPEDEFS_DEPRECATION_WARNING)
