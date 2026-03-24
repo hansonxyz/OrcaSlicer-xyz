@@ -4657,14 +4657,34 @@ LayerResult GCode::process_layer(
                 ExtrusionRole   role               = support_layer.support_fills.role();
                 bool            has_support        = role == erMixed || role == erSupportMaterial || role == erSupportTransition;
                 bool            has_interface      = role == erMixed || role == erSupportMaterialInterface;
+                // Resolve support filament values, handling "Any (Type)" dynamic selection.
+                int             support_filament_val  = object.config().support_filament.value;
+                int             interface_filament_val = object.config().support_interface_filament.value;
+                // For "Any (Type)", resolve to the best extruder on this layer.
+                if (is_support_filament_any_type(support_filament_val)) {
+                    std::vector<unsigned int> layer_obj_extruders;
+                    for (unsigned int e : layer_tools.extruders)
+                        layer_obj_extruders.push_back(e); // already 0-based in layer_tools
+                    unsigned int resolved = resolve_any_type_support_filament(
+                        support_filament_val, print.config(), layer_obj_extruders);
+                    support_filament_val = (resolved != (unsigned int)-1) ? (int)resolved + 1 : 0;
+                }
+                if (is_support_filament_any_type(interface_filament_val)) {
+                    std::vector<unsigned int> layer_obj_extruders;
+                    for (unsigned int e : layer_tools.extruders)
+                        layer_obj_extruders.push_back(e);
+                    unsigned int resolved = resolve_any_type_support_filament(
+                        interface_filament_val, print.config(), layer_obj_extruders);
+                    interface_filament_val = (resolved != (unsigned int)-1) ? (int)resolved + 1 : 0;
+                }
                 // Extruder ID of the support base. -1 if "don't care".
-                unsigned int    support_extruder   = object.config().support_filament.value - 1;
+                unsigned int    support_extruder   = support_filament_val - 1;
                 // Shall the support be printed with the active extruder, preferably with non-soluble, to avoid tool changes?
-                bool            support_dontcare   = object.config().support_filament.value == 0;
+                bool            support_dontcare   = support_filament_val == 0;
                 // Extruder ID of the support interface. -1 if "don't care".
-                unsigned int    interface_extruder = object.config().support_interface_filament.value - 1;
+                unsigned int    interface_extruder = interface_filament_val - 1;
                 // Shall the support interface be printed with the active extruder, preferably with non-soluble, to avoid tool changes?
-                bool            interface_dontcare = object.config().support_interface_filament.value == 0;
+                bool            interface_dontcare = interface_filament_val == 0;
 
                 // BBS: apply wiping overridden extruders
                 WipingExtrusions& wiping_extrusions = const_cast<LayerTools&>(layer_tools).wiping_extrusions();

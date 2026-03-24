@@ -90,6 +90,91 @@ size_t get_extruder_index(const GCodeConfig& config, unsigned int filament_id)
     return 0;
 }
 
+// Get the material type name for an "Any (Type)" support_filament value.
+std::string support_filament_any_type_name(int support_filament_value)
+{
+    if (!is_support_filament_any_type(support_filament_value))
+        return {};
+    int idx = support_filament_any_type_index(support_filament_value);
+    const auto &types = MaterialType::all();
+    if (idx < 0 || idx >= (int)types.size())
+        return {};
+    return types[idx].name;
+}
+
+// Get the "Any (Type)" support_filament value for a given material type name.
+int support_filament_any_type_value_for_name(const std::string &type_name)
+{
+    const auto &types = MaterialType::all();
+    for (int i = 0; i < (int)types.size(); ++i) {
+        if (types[i].name == type_name)
+            return support_filament_any_type_value(i);
+    }
+    return -1;
+}
+
+// Resolve an "Any (Type)" support_filament value to a concrete 0-based extruder ID
+// for a given layer. Picks the lowest-cost filament of the matching type that is
+// already active on this layer. If none are active, falls back to the cheapest
+// filament of that type overall.
+// layer_extruders: 0-based extruder IDs already in use on this layer (for object material).
+// Returns 0-based extruder ID, or (unsigned int)-1 if no filament of matching type exists.
+unsigned int resolve_any_type_support_filament(
+    int                                  support_filament_value,
+    const GCodeConfig                   &config,
+    const std::vector<unsigned int>     &layer_extruders)
+{
+    if (!is_support_filament_any_type(support_filament_value))
+        return 0;
+
+    std::string target_type = support_filament_any_type_name(support_filament_value);
+    if (target_type.empty())
+        return (unsigned int)-1;
+
+    const auto &filament_types = config.filament_type.values;
+    const auto &filament_costs = config.filament_cost.values;
+    unsigned int num_filaments = (unsigned int)filament_types.size();
+
+    // First pass: find the cheapest filament of matching type among layer_extruders.
+    unsigned int best_extruder = (unsigned int)-1;
+    double best_cost = std::numeric_limits<double>::max();
+    for (unsigned int eid : layer_extruders) {
+        if (eid >= num_filaments) continue;
+        if (filament_types[eid] == target_type) {
+            double cost = (eid < filament_costs.size()) ? filament_costs[eid] : 0.0;
+            if (cost < best_cost || best_extruder == (unsigned int)-1) {
+                best_cost = cost;
+                best_extruder = eid;
+            }
+        }
+    }
+    if (best_extruder != (unsigned int)-1)
+        return best_extruder;
+
+    // Fallback: cheapest filament of matching type overall.
+    for (unsigned int i = 0; i < num_filaments; ++i) {
+        if (filament_types[i] == target_type) {
+            double cost = (i < filament_costs.size()) ? filament_costs[i] : 0.0;
+            if (cost < best_cost || best_extruder == (unsigned int)-1) {
+                best_cost = cost;
+                best_extruder = i;
+            }
+        }
+    }
+    return best_extruder; // may be (unsigned int)-1 if no filament of this type exists
+}
+
+unsigned int resolve_support_filament_for_nozzle(int support_filament_value, const GCodeConfig &config)
+{
+    if (support_filament_value == 0)
+        return 0;
+    if (is_support_filament_any_type(support_filament_value)) {
+        unsigned int resolved = resolve_any_type_support_filament(support_filament_value, config, {});
+        return (resolved != (unsigned int)-1) ? resolved : 0;
+    }
+    return (unsigned int)(support_filament_value - 1);
+}
+
 static t_config_enum_names enum_names_from_keys_map(const t_config_enum_values &enum_keys_map)
 {
     t_config_enum_names names;
@@ -5688,7 +5773,9 @@ void PrintConfigDef::init_fff_params()
     def->gui_type = ConfigOptionDef::GUIType::i_enum_open;
     def->label    = L("Support/raft base");
     def->category = L("Support");
-    def->tooltip = L("Filament to print support base and raft. \"Default\" means no specific filament for support and current filament is used.");
+    def->tooltip = L("Filament to print support base and raft. \"Default\" means no specific filament for support "
+                     "and current filament is used. \"Any (Type)\" options dynamically select the lowest-cost "
+                     "filament of that type already in use on each layer, reducing filament changes.");
     def->min = 0;
     def->mode = comSimple;
     def->set_default_value(new ConfigOptionInt(0));

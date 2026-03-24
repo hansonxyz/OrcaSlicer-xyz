@@ -726,9 +726,15 @@ static void convert_object_to_vertices(const Slic3r::PrintObject& object, const 
                 const Slic3r::PrintObjectConfig& cfg = support_layer->object()->config();
                 for (const Slic3r::ExtrusionEntity* extrusion_entity : support_layer->support_fills.entities) {
                     const bool is_support_material = extrusion_entity->role() == Slic3r::ExtrusionRole::erSupportMaterial;
-                    const size_t extruder_id = is_support_material ?
-                        static_cast<size_t>(std::max(cfg.support_filament.value - 1, 0)) :
-                        static_cast<size_t>(std::max(cfg.support_interface_filament.value - 1, 0));
+                    int sf_val = is_support_material ? cfg.support_filament.value : cfg.support_interface_filament.value;
+                    size_t extruder_id;
+                    if (Slic3r::is_support_filament_any_type(sf_val)) {
+                        // For preview, resolve "Any (Type)" to first matching filament (no layer context here)
+                        unsigned int resolved = Slic3r::resolve_any_type_support_filament(sf_val, support_layer->object()->print()->config(), {});
+                        extruder_id = (resolved != (unsigned int)-1) ? resolved : 0;
+                    } else {
+                        extruder_id = static_cast<size_t>(std::max(sf_val - 1, 0));
+                    }
                     convert_to_vertices(*extrusion_entity, layer_z, layer_id,
                                         extruder_id, object_helper.color_id(layer_z, extruder_id),
                                         is_support_material ? EGCodeExtrusionRole::SupportMaterial : EGCodeExtrusionRole::SupportMaterialInterface,

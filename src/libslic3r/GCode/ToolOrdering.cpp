@@ -741,6 +741,25 @@ void ToolOrdering::collect_extruders(const PrintObject &object, const std::vecto
         }
         unsigned int extruder_support   = object.config().support_filament.value;
         unsigned int extruder_interface = object.config().support_interface_filament.value;
+        // Resolve "Any (Type)" support filament: pick the cheapest matching filament
+        // already on this layer, using object extruders as the candidates.
+        if (is_support_filament_any_type(extruder_support)) {
+            // Collect 0-based object extruder IDs on this layer for resolution
+            std::vector<unsigned int> layer_obj_extruders;
+            for (unsigned int e : layer_tools.extruders)
+                if (e > 0) layer_obj_extruders.push_back(e - 1); // convert 1-based to 0-based
+            unsigned int resolved = resolve_any_type_support_filament(
+                extruder_support, object.print()->config(), layer_obj_extruders);
+            extruder_support = (resolved != (unsigned int)-1) ? resolved + 1 : 0; // back to 1-based, or 0 for dontcare
+        }
+        if (is_support_filament_any_type(extruder_interface)) {
+            std::vector<unsigned int> layer_obj_extruders;
+            for (unsigned int e : layer_tools.extruders)
+                if (e > 0) layer_obj_extruders.push_back(e - 1);
+            unsigned int resolved = resolve_any_type_support_filament(
+                extruder_interface, object.print()->config(), layer_obj_extruders);
+            extruder_interface = (resolved != (unsigned int)-1) ? resolved + 1 : 0;
+        }
         if (has_support) {
             if (extruder_support > 0 || !has_interface || extruder_interface == 0 || layer_tools.has_object)
                 layer_tools.extruders.push_back(extruder_support);

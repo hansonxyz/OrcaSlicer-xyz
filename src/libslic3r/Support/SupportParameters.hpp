@@ -19,9 +19,11 @@ struct SupportParameters {
 	        // Zero z-gap between the overhangs and the support interface.
 	        slicing_params.soluble_interface &&
 	        // Interface extruder soluble.
-	        object_config.support_interface_filament.value > 0 && print_config.filament_soluble.get_at(object_config.support_interface_filament.value - 1) &&
+	        object_config.support_interface_filament.value > 0 && !is_support_filament_any_type(object_config.support_interface_filament.value) &&
+	        print_config.filament_soluble.get_at(object_config.support_interface_filament.value - 1) &&
 	        // Base extruder: Either "print with active extruder" not soluble.
-	        (object_config.support_filament.value == 0 || ! print_config.filament_soluble.get_at(object_config.support_filament.value - 1));
+	        (object_config.support_filament.value == 0 || is_support_filament_any_type(object_config.support_filament.value) ||
+	         ! print_config.filament_soluble.get_at(object_config.support_filament.value - 1));
 
 	    {
 	        this->num_top_interface_layers    = std::max(0, object_config.support_interface_top_layers.value);
@@ -158,7 +160,7 @@ struct SupportParameters {
             assert(slicing_params.raft_layers() == 0);
         }
 
-	    const auto     nozzle_diameter = print_config.nozzle_diameter.get_at(object_config.support_interface_filament - 1);
+	    const auto     nozzle_diameter = print_config.nozzle_diameter.get_at(resolve_support_filament_for_nozzle(object_config.support_interface_filament.value, print_config));
         const coordf_t extrusion_width = object_config.line_width.get_abs_value(nozzle_diameter);
         support_extrusion_width        = object_config.support_line_width.get_abs_value(nozzle_diameter);
         support_extrusion_width        = support_extrusion_width > 0 ? support_extrusion_width : extrusion_width;

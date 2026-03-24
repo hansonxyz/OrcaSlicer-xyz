@@ -487,7 +487,8 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig* config, con
         std::string key = std::string(keys[i]);
         auto* opt = dynamic_cast<ConfigOptionInt*>(config->option(key, false));
         if (opt != nullptr) {
-            if (opt->getInt() > filament_cnt) {
+            // Allow "Any (Type)" sentinel values (>= SUPPORT_FILAMENT_ANY_TYPE_BASE) to pass validation
+            if (opt->getInt() > filament_cnt && !Slic3r::is_support_filament_any_type(opt->getInt())) {
                 DynamicPrintConfig new_conf = *config;
                 const DynamicPrintConfig *conf_temp = wxGetApp().plater()->config();
                 int new_value = 0;
