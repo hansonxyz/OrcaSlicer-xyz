@@ -118,6 +118,11 @@ if (MINGW)
     set_target_properties(OrcaSlicer PROPERTIES PREFIX "")
 endif (MINGW)
 
+# /LTCG on the main OrcaSlicer DLL to prevent linker restart from /GL deps (TBB)
+if (MSVC)
+    target_link_options(OrcaSlicer PRIVATE "$<$<CONFIG:RELEASE>:/LTCG>")
+endif ()
+
 if (NOT WIN32 AND NOT APPLE)
     # Binary name on unix like systems (Linux, Unix)
     set_target_properties(OrcaSlicer PROPERTIES OUTPUT_NAME "orca-slicer")
@@ -170,8 +175,10 @@ if (WIN32)
 
     add_executable(OrcaSlicer_app_gui WIN32 OrcaSlicer_app_msvc.cpp ${CMAKE_CURRENT_BINARY_DIR}/OrcaSlicer.rc)
     # Generate debug symbols even in release mode.
+    # /LTCG on the final executable only: prevents linker restart when TBB (compiled
+    # with /GL) is linked, without disabling incremental linking for library targets.
     if(MSVC)
-        target_link_options(OrcaSlicer_app_gui PUBLIC "$<$<CONFIG:RELEASE>:/DEBUG>")
+        target_link_options(OrcaSlicer_app_gui PUBLIC "$<$<CONFIG:RELEASE>:/DEBUG>" "$<$<CONFIG:RELEASE>:/LTCG>")
     endif()
     target_compile_definitions(OrcaSlicer_app_gui PRIVATE -DSLIC3R_WRAPPER_NOCONSOLE)
     add_dependencies(OrcaSlicer_app_gui OrcaSlicer)

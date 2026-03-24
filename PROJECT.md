@@ -21,7 +21,8 @@ This file documents the local development environment, build tooling, and conven
 - **Windows SDK:** 10.0.26100.0
 - **Strawberry Perl** - required by OpenSSL dep build. Location: `C:\Strawberry\perl\bin\`
 - **NASM** - required by OpenSSL dep build. Location: `C:\Program Files\NASM\`
-- Both installed via choco: `choco install nasm strawberryperl -y`
+- **Ninja** - fast build system used for slicer builds (deps still use VS generator). Location: in PATH via choco.
+- Perl, NASM, Ninja installed via choco: `choco install nasm strawberryperl ninja -y`
 
 ## Shell & Script Execution Rules
 
@@ -107,17 +108,25 @@ Remove-Item -Recurse -Force $emptyDir -ErrorAction SilentlyContinue
 ```
 
 ### Phase 2: Slicer (after deps, faster for incremental rebuilds)
+
+Uses **Ninja** generator for faster incremental builds. Requires vcvars64 environment sourced first.
+
 ```
-cmake -S <repo_root> -B <repo_root>/build -G "Visual Studio 17 2022" -A x64 -DORCA_TOOLS=ON -DCMAKE_BUILD_TYPE=Release -DDEP_BUILD_DIR=<repo_root>/deps/build
-cmake --build build --config Release --target ALL_BUILD -- -m
+# Source VS environment (needed for Ninja to find cl.exe)
+# In PowerShell: source vcvars64.bat via cmd wrapper (see build scripts)
+cmake -S <repo_root> -B <repo_root>/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DORCA_TOOLS=ON -DDEP_BUILD_DIR=<repo_root>/deps/build
+cmake --build build --config Release
 ```
+
 **Must use `-S`/`-B` flags** for the configure step. Passing the source dir as a positional argument causes CMake to generate in-source instead of in `build/`.
 
 **Must pass `-DDEP_BUILD_DIR`** pointing to `deps/build`. Without it, CMake infers the wrong path and can't find the built dependencies.
 
-The slicer build **can** use `-- -m` (parallel) safely, unlike deps.
+**Ninja vs Visual Studio generator:** Ninja has much faster incremental build detection (checks timestamps directly instead of going through MSBuild's project system). The deps build still uses the VS generator because OpenSSL's build system depends on nmake/msbuild internally.
 
-Output binary: `build/src/Release/orca-slicer.exe`
+**Selective /LTCG:** The final link targets (OrcaSlicer, OrcaSlicer_app_gui) use `/LTCG` in Release mode to prevent linker restarts from TBB's `/GL`-compiled objects. This is applied only to these targets, not globally, so incremental linking is preserved for library targets during development.
+
+Output binary: `build/src/orca-slicer.exe` (Ninja) or `build/src/Release/orca-slicer.exe` (VS generator)
 
 The `build_release_vs2022.bat` script automates both phases but doesn't work well from Git Bash - use the PowerShell approach instead.
 
