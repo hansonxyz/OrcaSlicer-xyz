@@ -89,4 +89,25 @@ Invoke-IdlePriority -Exe "cmake" -ArgString "-S `"$srcPath`" -B `"$buildDir`" -G
 Write-Host "=== Building slicer ==="
 Invoke-IdlePriority -Exe "cmake" -ArgString '--build . --config Release' -WorkDir $buildDir
 
+Write-Host "=== Installing slicer ==="
+Invoke-IdlePriority -Exe "cmake" -ArgString '--build . --target install --config Release' -WorkDir $buildDir
+
+# Copy dependency DLLs that the install target misses
+$installDir = "$buildDir\OrcaSlicer"
+$depBinDir = "$depPath\OrcaSlicer_dep\usr\local\bin"
+if (Test-Path $depBinDir) {
+    Write-Host "Copying dependency DLLs..."
+    Copy-Item "$depBinDir\*.dll" $installDir -Force -ErrorAction SilentlyContinue
+    if (Test-Path "$depBinDir\occt") {
+        Copy-Item "$depBinDir\occt\*.dll" $installDir -Force -ErrorAction SilentlyContinue
+    }
+}
+# WebView2Loader.dll lives in the deps source tree, not in the dep build output
+$webview2Dll = "$WP\deps\WebView2\lib\win-x64\WebView2Loader.dll"
+if (Test-Path $webview2Dll) {
+    Write-Host "Copying WebView2Loader.dll..."
+    Copy-Item $webview2Dll $installDir -Force
+}
+
 Write-Host "=== FULL BUILD COMPLETE ==="
+Write-Host "Run: $installDir\orca-slicer.exe"
