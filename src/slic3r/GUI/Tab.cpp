@@ -5908,6 +5908,28 @@ bool Tab::select_preset(
         	       on_page                                ? PresetSelectCompatibleType::Never  :
         	       show_incompatible_presets              ? PresetSelectCompatibleType::OnlyIfWasCompatible : PresetSelectCompatibleType::Always;
         };
+        // xyz fork: Save filament info before printer switch for color/count preservation
+        struct SavedFilamentInfo {
+            std::string type;   // e.g., "PLA", "PETG"
+            std::string colour; // e.g., "#FF0000"
+        };
+        std::vector<SavedFilamentInfo> saved_filaments;
+        if (printer_tab) {
+            auto *project_colours = m_preset_bundle->project_config.option<ConfigOptionStrings>("filament_colour", false);
+            for (size_t idx = 0; idx < m_preset_bundle->filament_presets.size(); ++idx) {
+                SavedFilamentInfo info;
+                Preset *preset = m_preset_bundle->filaments.find_preset(m_preset_bundle->filament_presets[idx], false);
+                if (preset) {
+                    auto *type_opt = preset->config.option<ConfigOptionStrings>("filament_type");
+                    if (type_opt && !type_opt->values.empty())
+                        info.type = type_opt->values[0];
+                }
+                if (project_colours && idx < project_colours->values.size())
+                    info.colour = project_colours->values[idx];
+                saved_filaments.push_back(info);
+            }
+        }
+
         if (current_dirty || delete_current || print_tab || printer_tab)
             m_preset_bundle->update_compatible(
             	update_compatible_type(technology_changed, print_tab,   (print_tab ? this : wxGetApp().get_tab(Preset::TYPE_PRINT))->m_show_incompatible_presets),
@@ -5941,6 +5963,81 @@ bool Tab::select_preset(
             m_preset_bundle->update_selections(*wxGetApp().app_config);
             wxGetApp().plater()->sidebar().on_filament_count_change(m_preset_bundle->filament_presets.size());
         }
+
+        // xyz fork: Restore filament count, types, and colors after printer switch
+        if (printer_tab && !saved_filaments.empty()) {
+            try {
+                size_t old_count = saved_filaments.size();
+                size_t new_count = m_preset_bundle->filament_presets.size();
+
+                // Ensure at least as many filament slots as the original project
+                if (new_count < old_count) {
+                    std::string fill_preset = m_preset_bundle->filament_presets.empty()
+                        ? m_preset_bundle->filaments.first_compatible().name
+                        : m_preset_bundle->filament_presets.back();
+                    m_preset_bundle->set_num_filaments((unsigned int)old_count, std::string());
+                    // Fill new slots with the compatible preset
+                    for (size_t idx = new_count; idx < old_count; ++idx)
+                        m_preset_bundle->filament_presets[idx] = fill_preset;
+                    new_count = old_count;
+                }
+
+                // For each slot, try to find a compatible filament matching the original type
+                // First, find one compatible preset per type to avoid repeated iteration
+                std::map<std::string, std::string> type_to_preset;
+                for (auto it = m_preset_bundle->filaments.begin(); it != m_preset_bundle->filaments.end(); ++it) {
+                    if (!it->is_compatible || !it->is_visible)
+                        continue;
+                    const auto *type_opt = it->config.option<ConfigOptionStrings>("filament_type");
+                    if (type_opt && !type_opt->values.empty()) {
+                        std::string ft = type_opt->values[0];
+                        if (type_to_preset.find(ft) == type_to_preset.end())
+                            type_to_preset[ft] = it->name;
+                    }
+                }
+
+                for (size_t idx = 0; idx < old_count && idx < new_count; ++idx) {
+                    if (saved_filaments[idx].type.empty())
+                        continue;
+                    auto it = type_to_preset.find(saved_filaments[idx].type);
+                    if (it != type_to_preset.end())
+                        m_preset_bundle->filament_presets[idx] = it->second;
+                }
+
+                // Restore colors at all levels: project config, preset config, and multi-color
+                auto *project_colours = m_preset_bundle->project_config.option<ConfigOptionStrings>("filament_colour", true);
+                if (project_colours) {
+                    project_colours->values.resize(new_count, "#26A69A");
+                    for (size_t idx = 0; idx < old_count && idx < new_count; ++idx) {
+                        if (!saved_filaments[idx].colour.empty())
+                            project_colours->values[idx] = saved_filaments[idx].colour;
+                    }
+                }
+                // Also set the color in each filament preset's own config
+                for (size_t idx = 0; idx < old_count && idx < new_count; ++idx) {
+                    if (saved_filaments[idx].colour.empty())
+                        continue;
+                    Preset *preset = m_preset_bundle->filaments.find_preset(m_preset_bundle->filament_presets[idx], false);
+                    if (preset) {
+                        auto *opt = preset->config.option<ConfigOptionStrings>("filament_colour", true);
+                        if (opt && !opt->values.empty())
+                            opt->values[0] = saved_filaments[idx].colour;
+                    }
+                }
+                // Sync the multi-colour array too
+                auto *project_multi_colours = m_preset_bundle->project_config.option<ConfigOptionStrings>("filament_multi_colour", false);
+                if (project_multi_colours) {
+                    project_multi_colours->values.resize(new_count, "#26A69A");
+                    for (size_t idx = 0; idx < old_count && idx < new_count; ++idx) {
+                        if (!saved_filaments[idx].colour.empty())
+                            project_multi_colours->values[idx] = saved_filaments[idx].colour;
+                    }
+                }
+            } catch (const std::exception &e) {
+                BOOST_LOG_TRIVIAL(error) << "xyz fork: Error restoring filament info after printer switch: " << e.what();
+            }
+        }
+
         load_current_preset();
 
 
