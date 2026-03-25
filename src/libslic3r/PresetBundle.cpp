@@ -202,7 +202,9 @@ DynamicPrintConfig PresetBundle::construct_full_config(
         std::string key = std::string(keys[i]);
         auto       *opt = dynamic_cast<ConfigOptionInt *>(out.option(key, false));
         assert(opt != nullptr);
-        opt->value = boost::algorithm::clamp<int>(opt->value, 0, int(num_filaments));
+        // Allow "Any (Type)" sentinel values to pass through unclamped
+        if (!is_support_filament_any_type(opt->value))
+            opt->value = boost::algorithm::clamp<int>(opt->value, 0, int(num_filaments));
     }
 
     std::vector<std::string> filamnet_preset_names;
@@ -2735,10 +2737,12 @@ unsigned int PresetBundle::sync_ams_list(std::vector<std::pair<DynamicPrintConfi
         auto& print_config = this->prints.get_edited_preset().config;
         auto  support_filament_opt = print_config.option<ConfigOptionInt>("support_filament");
         auto support_interface_filament_opt = print_config.option<ConfigOptionInt>("support_interface_filament");
-        if (support_filament_opt->value > filament_color_type->values.size())
+        if (support_filament_opt->value > (int)filament_color_type->values.size()
+            && !is_support_filament_any_type(support_filament_opt->value))
             support_filament_opt->value = 0;
 
-        if (support_interface_filament_opt->value > filament_color_type->values.size())
+        if (support_interface_filament_opt->value > (int)filament_color_type->values.size()
+            && !is_support_filament_any_type(support_interface_filament_opt->value))
             support_interface_filament_opt->value = 0;
     }
     // Update ams_multi_color_filment
@@ -3276,7 +3280,9 @@ DynamicPrintConfig PresetBundle::full_fff_config(bool apply_extruder, std::optio
         std::string key = std::string(keys[i]);
         auto *opt = dynamic_cast<ConfigOptionInt*>(out.option(key, false));
         assert(opt != nullptr);
-        opt->value = boost::algorithm::clamp<int>(opt->value, 0, int(num_filaments));
+        // Allow "Any (Type)" sentinel values to pass through unclamped
+        if (!is_support_filament_any_type(opt->value))
+            opt->value = boost::algorithm::clamp<int>(opt->value, 0, int(num_filaments));
     }
 
     static const char* keys_1based[] = {"wall_filament", "sparse_infill_filament", "solid_infill_filament"};
