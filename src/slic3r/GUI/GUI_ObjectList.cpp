@@ -699,7 +699,8 @@ void ObjectList::update_filament_values_for_items(const size_t filaments_count)
 
         static const char *keys[] = {"support_filament", "support_interface_filament"};
         for (auto key : keys)
-            if (object->config.has(key) && object->config.opt_int(key) > filaments_count)
+            if (object->config.has(key) && object->config.opt_int(key) > filaments_count
+                && !Slic3r::is_support_filament_any_type(object->config.opt_int(key)))
                 object->config.erase(key);
 
         if (object->volumes.size() > 1) {
@@ -754,10 +755,14 @@ void ObjectList::update_filament_values_for_items_when_delete_filament(const siz
         static const char *keys[] = {"support_filament", "support_interface_filament"};
         for (auto key : keys) {
             if (object->config.has(key)) {
-                if(object->config.opt_int(key) == filament_id + 1)
+                int val = object->config.opt_int(key);
+                // Don't adjust "Any (Type)" sentinel values when filaments are removed
+                if (Slic3r::is_support_filament_any_type(val))
+                    continue;
+                if(val == filament_id + 1)
                     object->config.erase(key);
                 else {
-                    int new_value = object->config.opt_int(key) > filament_id ? object->config.opt_int(key) - 1 : object->config.opt_int(key);
+                    int new_value = val > filament_id ? val - 1 : val;
                     object->config.set_key_value(key, new ConfigOptionInt(new_value));
                 }
             }

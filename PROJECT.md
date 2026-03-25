@@ -126,19 +126,31 @@ cmake --build build --config Release
 
 **Selective /LTCG:** The final link targets (OrcaSlicer, OrcaSlicer_app_gui) use `/LTCG` in Release mode to prevent linker restarts from TBB's `/GL`-compiled objects. This is applied only to these targets, not globally, so incremental linking is preserved for library targets during development.
 
-Output binary: `build/src/orca-slicer.exe` (Ninja) or `build/src/Release/orca-slicer.exe` (VS generator)
+Output binary: `build/src/orca-slicer.exe` (raw build output, missing DLLs)
+
+**Runnable installation:** `build/OrcaSlicer/orca-slicer.exe` (after install step - has all DLLs, resources, and WebView2). Always run from this location, not from `build/src/`.
 
 The `build_release_vs2022.bat` script automates both phases but doesn't work well from Git Bash - use the PowerShell approach instead.
+
+## Build Policy
+
+**Always use incremental builds for development iteration.** Full rebuilds are only needed when:
+- Switching CMake generators (e.g., VS to Ninja)
+- Build directory becomes corrupted
+- First-time setup (deps + initial slicer build)
+
+Never wipe the build directory just to rebuild after code changes. Ninja's incremental builds are fast and reliable.
 
 ## Build Artifacts Directory
 
 `xyz/build_artifacts/` contains reusable build scripts and tooling for this fork. This directory is committed separately so it can be excluded when cherry-picking feature commits for upstream PRs.
 
-- `build_all.ps1` - Full build script (deps + slicer) with idle CPU priority. Run via:
+- `build_all.ps1` - Full build script (deps + slicer + install + DLL copy). Only for first-time setup or generator changes.
+- `build_incremental.ps1` - **Use this for development.** Builds changed files, installs, and copies DLLs.
   ```bash
-  powershell.exe -ExecutionPolicy Bypass -File xyz/build_artifacts/build_all.ps1
+  powershell.exe -ExecutionPolicy Bypass -File xyz/build_artifacts/build_incremental.ps1
   ```
-  The script auto-detects the repo root relative to its own location.
+  Both scripts auto-detect the repo root relative to their own location.
 
 ## Project Goals
 

@@ -263,6 +263,10 @@ int wmain(int argc, wchar_t **argv)
     _wsplitpath(path_to_exe, drive, dir, fname, ext);
     _wmakepath(path_to_exe, drive, dir, nullptr, nullptr);
 
+    // Ensure DLLs are found relative to the exe when launched from Explorer
+    // (ShellExecute may not include the exe directory in the DLL search path)
+    ::SetDllDirectoryW(path_to_exe);
+
 #ifdef SLIC3R_GUI
 // https://wiki.qt.io/Cross_compiling_Mesa_for_Windows
 // http://download.qt.io/development_releases/prebuilt/llvmpipe/windows/
