@@ -129,7 +129,7 @@ body
 
 #BBLIcon
 {
-	height:96px; /*ORCA use bigger icon to fit logo size*/
+	height:77px; /* xyz fork: 20% smaller than original 96px */
 }
 
 #Login2
