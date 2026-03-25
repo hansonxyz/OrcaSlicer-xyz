@@ -351,6 +351,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/ObjColorDialog.hpp
     GUI/ObjectDataViewModel.cpp
     GUI/ObjectDataViewModel.hpp
+    GUI/BasicSettingsConfig.cpp
+    GUI/BasicSettingsConfig.hpp
     GUI/OG_CustomCtrl.cpp
     GUI/OG_CustomCtrl.hpp
     GUI/OpenGLManager.cpp
