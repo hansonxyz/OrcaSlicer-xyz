@@ -161,3 +161,8 @@ See `GOALS.md` for the feature roadmap (3 features + 1 future wishlist item).
 - Feature branch: `xyz` (off `main`)
 - Clean, atomic commits suitable for upstream PR submission
 - One feature at a time, in order listed in GOALS.md
+
+## Git Remotes
+
+- **origin** - upstream OrcaSlicer (SoftFever/OrcaSlicer on GitHub)
+- **internal** - `git@git.internal.hanson.xyz:brianhansonxyz/orcaslicer_mod.git` - our internal repository for this fork. Push feature work here after committing.
