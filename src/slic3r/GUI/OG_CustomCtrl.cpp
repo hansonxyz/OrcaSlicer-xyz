@@ -4,6 +4,7 @@
 #include "Plater.hpp"
 #include "GUI_App.hpp"
 #include "MsgDialog.hpp"
+#include "BasicSettingsConfig.hpp"
 #include "libslic3r/AppConfig.hpp"
 
 #include <wx/utils.h>
@@ -719,7 +720,21 @@ void OG_CustomCtrl::CtrlLine::update_visibility(ConfigOptionMode mode)
     const std::vector<Option>& option_set = og_line.get_options();
 
     const ConfigOptionMode& line_mode = option_set.front().opt.mode;
-    is_visible = og_line.toggle_visible && line_mode <= mode;
+    // When custom basic settings config is active and we're in simple mode,
+    // show only the fields listed in the config file instead of all comSimple fields.
+    const auto &basic_cfg = BasicSettingsConfig::instance();
+    if (basic_cfg.is_active() && mode == comSimple) {
+        bool any_field_listed = false;
+        for (const auto &opt : option_set) {
+            if (basic_cfg.is_field_visible(opt.opt_id)) {
+                any_field_listed = true;
+                break;
+            }
+        }
+        is_visible = og_line.toggle_visible && any_field_listed;
+    } else {
+        is_visible = og_line.toggle_visible && line_mode <= mode;
+    }
 
     if (draw_just_act_buttons)
         return;

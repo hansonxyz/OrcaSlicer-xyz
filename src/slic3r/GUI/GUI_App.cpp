@@ -90,6 +90,7 @@
 #include "slic3r/Config/Snapshot.hpp"
 #include "Preferences.hpp"
 #include "Tab.hpp"
+#include "BasicSettingsConfig.hpp"
 #include "SysInfoDialog.hpp"
 #include "UpdateDialogs.hpp"
 #include "Mouse3DController.hpp"
@@ -355,20 +356,62 @@ public:
         int width = bmp.GetWidth();
 		int height = bmp.GetHeight();
 
-		// Logo
+		// xyz fork: draw text-only SVG layer first, then overlay our raster icon
         BitmapCache bmp_cache;
-        wxBitmap logo_bmp = *bmp_cache.load_svg(is_dark ? "splash_logo_dark" : "splash_logo", width, height);  // use with full width & height
-        memDc.DrawBitmap(logo_bmp, 0, 0, true);
+        std::string logo_path = Slic3r::var("logo-xyz-square.png");
+        bool drew_xyz_logo = false;
+        if (boost::filesystem::exists(logo_path)) {
+            // Draw the text-only SVG (Orca Slicer text without the bird icon)
+            wxBitmap *text_bmp = bmp_cache.load_svg(
+                is_dark ? "splash_logo_dark" : "splash_logo_textonly", width, height);
+            if (text_bmp)
+                memDc.DrawBitmap(*text_bmp, 0, 0, true);
+            // Draw our raster icon where the original SVG icon was
+            // Original SVG: icon at x=169,y=81 size=142 in a 480px canvas
+            wxImage logo_img(wxString::FromUTF8(logo_path), wxBITMAP_TYPE_PNG);
+            if (logo_img.IsOk()) {
+                int icon_size = int(width * 142.0 / 480.0); // match original icon proportion
+                logo_img.Rescale(icon_size, icon_size, wxIMAGE_QUALITY_BICUBIC);
+                int x = int(width * 169.0 / 480.0);
+                int y = int(height * 81.0 / 480.0);
+                memDc.DrawBitmap(wxBitmap(logo_img), x, y, true);
+                drew_xyz_logo = true;
+            }
+        }
+        if (!drew_xyz_logo) {
+            // Fallback to original SVG
+            wxBitmap *logo_bmp = bmp_cache.load_svg(is_dark ? "splash_logo_dark" : "splash_logo", width, height);
+            if (logo_bmp) memDc.DrawBitmap(*logo_bmp, 0, 0, true);
+        }
 
-        // Version
+        // Version - color the "xyz" suffix in #fe7904
         memDc.SetFont(m_constant_text.version_font);
-        memDc.SetTextForeground(StateColor::darkModeColorFor(wxColor(134, 134, 134)));
-        wxSize version_ext = memDc.GetTextExtent(m_constant_text.version);
-        wxRect version_rect(
-			wxPoint(0, int(height * 0.70)),
-			wxPoint(width, int(height * 0.70) + version_ext.GetHeight())
-		);
-        memDc.DrawLabel(m_constant_text.version, version_rect, wxALIGN_CENTER);
+        {
+            wxString ver_str = m_constant_text.version;
+            wxString xyz_suffix = "xyz";
+            int xyz_pos = ver_str.Find(xyz_suffix);
+            int ver_y = int(height * 0.70);
+
+            if (xyz_pos != wxNOT_FOUND) {
+                wxString prefix = ver_str.Left(xyz_pos);
+                wxSize prefix_ext = memDc.GetTextExtent(prefix);
+                wxSize full_ext = memDc.GetTextExtent(ver_str);
+                int start_x = (width - full_ext.GetWidth()) / 2;
+
+                // Draw prefix in gray
+                memDc.SetTextForeground(StateColor::darkModeColorFor(wxColor(134, 134, 134)));
+                memDc.DrawText(prefix, start_x, ver_y);
+
+                // Draw "xyz" in orange
+                memDc.SetTextForeground(wxColor(0xfe, 0x79, 0x04));
+                memDc.DrawText(xyz_suffix, start_x + prefix_ext.GetWidth(), ver_y);
+            } else {
+                memDc.SetTextForeground(StateColor::darkModeColorFor(wxColor(134, 134, 134)));
+                wxSize version_ext = memDc.GetTextExtent(ver_str);
+                wxRect version_rect(wxPoint(0, ver_y), wxPoint(width, ver_y + version_ext.GetHeight()));
+                memDc.DrawLabel(ver_str, version_rect, wxALIGN_CENTER);
+            }
+        }
 
         // Dynamic Text
         m_action_line_y_position = int(height * 0.83);
@@ -2455,6 +2498,9 @@ void GUI_App::init_app_config()
 #else
     set_log_path_and_level(log_filename, 3);
 #endif
+
+    // Load custom basic settings visibility config if present
+    BasicSettingsConfig::instance().load();
 
     BOOST_LOG_TRIVIAL(info) << boost::format("gui mode, Current OrcaSlicer Version %1% build %2%") % SoftFever_VERSION % GIT_COMMIT_HASH;
 
