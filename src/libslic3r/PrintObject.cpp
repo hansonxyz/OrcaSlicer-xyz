@@ -3287,7 +3287,7 @@ void PrintObject::bridge_over_infill()
 
 static void clamp_exturder_to_default(ConfigOptionInt &opt, size_t num_extruders)
 {
-    if (opt.value > (int)num_extruders)
+    if (opt.value > (int)num_extruders && !is_support_filament_any_type(opt.value))
         // assign the default extruder
         opt.value = 1;
 }

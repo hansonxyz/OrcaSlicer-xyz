@@ -831,13 +831,20 @@ struct DynamicFilamentList : DynamicList
                     return (int)items.size() + 1 + i;
             }
             // Value is a valid "Any (Type)" but the type isn't in the current dropdown.
-            // This can happen when a saved preset references a type not in current filaments.
-            // Return -1 to indicate not found; the dropdown will reset to "Default".
-            // To preserve the selection, we'd need to add it dynamically.
-            // For now, add it on the fly if the type name is valid.
+            // This can happen when a saved preset references a type not in current filaments,
+            // or when set_value is called before apply_on has populated the combobox.
+            // Add it on the fly so the selection is preserved.
             std::string type_name = Slic3r::support_filament_any_type_name((int)n);
             if (!type_name.empty()) {
                 any_type_entries.push_back({type_name, (int)n});
+                // Also add it to any active comboboxes so SetSelection will work
+                for (auto *choice : m_choices) {
+                    auto cb = dynamic_cast<ComboBox *>(choice->window);
+                    if (cb) {
+                        wxString label = wxString::Format(_L("Any %s"), wxString::FromUTF8(type_name));
+                        cb->Append(label);
+                    }
+                }
                 return (int)items.size() + (int)any_type_entries.size();
             }
             return -1;
@@ -852,21 +859,23 @@ struct DynamicFilamentList : DynamicList
             return;
         auto icons = get_extruder_color_icons(true);
         auto presets = wxGetApp().preset_bundle->filament_presets;
-        // Collect unique filament types for "Any (Type)" entries
-        std::vector<std::string> unique_types;
+        // Collect filament types and count how many of each
+        std::map<std::string, int> type_counts;
+        std::vector<std::string> type_order; // preserve insertion order
         for (int i = 0; i < presets.size(); ++i) {
             wxString str;
             std::string type;
             wxGetApp().preset_bundle->filaments.find_preset(presets[i])->get_filament_type(type);
             str << type;
             items.push_back({str, i < icons.size() ? icons[i] : nullptr});
-            if (std::find(unique_types.begin(), unique_types.end(), type) == unique_types.end())
-                unique_types.push_back(type);
+            if (type_counts.find(type) == type_counts.end())
+                type_order.push_back(type);
+            type_counts[type]++;
         }
-        // Only add "Any (Type)" entries when there are multiple filaments
-        // (single-filament setups don't benefit from dynamic selection)
-        if (presets.size() > 1) {
-            for (const auto &type_name : unique_types) {
+        // Only add "Any (Type)" for types with 2+ filaments in the project
+        // (no benefit to dynamic selection when there's only one filament of that type)
+        for (const auto &type_name : type_order) {
+            if (type_counts[type_name] >= 2) {
                 int config_val = Slic3r::support_filament_any_type_value_for_name(type_name);
                 if (config_val >= 0)
                     any_type_entries.push_back({type_name, config_val});
@@ -16142,10 +16151,14 @@ void Plater::on_filaments_delete(size_t num_filaments, size_t filament_id, int r
     static const char *keys[] = {"support_filament", "support_interface_filament"};
     for (auto key : keys)
         if (p->config->has(key)) {
-            if(p->config->opt_int(key) == filament_id + 1)
+            int val = p->config->opt_int(key);
+            // Don't adjust "Any (Type)" sentinel values when filaments are removed
+            if (Slic3r::is_support_filament_any_type(val))
+                continue;
+            if(val == filament_id + 1)
                 (*(p->config)).erase(key);
             else {
-                int new_value = p->config->opt_int(key) > filament_id ? p->config->opt_int(key) - 1 : p->config->opt_int(key);
+                int new_value = val > filament_id ? val - 1 : val;
                 (*(p->config)).set_key_value(key, new ConfigOptionInt(new_value));
             }
         }
