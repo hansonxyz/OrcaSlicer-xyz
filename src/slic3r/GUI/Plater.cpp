@@ -859,27 +859,33 @@ struct DynamicFilamentList : DynamicList
             return;
         auto icons = get_extruder_color_icons(true);
         auto presets = wxGetApp().preset_bundle->filament_presets;
-        // Collect filament types and count how many of each
-        std::map<std::string, int> type_counts;
+        // Collect filament types, track which are soluble
+        std::set<std::string> seen_types;
+        std::set<std::string> soluble_types;
         std::vector<std::string> type_order; // preserve insertion order
         for (int i = 0; i < presets.size(); ++i) {
             wxString str;
             std::string type;
-            wxGetApp().preset_bundle->filaments.find_preset(presets[i])->get_filament_type(type);
+            auto *preset = wxGetApp().preset_bundle->filaments.find_preset(presets[i]);
+            preset->get_filament_type(type);
             str << type;
             items.push_back({str, i < icons.size() ? icons[i] : nullptr});
-            if (type_counts.find(type) == type_counts.end())
+            if (seen_types.find(type) == seen_types.end()) {
                 type_order.push_back(type);
-            type_counts[type]++;
-        }
-        // Only add "Any (Type)" for types with 2+ filaments in the project
-        // (no benefit to dynamic selection when there's only one filament of that type)
-        for (const auto &type_name : type_order) {
-            if (type_counts[type_name] >= 2) {
-                int config_val = Slic3r::support_filament_any_type_value_for_name(type_name);
-                if (config_val >= 0)
-                    any_type_entries.push_back({type_name, config_val});
+                seen_types.insert(type);
             }
+            // Check if this filament is soluble
+            auto *soluble_opt = preset->config.option<Slic3r::ConfigOptionBools>("filament_soluble");
+            if (soluble_opt && !soluble_opt->values.empty() && soluble_opt->values[0])
+                soluble_types.insert(type);
+        }
+        // Add "Any (Type)" for each non-soluble type present in the project
+        for (const auto &type_name : type_order) {
+            if (soluble_types.count(type_name))
+                continue; // skip dissolvable filament types
+            int config_val = Slic3r::support_filament_any_type_value_for_name(type_name);
+            if (config_val >= 0)
+                any_type_entries.push_back({type_name, config_val});
         }
         DynamicList::update();
     }
