@@ -166,3 +166,8 @@ See `GOALS.md` for the feature roadmap (3 features + 1 future wishlist item).
 
 - **origin** - upstream OrcaSlicer (SoftFever/OrcaSlicer on GitHub)
 - **internal** - `git@git.internal.hanson.xyz:brianhansonxyz/orcaslicer_mod.git` - our internal repository for this fork. Push feature work here after committing.
+- **Public fork:** https://github.com/hansonxyz/OrcaSlicer-xyz - public GitHub repo for releases and bug reports
+
+## Auto-Update Mechanism
+
+OrcaSlicer checks for updates via GitHub releases API. The update URL is configured in `src/slic3r/GUI/GUI_App.cpp` (search for `orca-update` or `github.com/SoftFever`). For our fork, this must point to `https://github.com/hansonxyz/OrcaSlicer-xyz/releases` so users of the fork get our releases, not upstream's. The update check uses the version string from `version.inc` to compare against release tags.

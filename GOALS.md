@@ -22,12 +22,15 @@ This fork implements targeted enhancements to OrcaSlicer. Each feature is develo
 
 **Problem:** The basic vs. advanced toggle for process settings shows a fixed set of fields. Users may want to customize which fields appear in the basic (non-advanced) view.
 
-**Solution:** Allow an optional external file that defines which process settings appear in the "basic" view. When this file is present at startup, only the fields listed in it are shown when the advanced toggle is off.
+**Solution:** Allow an optional config file that defines which process settings appear in the "basic" view. When this file is present at startup, only the fields listed in it are shown when the advanced toggle is off.
 
 **Key behaviors:**
 - File is optional - if absent, default behavior is unchanged
 - Only affects the process settings panel's basic/advanced toggle
-- File format TBD (likely a simple list of setting keys, one per line)
+- INI-style format with an `[options]` section and a `[fields]` section
+- Fields are listed by their internal config key name, one per line
+- Fields remain in their original category groups (Quality, Strength, Support, etc.); groups with no visible basic fields are hidden automatically
+- Future: `flatten = true` option to show all fields in a single group (not yet implemented)
 
 ## Feature 3: Preserve Filament Colors on Printer Switch
 
@@ -82,6 +85,116 @@ Wishlist item. BBL printer compatibility only (for now). A built-in calibration 
 - The calibration print should label each grid cell so the user can identify which transition it represents
 - Should account for nozzle size and extrusion width when converting mm of height to volume
 - Results populate the existing purge volume matrix in OrcaSlicer's filament settings
+
+## Future Goal: Color-Bounded Bucket Fill in Paint Mode (not yet implementing)
+
+Wishlist item. Add a new paint tool variant: **"Bounded Fill"** (separate tool icon alongside the existing bucket fill). When selected, the bucket fill only floods contiguous triangles that share the **same color** as the clicked triangle, stopping at boundaries where triangles are painted a different color.
+
+**How it works:**
+1. User manually paints a border of triangles in the target color (e.g., red) to define the edge of a region
+2. User selects the Bounded Fill tool, picks the target color (red), and clicks on an unpainted/differently-colored area adjacent to the border
+3. The fill floods all contiguous same-colored triangles outward from the click point, stopping when it hits triangles of a different color (the red border)
+4. Result: the enclosed region is filled with the target color without bleeding through the painted border
+
+**Key behaviors:**
+- Operates on raw triangle adjacency (no curve/angle calculations) - simply floods contiguous triangles matching the source color
+- Separate tool icon from the standard bucket fill (which fills based on angle/overhang thresholds)
+- Respects all existing painted colors as boundaries, not just the target color
+- Should be fast since it's a simple flood fill on the triangle adjacency graph
+
+**Use case:** Precisely painting multi-material regions on complex models where the angle-based bucket fill is too aggressive or imprecise. The user draws the border manually, then fills the interior in one click.
+
+## Future Goal: Display Resolved Values for Percentage-Based Settings (not yet implementing)
+
+Wishlist item. When any setting is expressed as a percentage or relative value (e.g., line widths as "105%" of nozzle diameter, layer heights as percentages), display the calculated absolute value in real units (mm) next to the field in the properties panel. Currently the user sees "105%" but has to mentally calculate what that resolves to for their nozzle size. This applies to line widths, layer heights, and any other percentage-based settings throughout the UI.
+
+## Future Goal: Draw-to-Place Support Blockers and Primitives (not yet implementing)
+
+Wishlist item. Allow placing support blockers (and other cube-like primitives) by drawing directly on the build surface instead of the current workflow of adding a cube modifier and manually positioning/scaling it. The workflow would be:
+1. Enter the tool mode (e.g., "Draw Support Blocker")
+2. The model becomes semi-transparent so the user can see through it to the build plate
+3. Click and drag on the build surface to define a rectangle footprint
+4. Release to set the footprint, then click again (or drag vertically) to set the height
+5. The primitive is placed as a modifier volume with the appropriate type (support blocker, enforcer, etc.)
+
+This is much faster than the current add-cube-then-move-and-scale workflow for simple rectangular blockers.
+
+## Future Goal: Ctrl-Hover Selection Highlight (not yet implementing)
+
+Wishlist item. When holding down the Ctrl key, objects under the mouse cursor get a light green glow/outline to indicate they would be added to the selection on click. This provides visual feedback before clicking, making multi-select operations more precise - the user can see exactly which object will be selected before committing to the click.
+
+## Future Goal (Stretch/Low Priority): Multi-Layer Batched Printing for Multi-Material (not yet implementing)
+
+Wishlist item. **Complex feature, low priority stretch goal.** On single-nozzle multi-material printers (e.g., X1C with AMS), when a material region is spatially isolated from other materials on the plate, print multiple consecutive layers of that region before switching filaments, instead of switching on every layer. This reduces tool changes - each skipped change saves purge material and ~30-60 seconds.
+
+**How it would work:**
+- Identify regions where one material spans multiple layers and is far enough from other material regions that the printhead can safely print 2-3 layers ahead without collision
+- Only batch extra layers when at least one of those extra layers would require a different material (otherwise there's no tool change savings)
+- Travel moves must be adjusted to completely avoid the exclusion region created by the batched structure
+
+**Nozzle clearance model (per-printer setting, two tiers):**
+
+Each printer defines two clearance tiers:
+- **Tier 1 (small clearance):** Max extra height with a minimum XY gap to other materials
+- **Tier 2 (large clearance):** Max extra height with a larger minimum XY gap
+
+**Default values (reasonable for nearly all FDM printers):**
+- Tier 1: 1mm extra height, 5mm XY clearance (the nozzle tip protrudes at least 1mm on virtually every printer)
+- Tier 2: disabled by default (0mm = not used). Users who know their printhead geometry can configure this.
+
+**Per-printer override examples:**
+| Printer | Tier 1 Height | Tier 1 XY Gap | Tier 2 Height | Tier 2 XY Gap |
+|---------|---------------|---------------|---------------|---------------|
+| Default | 1mm           | 5mm           | 0 (disabled)  | 0 (disabled)  |
+| A1M     | 2mm           | 5mm           | 4mm           | 20mm          |
+| X1C     | 1mm           | 5mm           | 3mm           | 18mm          |
+
+**Clearance validation rules:**
+- For each candidate "extra" layer being printed ahead, at every point in the maximum XY footprint those extra layers would occupy, the nearest other material on any of those layers must be at least the tier gap distance away in both X and Y dimensions
+- After printing the batched layers, the printhead is completely banned from entering the exclusion zone defined by the batched structure for the remainder of those layers - it must route around the perimeter using at least the smaller clearance gap if only at the smaller tier height, or the larger clearance gap if at the larger tier height
+- When calculating subsequent layers after creating an exclusion, if any required print move becomes impossible due to the exclusion zone, the slicer must return an error directing the user to file a bug report at https://github.com/hansonxyz/OrcaSlicer-xyz (this would indicate a logic/implementation bug, not a user error)
+
+**Toolhead move modifications (requires research and design):**
+- Filament change sequences (purge, cut, possible re-home) currently assume a flat layer. With batched layers creating raised regions, the toolhead must be raised above the maximum partially-printed layer height before any filament change move, then lowered back after the change completes.
+- This means the feature cannot be used on layers where the extra printed height plus the toolhead change Z clearance would exceed the printer's maximum Z travel. At minimum, the number of extra layers must be limited so the toolhead change Z lift stays within printable dimensions.
+- **Pause/resume handling:** If the user pauses mid-print on a layer with batched regions, the printer's built-in pause may not account for the raised regions and could cause collisions. Options to investigate:
+  - Modify OrcaSlicer's pause/resume to send direct commands that raise the toolhead above the max batched height before pausing, and inform the user that pause/resume must be handled through OrcaSlicer's GUI rather than the printer's controls
+  - Research whether any printers' firmware pause/resume already accounts for variable-height regions (unlikely but worth checking)
+  - Potentially disable the batching feature on layers near user-inserted pause points
+- All of this toolhead move design is part of the development work for this feature and needs thorough investigation before implementation begins.
+
+**Pause/resume research findings (March 2026):**
+- **Bambu Lab:** Pause Z-raise is hardcoded in closed firmware, undocumented, not configurable. Pre-planned pauses (via slicer gcode) can prepend extra G91/G1 Z commands before M400 U1, but firmware still does its own raise. Ad-hoc pauses (touchscreen/network) cannot be modified at all.
+- **Marlin:** Fully controllable at runtime via `M600 Z<mm>`, `M125 Z<mm>`, or `G27 P2`. Default is 20mm (NOZZLE_PARK_POINT).
+- **Klipper:** Fully controllable via customizable PAUSE macro, supports `PAUSE Z=<mm>` runtime parameter. Default ~10mm.
+- **RepRapFirmware (Duet):** Controlled by editable `/sys/pause.g` macro file. Z raise is user-defined.
+- **Smoothieware:** Configured via `after_suspend_gcode` config option. No default Z raise.
+
+**BBL filament change Z clearance (from gcode analysis, March 2026):**
+- All BBL printers (except H2D): `G1 Z{max_layer_z + 3.0}` — **3mm above the highest printed point**
+- H2D/H2D Pro: **8mm** initial raise, 3mm on return (larger head geometry)
+- For batched layers, the filament change gcode must be modified to use `max_batched_z + 3.0` instead of `max_layer_z + 3.0` to clear the raised regions
+- Firmware-controlled pause (button/app) Z-raise is undocumented and reportedly insufficient in some cases — community reports of head collisions during resume on tall prints
+
+**Conclusion for implementation:** Pre-planned filament changes (our primary use case) work on all firmwares since we control the gcode. For ad-hoc pauses, Bambu printers are problematic — recommend warning the user in the UI that manual pause during batched-layer regions risks collisions, and to use slicer-inserted pause-at-layer instead.
+
+**Key challenges:**
+- Printhead collision detection requires 3D clearance modeling of the specific printer's head geometry
+- Travel path planning must account for the height difference between the current print region and adjacent regions
+- Toolhead change sequences (purge, cut, re-home) must be modified to clear raised regions
+- Layer adhesion timing - printing multiple layers of one region while others wait could affect inter-layer bonding if the delay is too long
+- Interaction with prime tower, wipe tower, and purge scheduling
+- Pause/resume safety across both software-initiated and printer-initiated pauses
+
+**Payoff:** On a typical multi-material print with 400 layers and 3+ filaments, even modest batching (2-3 layers) could eliminate 20-30% of tool changes, saving hours of print time and significant purge waste.
+
+## Future Goal: GUI Editor for Basic Settings Field List (not yet implementing)
+
+Wishlist item. Add a dialog accessible from the process settings tab (e.g., a gear icon next to the basic/advanced toggle) that lets the user visually select which fields appear in basic mode. This replaces the need to manually edit `basic_settings.cfg`. The dialog would show a checklist of all available process settings grouped by category, with checkboxes to include/exclude each one from the basic view. Changes would be saved back to `basic_settings.cfg` automatically.
+
+## Future Goal: Custom Fork Branding/Logo (not yet implementing)
+
+Wishlist item. Differentiate the fork visually from stock OrcaSlicer with a modified logo or splash screen, so it's immediately obvious which version is running. TBD on the specific design - could be a subtle color shift, a small badge overlay, or a different splash image.
 
 ## Development Workflow
 1. Each feature gets its own branch off `main`

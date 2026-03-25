@@ -230,8 +230,35 @@ AboutDialog::AboutDialog()
 	bool is_dark = wxGetApp().app_config->get("dark_color_mode") == "1";
 
     // logo
-    m_logo_bitmap = ScalableBitmap(this, is_dark ? "OrcaSlicer_about_dark" : "OrcaSlicer_about", 125);
-    m_logo = new wxStaticBitmap(this, wxID_ANY, m_logo_bitmap.bmp(), wxDefaultPosition,wxDefaultSize, 0);
+    // xyz fork: draw text-only SVG about banner + overlay our raster icon
+    {
+        std::string logo_path = Slic3r::var("logo-xyz-square.png");
+        wxImage logo_img;
+        if (boost::filesystem::exists(logo_path))
+            logo_img.LoadFile(wxString::FromUTF8(logo_path), wxBITMAP_TYPE_PNG);
+
+        if (logo_img.IsOk()) {
+            // Load text-only SVG as base (560x125 at DPI scale)
+            std::string svg_name = is_dark ? "OrcaSlicer_about_dark_textonly" : "OrcaSlicer_about_textonly";
+            m_logo_bitmap = ScalableBitmap(this, svg_name, 125);
+            wxBitmap banner_bmp(m_logo_bitmap.bmp());
+
+            // Overlay our icon where the original was (x=20, y=21, size=81 in 560x125 SVG)
+            wxMemoryDC dc(banner_bmp);
+            int banner_h = banner_bmp.GetHeight();
+            int icon_size = int(banner_h * 81.0 / 125.0);
+            logo_img.Rescale(icon_size, icon_size, wxIMAGE_QUALITY_BICUBIC);
+            int x = int(banner_bmp.GetWidth() * 20.0 / 560.0);
+            int y = int(banner_h * 21.0 / 125.0);
+            dc.DrawBitmap(wxBitmap(logo_img), x, y, true);
+            dc.SelectObject(wxNullBitmap);
+
+            m_logo = new wxStaticBitmap(this, wxID_ANY, banner_bmp, wxDefaultPosition, wxDefaultSize, 0);
+        } else {
+            m_logo_bitmap = ScalableBitmap(this, is_dark ? "OrcaSlicer_about_dark" : "OrcaSlicer_about", 125);
+            m_logo = new wxStaticBitmap(this, wxID_ANY, m_logo_bitmap.bmp(), wxDefaultPosition, wxDefaultSize, 0);
+        }
+    }
     m_logo->SetSizer(vesizer);
 
     panel_versizer->Add(m_logo, 1, wxALL | wxEXPAND, 0);
@@ -243,8 +270,7 @@ AboutDialog::AboutDialog()
         // _build_string_font.SetStyle(wxFONTSTYLE_ITALIC);
 
         vesizer->Add(0, 0, 1, wxEXPAND, FromDIP(5));
-        auto          version_string = std::string(SoftFever_VERSION); // _L("Orca Slicer ") + " " + std::string(SoftFever_VERSION);
-        wxStaticText* version = new wxStaticText(this, wxID_ANY, version_string.c_str(), wxDefaultPosition, wxDefaultSize);
+        auto          version_string = std::string(SoftFever_VERSION);
         wxStaticText* credits_string = new wxStaticText(this, wxID_ANY, wxString::Format("Build %s", std::string(GIT_COMMIT_HASH)), wxDefaultPosition, wxDefaultSize);
         credits_string->SetFont(_build_string_font);
         wxFont version_font = GetFont();
@@ -254,13 +280,37 @@ AboutDialog::AboutDialog()
             version_font.SetPointSize(11);
         #endif
         version_font.SetPointSize(20);
-        version->SetFont(version_font);
-        version->SetForegroundColour(wxColour("#949494"));
+
+        // xyz fork: split version into prefix + "xyz" suffix with orange color
+        wxBoxSizer *ver_text_sizer = new wxBoxSizer(wxHORIZONTAL);
+        {
+            std::string ver_str(SoftFever_VERSION);
+            size_t xyz_pos = ver_str.find("xyz");
+            if (xyz_pos != std::string::npos) {
+                std::string prefix = ver_str.substr(0, xyz_pos);
+                wxStaticText* ver_prefix = new wxStaticText(this, wxID_ANY, prefix.c_str());
+                ver_prefix->SetFont(version_font);
+                ver_prefix->SetForegroundColour(wxColour("#949494"));
+                ver_prefix->SetBackgroundColour(wxColour("#FFFFFF"));
+                ver_text_sizer->Add(ver_prefix, 0, 0, 0);
+
+                wxStaticText* ver_xyz = new wxStaticText(this, wxID_ANY, "xyz");
+                ver_xyz->SetFont(version_font);
+                ver_xyz->SetForegroundColour(wxColour(0xfe, 0x79, 0x04));
+                ver_xyz->SetBackgroundColour(wxColour("#FFFFFF"));
+                ver_text_sizer->Add(ver_xyz, 0, 0, 0);
+            } else {
+                wxStaticText* version = new wxStaticText(this, wxID_ANY, ver_str.c_str());
+                version->SetFont(version_font);
+                version->SetForegroundColour(wxColour("#949494"));
+                version->SetBackgroundColour(wxColour("#FFFFFF"));
+                ver_text_sizer->Add(version, 0, 0, 0);
+            }
+        }
         credits_string->SetForegroundColour(wxColour("#949494"));
-        version->SetBackgroundColour(wxColour("#FFFFFF"));
         credits_string->SetBackgroundColour(wxColour("#FFFFFF"));
 
-        vesizer->Add(version, 0, wxRIGHT | wxALIGN_RIGHT, FromDIP(20));
+        vesizer->Add(ver_text_sizer, 0, wxRIGHT | wxALIGN_RIGHT, FromDIP(20));
         vesizer->AddSpacer(FromDIP(5));
         vesizer->Add(credits_string, 0, wxRIGHT | wxALIGN_RIGHT, FromDIP(20));
         vesizer->Add(0, 0, 1, wxEXPAND, FromDIP(5));
@@ -274,6 +324,7 @@ AboutDialog::AboutDialog()
     text_list.push_back(_L("Open-source slicing stands on a tradition of collaboration and attribution. Slic3r, created by Alessandro Ranellucci and the RepRap community, laid the foundation. PrusaSlicer by Prusa Research built on that work, Bambu Studio forked from PrusaSlicer, and SuperSlicer extended it with community-driven enhancements. Each project carried the work of its predecessors forward, crediting those who came before."));
     text_list.push_back(_L("OrcaSlicer began in that same spirit, drawing from PrusaSlicer, BambuStudio, SuperSlicer, and CuraSlicer. But it has since grown far beyond its origins — introducing advanced calibration tools, precise wall and seam control and hundreds of other features."));
     text_list.push_back(_L("Today, OrcaSlicer is the most widely used and actively developed open-source slicer in the 3D printing community. Many of its innovations have been adopted by other slicers, making it a driving force for the entire industry."));
+    text_list.push_back(_L("This build is a feature fork (xyz) by Brian Hanson / HansonXyz, adding quality-of-life improvements with the intention of merging them back into OrcaSlicer through pull requests. For details see github.com/hansonxyz/OrcaSlicer-xyz"));
 
     text_sizer->Add( 0, 0, 0, wxTOP, FromDIP(33));
     bool is_zh = wxGetApp().app_config->get("language") == "zh_CN";
@@ -283,7 +334,12 @@ AboutDialog::AboutDialog()
         staticText->SetForegroundColour(wxColour(107, 107, 107));
         staticText->SetBackgroundColour(*wxWHITE);
         staticText->SetMinSize(wxSize(FromDIP(520), -1));
-        staticText->SetFont(Label::Body_12);
+        wxFont text_font = Label::Body_12;
+        if (i == (int)text_list.size() - 1) {
+            // Bold for the fork attribution paragraph
+            text_font.SetWeight(wxFONTWEIGHT_BOLD);
+        }
+        staticText->SetFont(text_font);
         if (is_zh) {
             wxString find_txt = "";
             wxString count_txt = "";
@@ -332,7 +388,8 @@ AboutDialog::AboutDialog()
               (boost::format(
               "<html>"
               "<body>"
-              "<p style=\"text-align:left\"><a style=\"color:#009789\" href=\"https://www.orcaslicer.com\">https://www.orcaslicer.com</ a></p>"
+              "<p style=\"text-align:left\"><a style=\"color:#009789\" href=\"https://github.com/hansonxyz/OrcaSlicer-xyz\">github.com/hansonxyz/OrcaSlicer-xyz</a>"
+              " | <a style=\"color:#009789\" href=\"https://www.orcaslicer.com\">orcaslicer.com</a></p>"
               "</body>"
               "</html>")
             ).str());
