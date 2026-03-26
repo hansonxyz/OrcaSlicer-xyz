@@ -131,3 +131,89 @@ To restore default behavior, delete or rename the file and restart OrcaSlicer.
 - `src/slic3r/GUI/OG_CustomCtrl.cpp` — Visibility override in basic mode
 - `src/slic3r/GUI/GUI_App.cpp` — Load config at startup
 - `src/slic3r/CMakeLists.txt` — Add new source files to build
+
+---
+
+## Feature 4: Paint Tool Improvements
+
+### Bounded Fill (B key)
+
+A new paint tool that floods contiguous triangles sharing the **same color** as the clicked triangle, stopping at boundaries where triangles are painted a different color. Unlike the existing Bucket Fill which also uses angle-based edge detection, Bounded Fill ignores angles entirely — only color boundaries matter. This is useful for painting a border of triangles by hand, then filling the enclosed region in one click.
+
+### Edge-Snapping Sphere Brush
+
+A "Snap to edges" checkbox on the Sphere brush tool. When enabled, the sphere brush center automatically snaps to the nearest high-curvature vertex (edge ridge) before painting. This makes brush strokes follow edge ridges naturally, making it much easier to paint along fillets, chamfers, and creases on complex models.
+
+Parameters:
+- **Snap to edges** checkbox — enables/disables the snapping behavior
+- **Edge sensitivity** slider (5-90°) — controls what curvature counts as an "edge" (lower = more sensitive to subtle fillets)
+
+The curvature detection uses per-vertex max dihedral angle, precomputed in O(F) time and cached.
+
+### Sharp Edge Boundary Preview
+
+A "Show edge boundaries" checkbox that renders orange lines at all detected sharp edges on the model. The detection uses the same angle threshold as the Smart Fill tool. This helps users visualize where fill boundaries will fall before clicking, and understand the mesh topology.
+
+### Files Modified
+
+- `src/libslic3r/TriangleSelector.hpp/cpp` — New algorithms: `compute_face_groups()`, `get_sharp_edges()`, `precompute_vertex_curvature()`, `snap_to_edge()`, `find_nearest_ridge_triangle()`, `select_edge_band_by_seed_fill()`, `select_group_by_seed_fill()`
+- `src/slic3r/GUI/Gizmos/GLGizmoPainterBase.hpp/cpp` — ToolType::BOUNDED_FILL, sharp edge contour rendering, edge-snap cursor modification
+- `src/slic3r/GUI/Gizmos/GLGizmoMmuSegmentation.hpp/cpp` — Tool UI, keyboard shortcuts, snap-to-edges checkbox
+- `deps_src/imgui/imconfig.h` — Icon constants
+- `src/slic3r/GUI/ImGuiWrapper.cpp` — Icon registration
+- `resources/images/bounded_fill.svg` — Paint drop in box icon
+
+---
+
+## Feature 5: Smart Prime Tower (Early Stop)
+
+### Problem
+
+In multi-material prints, the prime tower (wipe tower) is printed on every layer from bottom to top, even when all filament changes occur only in the lower portion of the print. This wastes material and time printing unnecessary prime tower layers at the top where no tool changes happen.
+
+### Solution
+
+The prime tower now stops at the last layer that has a filament change. If no more tool changes exist above a given layer, the prime tower is omitted for that layer and all layers above it.
+
+### How It Works
+
+After the standard wipe tower partitioning logic runs, a final pass scans from top to bottom. For each layer, it checks whether any actual tool change (not just propagated partition counts) exists on that layer or any layer above. If none remain, the `has_wipe_tower` flag is cleared for that layer.
+
+Exception: smooth timelapse mode retains the wipe tower on all layers regardless, since it uses the tower for consistent layer timing.
+
+### Files Modified
+
+- `src/libslic3r/GCode/ToolOrdering.cpp` — Added early-stop logic in `fill_wipe_tower_partitions()`
+
+---
+
+## Feature 6: Blender-Style Middle Mouse Rotation
+
+### Problem
+
+OrcaSlicer uses middle mouse drag for panning and left mouse drag for rotation. This differs from the convention in Blender and many other 3D tools where middle mouse drag rotates the view.
+
+### Solution
+
+Middle mouse button behavior is changed to match Blender's defaults:
+
+- **Middle drag** = rotate the 3D view (was: pan)
+- **Shift + middle drag** = pan the 3D view (was: middle drag)
+- **Left drag** = still rotates when not interacting with objects (unchanged)
+- **Right drag** = still pans (unchanged)
+
+This applies to all 3D views: Prepare, Preview, and Paint mode.
+
+### Files Modified
+
+- `src/slic3r/GUI/GLCanvas3D.cpp` — Modified `is_camera_rotate()` and `is_camera_pan()`
+
+---
+
+## Fork Branding
+
+- Version string: `2.3.2-xyz` with "xyz" displayed in orange (#fe7904)
+- Custom logo: iOS-style rounded corners with shadow glow, generated from `logo-xyz-base.png` via `xyz/update_logo.ps1`
+- About dialog: fork attribution paragraph with link to github.com/hansonxyz/OrcaSlicer-xyz
+- Update URL: points to fork's GitHub releases
+- Splash screen and about dialog use text-only SVGs with raster icon overlay

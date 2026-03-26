@@ -4753,7 +4753,9 @@ bool GLCanvas3D::is_camera_rotate(const wxMouseEvent& evt, const bool buttonsSwa
     if (m_is_touchpad_navigation) {
         return evt.Moving() && evt.AltDown() && !evt.ShiftDown();
     } else {
-        return evt.Dragging() && (buttonsSwapped ? evt.RightIsDown() : evt.LeftIsDown());
+        // xyz fork: shift+middle = rotate, left drag also rotates when not on object
+        return evt.Dragging() && ((buttonsSwapped ? evt.RightIsDown() : evt.LeftIsDown())
+               || (evt.MiddleIsDown() && evt.ShiftDown()));
     }
 }
 
@@ -4762,7 +4764,9 @@ bool GLCanvas3D::is_camera_pan(const wxMouseEvent& evt, const bool buttonsSwappe
     if (m_is_touchpad_navigation) {
         return evt.Moving() && evt.ShiftDown() && !evt.AltDown();
     } else {
-        return evt.Dragging() && (evt.MiddleIsDown() || (buttonsSwapped ? evt.LeftIsDown() : evt.RightIsDown()));
+        // xyz fork: middle = pan (original), right drag also pans
+        return evt.Dragging() && ((evt.MiddleIsDown() && !evt.ShiftDown())
+               || (buttonsSwapped ? evt.LeftIsDown() : evt.RightIsDown()));
     }
 }
 
