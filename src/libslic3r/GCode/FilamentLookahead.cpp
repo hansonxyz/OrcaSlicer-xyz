@@ -83,11 +83,12 @@ void FilamentLookaheadPlan::build(const Print &print,
 
     const coord_t clearance_scaled = scaled<coord_t>(min_clearance_distance_mm);
 
-    // Collect all object layers indexed by approximate Z
-    // We work with the first (or only) print object for simplicity in V1
     if (print.objects().empty())
         return;
 
+    // Analyze ALL print objects, not just the first
+    // For each object, compute per-extruder bboxes per layer using lslices
+    // and the actual MMU segmentation data (not just region config)
     const PrintObject *obj = print.objects().front();
     const auto &layers = obj->layers();
     if (layers.empty())
@@ -96,10 +97,49 @@ void FilamentLookaheadPlan::build(const Print &print,
     const size_t num_layers = layers.size();
     m_raised_per_layer.resize(num_layers);
 
-    // Pre-compute per-extruder bboxes for all layers
+    BOOST_LOG_TRIVIAL(info) << "FilamentLookahead: analyzing " << num_layers << " layers"
+        << " max_height=" << max_lookahead_height_mm << "mm"
+        << " clearance=" << min_clearance_distance_mm << "mm"
+        << " num_objects=" << print.objects().size();
+    fprintf(stderr, "FilamentLookahead: analyzing %zu layers, max_height=%.1fmm, clearance=%.1fmm, objects=%zu\n",
+        num_layers, max_lookahead_height_mm, min_clearance_distance_mm, print.objects().size());
+
+    // Pre-compute per-extruder bboxes for all layers across all objects
+    // For painted models, we use the lslices (island contours) and check which
+    // extruders are assigned to each island via the MMU segmentation facets
     std::vector<std::map<unsigned int, BoundingBox>> layer_extruder_bboxes(num_layers);
-    for (size_t li = 0; li < num_layers; ++li)
-        layer_extruder_bboxes[li] = compute_per_extruder_bboxes(print, *layers[li]);
+    for (const PrintObject *pobj : print.objects()) {
+        const auto &obj_layers = pobj->layers();
+        for (size_t li = 0; li < std::min(obj_layers.size(), num_layers); ++li) {
+            auto bboxes = compute_per_extruder_bboxes(print, *obj_layers[li]);
+            for (auto &[eid, bbox] : bboxes) {
+                // Offset by object instance positions
+                for (const PrintInstance &inst : pobj->instances()) {
+                    BoundingBox inst_bbox = bbox;
+                    inst_bbox.translate(inst.shift);
+                    auto it = layer_extruder_bboxes[li].find(eid);
+                    if (it != layer_extruder_bboxes[li].end())
+                        it->second.merge(inst_bbox);
+                    else
+                        layer_extruder_bboxes[li][eid] = inst_bbox;
+                }
+            }
+        }
+    }
+
+    // Debug: log per-extruder bboxes for layers around 275-290
+    for (size_t li = 0; li < num_layers; li += (li < 270 || li > 295 ? 50 : 1)) {
+        const auto &eb = layer_extruder_bboxes[li];
+        if (!eb.empty()) {
+            fprintf(stderr, "  L%zu z=%.2f extruders=%zu:", li, layers[li]->print_z, eb.size());
+            for (auto &[eid, bbox] : eb) {
+                fprintf(stderr, " E%u[%.1f,%.1f-%.1f,%.1f]", eid,
+                    unscale<double>(bbox.min.x()), unscale<double>(bbox.min.y()),
+                    unscale<double>(bbox.max.x()), unscale<double>(bbox.max.y()));
+            }
+            fprintf(stderr, "\n");
+        }
+    }
 
     // For each layer and each extruder, check if lookahead is possible
     for (size_t li = 0; li < num_layers; ++li) {
