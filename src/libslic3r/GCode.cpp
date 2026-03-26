@@ -5025,6 +5025,23 @@ LayerResult GCode::process_layer(
 
     bool has_insert_wrapping_detection_gcode = false;
 
+    // xyz fork: Emit exclusion zone metadata comments for gcode viewer rendering.
+    // These are comments only - safe for all printers, no physical moves.
+    // The gcode viewer parses these to render semi-transparent exclusion zone outlines.
+    if (m_lookahead_plan && m_lookahead_plan->enabled()) {
+        auto zones = m_lookahead_plan->exclusion_zones(m_current_layer_idx);
+        coordf_t raised_z = m_lookahead_plan->max_raised_z(m_current_layer_idx);
+        for (const auto &zone : zones) {
+            gcode += "; LOOKAHEAD_EXCLUSION_ZONE"
+                " x_min=" + std::to_string(unscale<double>(zone.min.x())) +
+                " y_min=" + std::to_string(unscale<double>(zone.min.y())) +
+                " x_max=" + std::to_string(unscale<double>(zone.max.x())) +
+                " y_max=" + std::to_string(unscale<double>(zone.max.y())) +
+                " z_max=" + std::to_string(raised_z) +
+                "\n";
+        }
+    }
+
     // Extrude the skirt, brim, support, perimeters, infill ordered by the extruders.
     for (unsigned int extruder_id : layer_tools.extruders)
     {
