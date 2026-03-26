@@ -70,6 +70,12 @@ static const std::map<const wchar_t, std::string> font_icons = {
     {ImGui::HeightRangeIcon        , "height_range"                  },
     {ImGui::ConfirmIcon            , "confirm"                       },
     {ImGui::GapFillIcon            , "gap_fill"                      },
+    {ImGui::BoundedFillIcon        , "bounded_fill"                  },
+    {ImGui::BoundedFillDarkIcon    , "bounded_fill_dark"             },
+    {ImGui::AutoSegmentIcon        , "auto_segment"                  },
+    {ImGui::AutoSegmentDarkIcon    , "auto_segment_dark"             },
+    {ImGui::EdgePainterIcon        , "edge_painter"                  },
+    {ImGui::EdgePainterDarkIcon    , "edge_painter_dark"             },
     {ImGui::FoldButtonIcon         , "im_fold"                       },
     {ImGui::UnfoldButtonIcon       , "im_unfold"                     },
     {ImGui::gCodeButtonIcon        , "im_code"                       }, //ORCA

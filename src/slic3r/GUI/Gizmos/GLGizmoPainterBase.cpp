@@ -1,4 +1,5 @@
 #include "GLGizmoPainterBase.hpp"
+#include "GLGizmoMmuSegmentation.hpp"
 #include "slic3r/GUI/GLCanvas3D.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmosCommon.hpp"
 
@@ -847,7 +848,9 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
 
             assert(mesh_idx < int(m_triangle_selectors.size()));
             const TriangleSelector::ClippingPlane &clp = this->get_clipping_plane_in_volume_coordinates(trafo_matrix);
-            if (m_tool_type == ToolType::SMART_FILL || m_tool_type == ToolType::BUCKET_FILL || (m_tool_type == ToolType::BRUSH && m_cursor_type == TriangleSelector::CursorType::POINTER)) {
+            if (m_tool_type == ToolType::SMART_FILL || m_tool_type == ToolType::BUCKET_FILL
+                || m_tool_type == ToolType::BOUNDED_FILL
+                || (m_tool_type == ToolType::BRUSH && m_cursor_type == TriangleSelector::CursorType::POINTER)) {
                 for(const ProjectedMousePosition &projected_mouse_position : projected_mouse_positions) {
                     assert(projected_mouse_position.mesh_idx == mesh_idx);
                     const Vec3f mesh_hit = projected_mouse_position.mesh_hit;
@@ -862,6 +865,8 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
                     else if (m_tool_type == ToolType::BUCKET_FILL)
                         // BBS: add infill_angle parameter
                         m_triangle_selectors[mesh_idx]->bucket_fill_select_triangles(mesh_hit, facet_idx, clp, m_smart_fill_angle, true, true);
+                    else if (m_tool_type == ToolType::BOUNDED_FILL)
+                        m_triangle_selectors[mesh_idx]->bucket_fill_select_triangles(mesh_hit, facet_idx, clp, -1.f, true, true);
 
                     m_seed_fill_last_mesh_id = -1;
                 }
@@ -870,7 +875,12 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
 
                 if (projected_mouse_positions.size() == 1) {
                     const ProjectedMousePosition             &first_position = projected_mouse_positions.front();
-                    std::unique_ptr<TriangleSelector::Cursor> cursor         = TriangleSelector::SinglePointCursor::cursor_factory(first_position.mesh_hit,
+                    // xyz fork: snap sphere brush to nearest edge if enabled
+                    Vec3f snapped_hit = first_position.mesh_hit;
+                    auto *mmu_gizmo = dynamic_cast<GLGizmoMmuSegmentation*>(this);
+                    if (mmu_gizmo && mmu_gizmo->m_snap_to_edges && m_cursor_type == TriangleSelector::CursorType::SPHERE)
+                        snapped_hit = m_triangle_selectors[mesh_idx]->snap_to_edge(first_position.mesh_hit, int(first_position.facet_idx), mmu_gizmo->m_snap_curvature_threshold);
+                    std::unique_ptr<TriangleSelector::Cursor> cursor         = TriangleSelector::SinglePointCursor::cursor_factory(snapped_hit,
                                                                                                                                    camera_pos, m_cursor_radius,
                                                                                                                                    m_cursor_type, trafo_matrix, clp);
                     m_triangle_selectors[mesh_idx]->select_patch(int(first_position.facet_idx), std::move(cursor), new_state, trafo_matrix_not_translate,
@@ -960,6 +970,8 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
         else if (m_tool_type == ToolType::BUCKET_FILL)
             // BBS: add infill_angle parameter
             m_triangle_selectors[m_rr.mesh_id]->bucket_fill_select_triangles(m_rr.hit, int(m_rr.facet), clp, m_smart_fill_angle, true);
+        else if (m_tool_type == ToolType::BOUNDED_FILL)
+            m_triangle_selectors[m_rr.mesh_id]->bucket_fill_select_triangles(m_rr.hit, int(m_rr.facet), clp, -1.f, true);
         m_triangle_selectors[m_rr.mesh_id]->request_update_render_data();
         m_seed_fill_last_mesh_id = m_rr.mesh_id;
         return true;
@@ -1894,6 +1906,53 @@ void TriangleSelectorGUI::render_paint_contour(const Transform3d& matrix)
         contour_shader->set_uniform("projection_matrix", camera.get_projection_matrix());
 
         m_paint_contour.render();
+
+        contour_shader->stop_using();
+    }
+
+    if (curr_shader != nullptr)
+        curr_shader->start_using();
+}
+
+// xyz fork: Sharp edge boundary preview
+void TriangleSelectorGUI::update_sharp_edge_contour(float angle_threshold_deg)
+{
+    m_sharp_edge_contour.reset();
+
+    GLModel::Geometry init_data;
+    const std::vector<Vec2i32> sharp_edges = this->get_sharp_edges(angle_threshold_deg);
+    init_data.format = { GLModel::Geometry::EPrimitiveType::Lines, GLModel::Geometry::EVertexLayout::P3 };
+    init_data.reserve_vertices(2 * sharp_edges.size());
+    init_data.reserve_indices(2 * sharp_edges.size());
+    init_data.color = ColorRGBA(1.0f, 0.6f, 0.0f, 1.0f); // orange
+    unsigned int vertices_count = 0;
+    for (const Vec2i32 &edge : sharp_edges) {
+        init_data.add_vertex(m_vertices[edge(0)].v);
+        init_data.add_vertex(m_vertices[edge(1)].v);
+        vertices_count += 2;
+        init_data.add_line(vertices_count - 2, vertices_count - 1);
+    }
+
+    if (!init_data.is_empty())
+        m_sharp_edge_contour.init_from(std::move(init_data));
+}
+
+void TriangleSelectorGUI::render_sharp_edge_contour(const Transform3d &matrix)
+{
+    auto *curr_shader = wxGetApp().get_current_shader();
+    if (curr_shader != nullptr)
+        curr_shader->stop_using();
+
+    auto *contour_shader = wxGetApp().get_shader("mm_contour");
+    if (contour_shader != nullptr) {
+        contour_shader->start_using();
+
+        contour_shader->set_uniform("offset", OpenGLManager::get_gl_info().is_mesa() ? 0.0005 : 0.00001);
+        const Camera &camera = wxGetApp().plater()->get_camera();
+        contour_shader->set_uniform("view_model_matrix", camera.get_view_matrix() * matrix);
+        contour_shader->set_uniform("projection_matrix", camera.get_projection_matrix());
+
+        m_sharp_edge_contour.render();
 
         contour_shader->stop_using();
     }

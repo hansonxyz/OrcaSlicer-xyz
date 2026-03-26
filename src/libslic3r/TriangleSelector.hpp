@@ -335,6 +335,32 @@ public:
     // Get edges around the selected area by seed fill.
     std::vector<Vec2i32> get_seed_fill_contour() const;
 
+    // xyz fork: compute face groups by angle threshold for auto-segment tool
+    std::vector<int> compute_face_groups(float angle_threshold_deg) const;
+    void select_group_by_seed_fill(const std::vector<int>& group_ids, int target_group);
+    // xyz fork: get sharp edges (dihedral angle exceeding threshold) for boundary preview
+    std::vector<Vec2i32> get_sharp_edges(float angle_threshold_deg) const;
+
+    // xyz fork: Edge painter - per-vertex curvature for fillet/edge band detection
+    // Precomputes max dihedral angle at each vertex. O(F) time, O(V) space.
+    void precompute_vertex_curvature();
+    // Select triangles forming an edge band near a seed point.
+    // curvature_threshold_deg: min dihedral angle to consider a vertex "on edge"
+    // width_rings: how many triangle rings to expand from the ridge (0 = ridge only)
+    void select_edge_band_by_seed_fill(int facet_start, float curvature_threshold_deg, int width_rings);
+    const std::vector<float>& get_vertex_curvature() const { return m_vertex_max_dihedral; }
+    // Find the nearest ridge triangle to facet_start by BFS, within max_rings.
+    // Returns -1 if no ridge triangle found.
+    int find_nearest_ridge_triangle(int facet_start, float curvature_threshold_deg, int max_rings = 20);
+    // Snap a hit point to the nearest high-curvature vertex within a search radius (in triangle rings).
+    // Returns the snapped position, or the original hit if no ridge vertex found nearby.
+    Vec3f snap_to_edge(const Vec3f& hit, int facet_start, float curvature_threshold_deg, int max_rings = 10);
+
+private:
+    std::vector<float> m_vertex_max_dihedral; // cached per-vertex max dihedral angle (radians)
+    bool m_vertex_curvature_computed = false;
+public:
+
     // BBS
     void get_facets(std::vector<indexed_triangle_set>& facets_per_type) const;
 

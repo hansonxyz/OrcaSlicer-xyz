@@ -157,6 +157,23 @@ void GLGizmoMmuSegmentation::render_painter_gizmo()
 
     render_triangles(selection);
 
+    // xyz fork: render sharp edge boundary preview
+    if (m_show_sharp_edges) {
+        const ModelObject *mo = m_c->selection_info()->model_object();
+        int mesh_id = -1;
+        for (const ModelVolume *mv : mo->volumes) {
+            if (!mv->is_model_part())
+                continue;
+            ++mesh_id;
+            if (mesh_id >= (int)m_triangle_selectors.size())
+                break;
+            Transform3d trafo_matrix = mo->instances[selection.get_instance_idx()]->get_transformation().get_matrix() * mv->get_matrix();
+            auto *tsg = dynamic_cast<TriangleSelectorGUI *>(m_triangle_selectors[mesh_id].get());
+            if (tsg)
+                tsg->render_sharp_edge_contour(trafo_matrix);
+        }
+    }
+
     m_c->object_clipper()->render_cut();
     m_c->instances_hider()->render_cut();
     render_cursor();
@@ -219,6 +236,9 @@ bool GLGizmoMmuSegmentation::on_key_down_select_tool_type(int keyCode) {
         break;
     case 'G':
         m_current_tool = ImGui::GapFillIcon;
+        break;
+    case 'B':
+        m_current_tool = ImGui::BoundedFillIcon;
         break;
     default:
         return false;
@@ -453,14 +473,14 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
 
     m_imgui->text(m_desc.at("tool_type"));
 
-    std::array<wchar_t, 6> tool_ids;
-    tool_ids = { ImGui::CircleButtonIcon, ImGui::SphereButtonIcon, ImGui::TriangleButtonIcon, ImGui::HeightRangeIcon, ImGui::FillButtonIcon, ImGui::GapFillIcon };
-    std::array<wchar_t, 6> icons;
+    std::array<wchar_t, 7> tool_ids;
+    tool_ids = { ImGui::CircleButtonIcon, ImGui::SphereButtonIcon, ImGui::TriangleButtonIcon, ImGui::HeightRangeIcon, ImGui::FillButtonIcon, ImGui::GapFillIcon, ImGui::BoundedFillIcon };
+    std::array<wchar_t, 7> icons;
     if (m_is_dark_mode)
-        icons = { ImGui::CircleButtonDarkIcon, ImGui::SphereButtonDarkIcon, ImGui::TriangleButtonDarkIcon, ImGui::HeightRangeDarkIcon, ImGui::FillButtonDarkIcon, ImGui::GapFillDarkIcon };
+        icons = { ImGui::CircleButtonDarkIcon, ImGui::SphereButtonDarkIcon, ImGui::TriangleButtonDarkIcon, ImGui::HeightRangeDarkIcon, ImGui::FillButtonDarkIcon, ImGui::GapFillDarkIcon, ImGui::BoundedFillDarkIcon };
     else
-        icons = { ImGui::CircleButtonIcon, ImGui::SphereButtonIcon, ImGui::TriangleButtonIcon, ImGui::HeightRangeIcon, ImGui::FillButtonIcon, ImGui::GapFillIcon };
-    std::array<wxString, 6> tool_tips = { _L("Circle"), _L("Sphere"), _L("Triangle"), _L("Height Range"), _L("Fill"), _L("Gap Fill") };
+        icons = { ImGui::CircleButtonIcon, ImGui::SphereButtonIcon, ImGui::TriangleButtonIcon, ImGui::HeightRangeIcon, ImGui::FillButtonIcon, ImGui::GapFillIcon, ImGui::BoundedFillIcon };
+    std::array<wxString, 7> tool_tips = { _L("Circle"), _L("Sphere"), _L("Triangle"), _L("Height Range"), _L("Fill"), _L("Gap Fill"), _L("Bounded Fill") };
     for (int i = 0; i < tool_ids.size(); i++) {
         std::string  str_label = std::string("");
         std::wstring btn_name  = icons[i] + boost::nowide::widen(str_label);
@@ -519,6 +539,22 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
         ImGui::SameLine(drag_left_width + circle_max_width);
         ImGui::PushItemWidth(1.5 * slider_icon_width);
         ImGui::BBLDragFloat("##cursor_radius_input", &m_cursor_radius, 0.05f, 0.0f, 0.0f, "%.2f");
+
+        // xyz fork: Edge-snapping option for sphere brush
+        if (m_current_tool == ImGui::SphereButtonIcon) {
+            m_imgui->bbl_checkbox(_L("Snap to edges"), m_snap_to_edges);
+            if (m_snap_to_edges) {
+                ImGui::AlignTextToFramePadding();
+                m_imgui->text(_L("Edge sensitivity") + ":");
+                std::string fmt = std::string("%.f") + I18N::translate_utf8("°", "Edge snap threshold");
+                ImGui::SameLine(circle_max_width);
+                ImGui::PushItemWidth(sliders_width);
+                m_imgui->bbl_slider_float_style("##snap_threshold", &m_snap_curvature_threshold, 5.f, 90.f, fmt.data(), 1.0f, true);
+                ImGui::SameLine(drag_left_width + circle_max_width);
+                ImGui::PushItemWidth(1.5 * slider_icon_width);
+                ImGui::BBLDragFloat("##snap_threshold_input", &m_snap_curvature_threshold, 0.05f, 0.0f, 0.0f, "%.2f");
+            }
+        }
 
         ImGui::Separator();
         if (m_c->object_clipper()->get_position() == 0.f) {
@@ -664,6 +700,43 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
         ImGui::SameLine(drag_left_width + gap_area_slider_left);
         ImGui::PushItemWidth(1.5 * slider_icon_width);
         ImGui::BBLDragFloat("##gap_area_input", &TriangleSelectorPatch::gap_area, 0.05f, 0.0f, 0.0f, "%.2f");
+    }
+    else if (m_current_tool == ImGui::BoundedFillIcon) {
+        m_cursor_type = TriangleSelector::CursorType::POINTER;
+        m_tool_type = ToolType::BOUNDED_FILL;
+        // No angle slider - bounded fill ignores angles, only stops at color boundaries
+        ImGui::Separator();
+        if (m_c->object_clipper()->get_position() == 0.f) {
+            ImGui::AlignTextToFramePadding();
+            m_imgui->text(m_desc.at("clipping_of_view"));
+        } else {
+            if (m_imgui->button(m_desc.at("reset_direction"))) {
+                wxGetApp().CallAfter([this]() { m_c->object_clipper()->set_position_by_ratio(-1., false); });
+            }
+        }
+        auto clp_dist = float(m_c->object_clipper()->get_position());
+        ImGui::SameLine(sliders_left_width);
+        ImGui::PushItemWidth(sliders_width);
+        bool slider_clp_dist = m_imgui->bbl_slider_float_style("##clp_dist", &clp_dist, 0.f, 1.f, "%.2f", 1.0f, true);
+        ImGui::SameLine(drag_left_width + sliders_left_width);
+        ImGui::PushItemWidth(1.5 * slider_icon_width);
+        bool b_clp_dist_input = ImGui::BBLDragFloat("##clp_dist_input", &clp_dist, 0.05f, 0.0f, 0.0f, "%.2f");
+        if (slider_clp_dist || b_clp_dist_input) { m_c->object_clipper()->set_position_by_ratio(clp_dist, true); }
+    }
+
+
+    ImGui::Separator();
+    // xyz fork: Sharp edge boundary preview checkbox
+    {
+        bool old_show = m_show_sharp_edges;
+        m_imgui->bbl_checkbox(_L("Show edge boundaries"), m_show_sharp_edges);
+        if (m_show_sharp_edges && (m_sharp_edges_cached_angle != m_smart_fill_angle || !old_show)) {
+            m_sharp_edges_cached_angle = m_smart_fill_angle;
+            for (auto &ts : m_triangle_selectors) {
+                auto *tsg = dynamic_cast<TriangleSelectorGUI*>(ts.get());
+                if (tsg) tsg->update_sharp_edge_contour(m_smart_fill_angle);
+            }
+        }
     }
 
     ImGui::Separator();

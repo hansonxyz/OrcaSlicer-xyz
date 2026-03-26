@@ -41,6 +41,11 @@ public:
     void         set_wireframe_needed(bool need_wireframe) { m_need_wireframe = need_wireframe; }
     bool         get_wireframe_needed() { return m_need_wireframe; }
 
+    // xyz fork: sharp edge boundary preview (public for GLGizmoMmuSegmentation access)
+    GLModel                      m_sharp_edge_contour;
+    void update_sharp_edge_contour(float angle_threshold_deg);
+    void render_sharp_edge_contour(const Transform3d& matrix);
+
     // BBS
     void request_update_render_data(bool paint_changed = false)
     {
@@ -257,6 +262,8 @@ protected:
         SMART_FILL,
         // BBS
         GAP_FILL,
+        // xyz fork
+        BOUNDED_FILL,
     };
 
     struct ProjectedMousePosition
