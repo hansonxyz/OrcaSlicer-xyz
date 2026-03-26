@@ -5045,10 +5045,13 @@ LayerResult GCode::process_layer(
     // Extrude the skirt, brim, support, perimeters, infill ordered by the extruders.
     for (unsigned int extruder_id : layer_tools.extruders)
     {
-        // xyz fork: Filament Lookahead - skip extruders already printed by a previous layer's lookahead
+        // xyz fork: Filament Lookahead - skip model extrusions for extruders already
+        // printed by lookahead, but keep the full wipe tower sequence so the tower
+        // stays structurally sound and the purge counter stays in sync.
+        bool lookahead_skip_extrusions = false;
         if (m_lookahead_plan && m_lookahead_plan->already_printed(m_current_layer_idx, extruder_id)) {
-            gcode += "; LOOKAHEAD_SKIP extruder=" + std::to_string(extruder_id) + " (already printed by lookahead)\n";
-            continue;
+            gcode += "; LOOKAHEAD_SKIP extruder=" + std::to_string(extruder_id) + " (model extrusions already printed by lookahead)\n";
+            lookahead_skip_extrusions = true;
         }
 
         if (print.config().skirt_type == stCombined && !print.skirt().empty())
@@ -5156,7 +5159,12 @@ LayerResult GCode::process_layer(
 
         // We are almost ready to print. However, we must go through all the objects twice to print the the overridden extrusions first (infill/perimeter wiping feature):
         std::vector<ObjectByExtruder::Island::Region> by_region_per_copy_cache;
-        for (int print_wipe_extrusions = is_anything_overridden; print_wipe_extrusions>=0; --print_wipe_extrusions) {
+        if (lookahead_skip_extrusions) {
+            // xyz fork: skip model extrusions - already printed by lookahead.
+            // Wipe tower tool change already happened above, keeping bookkeeping in sync.
+            gcode += "; LOOKAHEAD: skipping model extrusions for extruder " + std::to_string(extruder_id) + "\n";
+        }
+        else for (int print_wipe_extrusions = is_anything_overridden; print_wipe_extrusions>=0; --print_wipe_extrusions) {
             if (is_anything_overridden && print_wipe_extrusions == 0)
                 gcode+="; PURGING FINISHED\n";
 
