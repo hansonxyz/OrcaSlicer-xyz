@@ -9956,6 +9956,13 @@ CLIActionsConfigDef::CLIActionsConfigDef()
     def->cli = "export-sla|sla";
     def->set_default_value(new ConfigOptionBool(false));*/
 
+    // xyz fork: dump resolved config to stdout
+    def = this->add("dump_config", coBool);
+    def->label = L("Dump config");
+    def->tooltip = L("Print the resolved config to stdout after loading and applying overrides, then exit.");
+    def->cli = "dump-config";
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("export_3mf", coString);
     def->label = L("Export 3MF");
     def->tooltip = L("Export project as 3MF.");

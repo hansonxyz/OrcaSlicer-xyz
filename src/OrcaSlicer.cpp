@@ -4169,6 +4169,10 @@ int CLI::run(int argc, char **argv)
 
     for (auto const &opt_key : m_transforms) {
         BOOST_LOG_TRIVIAL(info) << "process transform " << opt_key << "\n";
+        // xyz fork: --dump-config is handled later during slice, skip it in transforms
+        if (opt_key == "dump_config") {
+            continue;
+        }
         if (opt_key == "assemble") {
             if (clone_objects.size() > 0) {
                 BOOST_LOG_TRIVIAL(error) << "Invalid params: can not set assemble and clone_objects together." << std::endl;
@@ -5448,7 +5452,10 @@ int CLI::run(int argc, char **argv)
     global_begin_time = global_current_time;
 
     for (auto const &opt_key : m_actions) {
-        if (opt_key == "help") {
+        if (opt_key == "dump_config") {
+            // Handled later during slice processing
+            continue;
+        } else if (opt_key == "help") {
             this->print_help();
         } else if (opt_key == "help_fff") {
             this->print_help(true, ptFFF);
@@ -6038,6 +6045,26 @@ int CLI::run(int argc, char **argv)
                                 const PrintConfig& print_config = print_fff->config();
                                 Model::setExtruderParams(m_print_config, filament_count);
                                 Model::setPrintSpeedTable(m_print_config, print_config);
+
+                                // xyz fork: --dump-config prints resolved config to stdout and exits
+                                if (std::find(m_actions.begin(), m_actions.end(), "dump_config") != m_actions.end()) {
+                                    boost::nowide::cout << "; Resolved config for plate " << (index + 1) << std::endl;
+                                    for (const std::string &key : print_config.keys()) {
+                                        const ConfigOption *opt = print_config.option(key);
+                                        if (opt)
+                                            boost::nowide::cout << key << " = " << opt->serialize() << std::endl;
+                                    }
+                                    boost::nowide::cout << "; --- End of process config ---" << std::endl;
+                                    // Also dump the full print config (filament/printer settings)
+                                    boost::nowide::cout << "; Full print config:" << std::endl;
+                                    for (const std::string &key : m_print_config.keys()) {
+                                        const ConfigOption *opt = m_print_config.option(key);
+                                        if (opt)
+                                            boost::nowide::cout << key << " = " << opt->serialize() << std::endl;
+                                    }
+                                    flush_and_exit(0);
+                                }
+
                                 if (load_slicedata) {
                                     std::string plate_dir = load_slice_data_dir+"/"+std::to_string(index+1);
                                     int ret = print->load_cached_data(plate_dir);
