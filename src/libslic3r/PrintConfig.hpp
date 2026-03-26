@@ -1584,6 +1584,11 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
     ((ConfigOptionInts,       idle_temperature))
 
 
+    // xyz fork: Filament Lookahead - print extra layers of isolated material to reduce tool changes
+    ((ConfigOptionBool,               filament_lookahead))
+    ((ConfigOptionFloat,              filament_lookahead_max_height))
+    ((ConfigOptionFloat,              filament_lookahead_clearance))
+
     // BBS: wipe tower is only used for priming
     ((ConfigOptionFloat,              prime_volume))
     ((ConfigOptionFloats,             flush_multiplier))

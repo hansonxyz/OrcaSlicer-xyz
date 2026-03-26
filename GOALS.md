@@ -196,6 +196,14 @@ Wishlist item. Add a dialog accessible from the process settings tab (e.g., a ge
 
 Wishlist item. Differentiate the fork visually from stock OrcaSlicer with a modified logo or splash screen, so it's immediately obvious which version is running. TBD on the specific design - could be a subtle color shift, a small badge overlay, or a different splash image.
 
+## Future Goal (Low Priority): CLI Enhancements and Shell Integration (not yet implementing)
+
+Wishlist item. Low priority - may not implement.
+
+**Enhanced CLI mode**: Make OrcaSlicer more like ImageMagick for slicing - fully scriptable headless slicing, sending to printer, and batch operations via command line.
+
+**Right-click-to-print**: Windows Explorer shell extension that adds "Print with OrcaSlicer" to the right-click context menu for .3mf files. Launches OrcaSlicer, lets the user select printer and send, then exits. Would require a Windows registry-based context menu entry pointing to the slicer exe with appropriate arguments.
+
 ## Development Workflow
 1. Each feature gets its own branch off `main`
 2. Clean, atomic commits suitable for upstream PR submission

@@ -867,6 +867,12 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config, co
 
     toggle_line("support_interface_not_for_body",config->opt_int("support_interface_filament")&&!config->opt_int("support_filament"));
 
+    // xyz fork: Filament Lookahead visibility
+    bool have_filament_lookahead = config->opt_bool("filament_lookahead");
+    toggle_line("filament_lookahead", have_prime_tower);
+    toggle_line("filament_lookahead_max_height", have_prime_tower && have_filament_lookahead);
+    toggle_line("filament_lookahead_clearance", have_prime_tower && have_filament_lookahead);
+
     // Get the current fuzzy skin state
     bool has_fuzzy_skin = config->opt_enum<FuzzySkinType>("fuzzy_skin") != FuzzySkinType::Disabled_fuzzy;
     

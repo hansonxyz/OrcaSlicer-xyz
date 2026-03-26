@@ -6604,6 +6604,40 @@ void PrintConfigDef::init_fff_params()
         "It will not take effect unless the prime tower is enabled.");
     def->set_default_value(new ConfigOptionBool(false));
 
+    // xyz fork: Filament Lookahead
+    def = this->add("filament_lookahead", coBool);
+    def->label = L("Filament Lookahead");
+    def->category = L("Flush options");
+    def->tooltip = L("When enabled, if an extruder's region on a layer is spatially isolated from other extruder regions "
+                     "(by at least the clearance distance), print extra layers of that material before switching. "
+                     "This reduces tool changes by batching consecutive layers of the same material. "
+                     "Only effective when the prime tower is enabled and multiple filaments are used.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("filament_lookahead_max_height", coFloat);
+    def->label = L("Max lookahead height");
+    def->category = L("Flush options");
+    def->tooltip = L("Maximum height (in mm) to print ahead for a single extruder before switching. "
+                     "Higher values eliminate more tool changes but increase the risk of collisions and layer adhesion issues.");
+    def->sidetext = L("mm");
+    def->min = 0.2;
+    def->max = 10.0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(1.8));
+
+    def = this->add("filament_lookahead_clearance", coFloat);
+    def->label = L("Min clearance distance");
+    def->category = L("Flush options");
+    def->tooltip = L("Minimum XY distance (in mm) between the lookahead region and any other extruder region "
+                     "for lookahead to activate. The nozzle and printhead housing must clear other printed regions "
+                     "at the raised height. Increase this value for safety on printers with large printhead shrouds.");
+    def->sidetext = L("mm");
+    def->min = 1.0;
+    def->max = 50.0;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(5.0));
+
     def = this->add("wipe_tower_bridging", coFloat);
     def->label = L("Maximal bridging distance");
     def->tooltip = L("Maximal distance between supports on sparse infill sections.");

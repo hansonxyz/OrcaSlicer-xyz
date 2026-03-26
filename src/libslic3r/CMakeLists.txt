@@ -245,6 +245,8 @@ set(lisbslic3r_sources
     GCode/ThumbnailData.hpp
     GCode/Thumbnails.cpp
     GCode/Thumbnails.hpp
+    GCode/FilamentLookahead.cpp
+    GCode/FilamentLookahead.hpp
     GCode/ToolOrdering.cpp
     GCode/ToolOrdering.hpp
     GCode/WipeTower2.cpp

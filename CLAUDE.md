@@ -89,6 +89,20 @@ ctest --test-dir ./tests/sla_print/sla_print_tests
 # and so on
 ```
 
+### CLI Headless Slicing (for testing xyz fork features)
+OrcaSlicer supports headless CLI slicing. This is useful for testing features like Filament Lookahead without the GUI:
+```bash
+# Slice plate 2 of a 3MF file and output gcode
+build/OrcaSlicer/orca-slicer.exe --slice 2 "Z:\cabinets\Things\Projects\drg_buff_beer_mugs_coloration_2.3mf"
+
+# Then inspect the gcode for feature-specific metadata:
+grep "LOOKAHEAD_EXCLUSION_ZONE" output.gcode    # Filament Lookahead exclusion zones
+grep "ANY_TYPE_DEBUG" output.gcode               # Any Type support material debug
+```
+
+**Test files:**
+- `Z:\cabinets\Things\Projects\drg_buff_beer_mugs_coloration_2.3mf` (plate 2) - multi-material model with spatially isolated regions, good for testing Filament Lookahead
+
 ## Architecture
 
 ### Core Libraries
