@@ -3038,6 +3038,26 @@ void GCodeProcessor::process_tags(const std::string_view comment, bool producers
         return;
     }
 
+    // xyz fork: parse Filament Lookahead exclusion zone comments
+    if (boost::starts_with(comment, " LOOKAHEAD_EXCLUSION_ZONE")) {
+        GCodeProcessorResult::ExclusionZone zone{};
+        zone.layer_z = m_end_position[2]; // current Z
+        // Parse: " LOOKAHEAD_EXCLUSION_ZONE x_min=... y_min=... x_max=... y_max=... z_max=..."
+        auto parse_val = [&comment](const char *key) -> float {
+            auto pos = comment.find(key);
+            if (pos != std::string_view::npos)
+                return std::stof(std::string(comment.substr(pos + strlen(key))));
+            return 0.f;
+        };
+        zone.x_min = parse_val("x_min=");
+        zone.y_min = parse_val("y_min=");
+        zone.x_max = parse_val("x_max=");
+        zone.y_max = parse_val("y_max=");
+        zone.z_max = parse_val("z_max=");
+        m_result.lookahead_exclusion_zones.push_back(zone);
+        return;
+    }
+
     // ; Z_HEIGHT:
     if (boost::starts_with(comment, " Z_HEIGHT:")) {
         m_print_z = get_z_height(comment);

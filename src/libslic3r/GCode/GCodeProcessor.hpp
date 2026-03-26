@@ -217,6 +217,13 @@ class Print;
         Pointfs wrapping_exclude_area;
         std::vector<Pointfs> extruder_areas;
         std::vector<double> extruder_heights;
+        // xyz fork: Filament Lookahead exclusion zones per layer
+        struct ExclusionZone {
+            float x_min, y_min, x_max, y_max, z_max;
+            float layer_z; // z height where this zone is rendered
+        };
+        std::vector<ExclusionZone> lookahead_exclusion_zones;
+
         //BBS: add toolpath_outside
         bool toolpath_outside;
         //BBS: add object_label_enabled

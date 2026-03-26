@@ -1259,6 +1259,7 @@ void GCodeViewer::load_as_gcode(const GCodeProcessorResult& gcode_result, const 
     //BBS: move the id to the end of reset
     m_last_result_id = gcode_result.id;
     m_gcode_result = &gcode_result;
+    m_lookahead_zones_dirty = true; // xyz fork
     m_only_gcode_in_preview = only_gcode;
 
     m_sequential_view.gcode_window.load_gcode(gcode_result.filename, gcode_result.lines_ends);
@@ -1486,6 +1487,7 @@ void GCodeViewer::render(int canvas_width, int canvas_height, int right_margin)
         return;
 
     render_toolpaths();
+    render_lookahead_zones(); // xyz fork
 
     float legend_height = 0.0f;
     render_legend(legend_height, canvas_width, canvas_height, right_margin);
@@ -4432,6 +4434,77 @@ void GCodeViewer::pop_combo_style()
 void GCodeViewer::render_slider(int canvas_width, int canvas_height) {
     m_moves_slider->render(canvas_width, canvas_height);
     m_layers_slider->render(canvas_width, canvas_height);
+}
+
+// xyz fork: Filament Lookahead exclusion zone rendering
+void GCodeViewer::update_lookahead_zones()
+{
+    m_lookahead_zones_model.reset();
+
+    if (!m_gcode_result || m_gcode_result->lookahead_exclusion_zones.empty())
+        return;
+
+    const auto &zones = m_gcode_result->lookahead_exclusion_zones;
+
+    GLModel::Geometry init_data;
+    init_data.format = { GLModel::Geometry::EPrimitiveType::Lines, GLModel::Geometry::EVertexLayout::P3 };
+    init_data.reserve_vertices(zones.size() * 8); // 4 corners * 2 (top + bottom of each line)
+    init_data.reserve_indices(zones.size() * 8);  // 4 lines per zone
+    init_data.color = ColorRGBA(1.0f, 0.9f, 0.0f, 0.3f); // yellow, 30% opacity
+
+    unsigned int vcount = 0;
+    for (const auto &zone : zones) {
+        float z = zone.layer_z + 0.05f; // slight offset to avoid z-fighting
+        // 4 corners of the rectangle
+        init_data.add_vertex(Vec3f(zone.x_min, zone.y_min, z));
+        init_data.add_vertex(Vec3f(zone.x_max, zone.y_min, z));
+        init_data.add_vertex(Vec3f(zone.x_max, zone.y_max, z));
+        init_data.add_vertex(Vec3f(zone.x_min, zone.y_max, z));
+        // 4 lines forming the rectangle
+        init_data.add_line(vcount, vcount + 1);
+        init_data.add_line(vcount + 1, vcount + 2);
+        init_data.add_line(vcount + 2, vcount + 3);
+        init_data.add_line(vcount + 3, vcount);
+        vcount += 4;
+    }
+
+    if (!init_data.is_empty())
+        m_lookahead_zones_model.init_from(std::move(init_data));
+
+    m_lookahead_zones_dirty = false;
+}
+
+void GCodeViewer::render_lookahead_zones()
+{
+    if (!m_gcode_result || m_gcode_result->lookahead_exclusion_zones.empty())
+        return;
+
+    if (m_lookahead_zones_dirty)
+        update_lookahead_zones();
+
+    if (!m_lookahead_zones_model.is_initialized())
+        return;
+
+    auto *shader = wxGetApp().get_shader("flat");
+    if (!shader)
+        return;
+
+    shader->start_using();
+
+    glsafe(::glEnable(GL_BLEND));
+    glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+    glsafe(::glLineWidth(2.0f));
+
+    const Camera &camera = wxGetApp().plater()->get_camera();
+    shader->set_uniform("view_model_matrix", camera.get_view_matrix());
+    shader->set_uniform("projection_matrix", camera.get_projection_matrix());
+
+    m_lookahead_zones_model.set_color(ColorRGBA(1.0f, 0.9f, 0.0f, 0.3f));
+    m_lookahead_zones_model.render();
+
+    glsafe(::glDisable(GL_BLEND));
+
+    shader->stop_using();
 }
 
 } // namespace GUI

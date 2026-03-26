@@ -177,6 +177,12 @@ public:
     FilamentPrintableResult filament_printable_reuslt;
     Shells            m_shells;
 
+    // xyz fork: Filament Lookahead exclusion zone rendering
+    GLModel m_lookahead_zones_model;
+    bool    m_lookahead_zones_dirty = true;
+    void    render_lookahead_zones();
+    void    update_lookahead_zones();
+
 private:
     std::vector<int> m_plater_extruder;
     bool m_gl_data_initialized{ false };
