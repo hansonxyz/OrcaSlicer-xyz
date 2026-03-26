@@ -1947,6 +1947,297 @@ void TriangleSelector::seed_fill_apply_on_triangles(EnforcerBlockerType new_stat
         }
 }
 
+// xyz fork: Compute connected face groups using angle threshold.
+// Returns group IDs indexed by original triangle index.
+std::vector<int> TriangleSelector::compute_face_groups(float angle_threshold_deg) const
+{
+    std::vector<int> group_ids(m_orig_size_indices, -1);
+    int next_group = 0;
+    const double angle_limit = cos(Geometry::deg2rad(angle_threshold_deg)) - EPSILON;
+
+    for (int seed = 0; seed < m_orig_size_indices; ++seed) {
+        if (group_ids[seed] != -1)
+            continue;
+        // BFS from seed
+        std::queue<int> q;
+        q.push(seed);
+        group_ids[seed] = next_group;
+        while (!q.empty()) {
+            int cur = q.front();
+            q.pop();
+            for (int ni = 0; ni < 3; ++ni) {
+                int neighbor = m_neighbors[cur](ni);
+                if (neighbor < 0 || neighbor >= m_orig_size_indices || group_ids[neighbor] != -1)
+                    continue;
+                const Vec3f &n1 = m_face_normals[cur];
+                const Vec3f &n2 = m_face_normals[neighbor];
+                if (std::clamp(n1.dot(n2), 0.f, 1.f) >= angle_limit) {
+                    group_ids[neighbor] = next_group;
+                    q.push(neighbor);
+                }
+            }
+        }
+        ++next_group;
+    }
+    return group_ids;
+}
+
+// xyz fork: Select all leaf triangles whose source triangle belongs to target_group.
+void TriangleSelector::select_group_by_seed_fill(const std::vector<int> &group_ids, int target_group)
+{
+    for (Triangle &triangle : m_triangles) {
+        if (!triangle.is_split()) {
+            int src = triangle.source_triangle;
+            if (src >= 0 && src < (int)group_ids.size() && group_ids[src] == target_group)
+                triangle.select_by_seed_fill();
+        }
+    }
+}
+
+// xyz fork: Get edges where dihedral angle exceeds threshold, for sharp edge preview.
+std::vector<Vec2i32> TriangleSelector::get_sharp_edges(float angle_threshold_deg) const
+{
+    std::vector<Vec2i32> edges;
+    const double angle_limit = cos(Geometry::deg2rad(angle_threshold_deg)) - EPSILON;
+
+    for (int fi = 0; fi < m_orig_size_indices; ++fi) {
+        for (int ei = 0; ei < 3; ++ei) {
+            int neighbor = m_neighbors[fi](ei);
+            if (neighbor <= fi) // process each edge once, skip boundary edges
+                continue;
+            const Vec3f &n1 = m_face_normals[fi];
+            const Vec3f &n2 = m_face_normals[neighbor];
+            if (std::clamp(n1.dot(n2), 0.f, 1.f) < angle_limit) {
+                // Sharp edge: vertices of edge ei are (ei+1)%3 and (ei+2)%3
+                int v0 = m_triangles[fi].verts_idxs[(ei + 1) % 3];
+                int v1 = m_triangles[fi].verts_idxs[(ei + 2) % 3];
+                edges.emplace_back(v0, v1);
+            }
+        }
+    }
+    return edges;
+}
+
+// xyz fork: Precompute per-vertex max dihedral angle for edge/fillet detection.
+void TriangleSelector::precompute_vertex_curvature()
+{
+    if (m_vertex_curvature_computed)
+        return;
+
+    size_t num_verts = m_vertices.size();
+    m_vertex_max_dihedral.assign(num_verts, 0.f);
+
+    for (int fi = 0; fi < m_orig_size_indices; ++fi) {
+        for (int ei = 0; ei < 3; ++ei) {
+            int neighbor = m_neighbors[fi](ei);
+            if (neighbor < 0 || neighbor <= fi)
+                continue; // process each edge once
+
+            const Vec3f &n1 = m_face_normals[fi];
+            const Vec3f &n2 = m_face_normals[neighbor];
+            float cos_angle = std::clamp(n1.dot(n2), -1.f, 1.f);
+            float dihedral = std::acos(cos_angle);
+
+            // Edge vertices: edge ei connects vertices (ei+1)%3 and (ei+2)%3
+            int v0 = m_triangles[fi].verts_idxs[(ei + 1) % 3];
+            int v1 = m_triangles[fi].verts_idxs[(ei + 2) % 3];
+
+            if (v0 >= 0 && v0 < (int)num_verts)
+                m_vertex_max_dihedral[v0] = std::max(m_vertex_max_dihedral[v0], dihedral);
+            if (v1 >= 0 && v1 < (int)num_verts)
+                m_vertex_max_dihedral[v1] = std::max(m_vertex_max_dihedral[v1], dihedral);
+        }
+    }
+    m_vertex_curvature_computed = true;
+}
+
+// xyz fork: Select triangles forming an edge band near a seed point.
+// Finds the edge ridge (vertices with curvature above threshold) connected to the seed,
+// then expands outward by width_rings triangle rings.
+void TriangleSelector::select_edge_band_by_seed_fill(int facet_start, float curvature_threshold_deg, int width_rings)
+{
+    precompute_vertex_curvature();
+
+    float threshold_rad = Geometry::deg2rad(curvature_threshold_deg);
+
+    // Helper: is a triangle "on the ridge" (any vertex exceeds curvature threshold)?
+    auto is_ridge_triangle = [&](int tri_idx) -> bool {
+        if (tri_idx < 0 || tri_idx >= m_orig_size_indices)
+            return false;
+        for (int vi = 0; vi < 3; ++vi) {
+            int v = m_triangles[tri_idx].verts_idxs[vi];
+            if (v >= 0 && v < (int)m_vertex_max_dihedral.size() && m_vertex_max_dihedral[v] >= threshold_rad)
+                return true;
+        }
+        return false;
+    };
+
+    // Phase 1: BFS from seed to find all connected ridge triangles
+    std::vector<bool> visited(m_triangles.size(), false);
+    std::vector<int> ridge_triangles;
+    {
+        std::queue<int> q;
+        if (facet_start >= 0 && facet_start < m_orig_size_indices && is_ridge_triangle(facet_start)) {
+            q.push(facet_start);
+            visited[facet_start] = true;
+        }
+        while (!q.empty()) {
+            int cur = q.front();
+            q.pop();
+            ridge_triangles.push_back(cur);
+            for (int ni = 0; ni < 3; ++ni) {
+                int neighbor = m_neighbors[cur](ni);
+                if (neighbor >= 0 && neighbor < m_orig_size_indices && !visited[neighbor] && is_ridge_triangle(neighbor)) {
+                    visited[neighbor] = true;
+                    q.push(neighbor);
+                }
+            }
+        }
+    }
+
+    // Phase 2: Expand by width_rings from the ridge
+    std::set<int> band_triangles(ridge_triangles.begin(), ridge_triangles.end());
+    std::vector<int> frontier = ridge_triangles;
+
+    for (int ring = 0; ring < width_rings; ++ring) {
+        std::vector<int> next_frontier;
+        for (int tri : frontier) {
+            for (int ni = 0; ni < 3; ++ni) {
+                int neighbor = m_neighbors[tri](ni);
+                if (neighbor >= 0 && neighbor < m_orig_size_indices && band_triangles.find(neighbor) == band_triangles.end()) {
+                    band_triangles.insert(neighbor);
+                    next_frontier.push_back(neighbor);
+                }
+            }
+        }
+        frontier = std::move(next_frontier);
+    }
+
+    // Phase 3: Mark all leaf triangles in the band
+    for (int tri_idx : band_triangles) {
+        if (m_triangles[tri_idx].is_split()) {
+            // Recurse into children
+            std::queue<int> child_q;
+            for (int ci = 0; ci <= m_triangles[tri_idx].number_of_split_sides(); ++ci)
+                if (m_triangles[tri_idx].children[ci] >= 0)
+                    child_q.push(m_triangles[tri_idx].children[ci]);
+            while (!child_q.empty()) {
+                int c = child_q.front();
+                child_q.pop();
+                if (m_triangles[c].is_split()) {
+                    for (int ci = 0; ci <= m_triangles[c].number_of_split_sides(); ++ci)
+                        if (m_triangles[c].children[ci] >= 0)
+                            child_q.push(m_triangles[c].children[ci]);
+                } else {
+                    m_triangles[c].select_by_seed_fill();
+                }
+            }
+        } else {
+            m_triangles[tri_idx].select_by_seed_fill();
+        }
+    }
+}
+
+int TriangleSelector::find_nearest_ridge_triangle(int facet_start, float curvature_threshold_deg, int max_rings)
+{
+    precompute_vertex_curvature();
+    float threshold_rad = Geometry::deg2rad(curvature_threshold_deg);
+
+    auto is_ridge = [&](int tri) -> bool {
+        if (tri < 0 || tri >= m_orig_size_indices) return false;
+        for (int vi = 0; vi < 3; ++vi) {
+            int v = m_triangles[tri].verts_idxs[vi];
+            if (v >= 0 && v < (int)m_vertex_max_dihedral.size() && m_vertex_max_dihedral[v] >= threshold_rad)
+                return true;
+        }
+        return false;
+    };
+
+    if (facet_start >= 0 && facet_start < m_orig_size_indices && is_ridge(facet_start))
+        return facet_start;
+
+    std::vector<bool> searched(m_orig_size_indices, false);
+    std::queue<int> q;
+    if (facet_start >= 0 && facet_start < m_orig_size_indices) {
+        q.push(facet_start);
+        searched[facet_start] = true;
+    }
+    int rings = 0, ring_size = 1;
+    while (!q.empty() && rings < max_rings) {
+        int next_ring_size = 0;
+        for (int i = 0; i < ring_size && !q.empty(); ++i) {
+            int cur = q.front(); q.pop();
+            if (is_ridge(cur))
+                return cur;
+            for (int ni = 0; ni < 3; ++ni) {
+                int neighbor = m_neighbors[cur](ni);
+                if (neighbor >= 0 && neighbor < m_orig_size_indices && !searched[neighbor]) {
+                    searched[neighbor] = true;
+                    q.push(neighbor);
+                    ++next_ring_size;
+                }
+            }
+        }
+        ring_size = next_ring_size;
+        ++rings;
+    }
+    return -1;
+}
+
+Vec3f TriangleSelector::snap_to_edge(const Vec3f &hit, int facet_start, float curvature_threshold_deg, int max_rings)
+{
+    precompute_vertex_curvature();
+    float threshold_rad = Geometry::deg2rad(curvature_threshold_deg);
+
+    // Find the highest-curvature vertex near the hit point within max_rings
+    float best_curvature = 0.f;
+    int best_vertex = -1;
+    float best_dist_sq = std::numeric_limits<float>::max();
+
+    std::vector<bool> visited(m_orig_size_indices, false);
+    std::queue<int> q;
+    if (facet_start >= 0 && facet_start < m_orig_size_indices) {
+        q.push(facet_start);
+        visited[facet_start] = true;
+    }
+
+    int rings = 0, ring_size = 1;
+    while (!q.empty() && rings < max_rings) {
+        int next_ring_size = 0;
+        for (int i = 0; i < ring_size && !q.empty(); ++i) {
+            int cur = q.front(); q.pop();
+            // Check vertices of this triangle
+            for (int vi = 0; vi < 3; ++vi) {
+                int v = m_triangles[cur].verts_idxs[vi];
+                if (v >= 0 && v < (int)m_vertex_max_dihedral.size() && m_vertex_max_dihedral[v] >= threshold_rad) {
+                    float dist_sq = (m_vertices[v].v - hit).squaredNorm();
+                    // Prefer highest curvature, break ties by distance
+                    if (m_vertex_max_dihedral[v] > best_curvature ||
+                        (m_vertex_max_dihedral[v] == best_curvature && dist_sq < best_dist_sq)) {
+                        best_curvature = m_vertex_max_dihedral[v];
+                        best_vertex = v;
+                        best_dist_sq = dist_sq;
+                    }
+                }
+            }
+            for (int ni = 0; ni < 3; ++ni) {
+                int neighbor = m_neighbors[cur](ni);
+                if (neighbor >= 0 && neighbor < m_orig_size_indices && !visited[neighbor]) {
+                    visited[neighbor] = true;
+                    q.push(neighbor);
+                    ++next_ring_size;
+                }
+            }
+        }
+        ring_size = next_ring_size;
+        ++rings;
+    }
+
+    if (best_vertex >= 0)
+        return m_vertices[best_vertex].v;
+    return hit; // no ridge found, return original
+}
+
 TriangleSelector::Cursor::Cursor(const Vec3f &source_, float radius_world, const Transform3d &trafo_, const ClippingPlane &clipping_plane_)
     : source{source_}, trafo{trafo_.cast<float>()}, clipping_plane{clipping_plane_}
 {

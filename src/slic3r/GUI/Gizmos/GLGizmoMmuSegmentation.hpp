@@ -119,6 +119,15 @@ protected:
     // ORCA: Cache used filaments to filter UI
     std::set<size_t>                  m_used_filaments;      // Set of used filament indices (cached)
 
+    // xyz fork: Sharp edge preview
+    bool                              m_show_sharp_edges = false;
+    float                             m_sharp_edges_cached_angle = -1.f;
+public:
+    // xyz fork: Crease-snapping brush (public for GLGizmoPainterBase access)
+    bool                              m_snap_to_edges = false;
+    float                             m_snap_curvature_threshold = 15.f;
+protected:
+
     static const constexpr float      CursorRadiusMin = 0.1f; // cannot be zero
 
 private:
@@ -129,6 +138,8 @@ private:
     //BBS: add logic to distinguish the first_time_update and later_update
     void update_from_model_object(bool first_update = false) override;
     void tool_changed(wchar_t old_tool, wchar_t new_tool);
+
+public:
 
     void on_opening() override;
     void on_shutdown() override;
