@@ -5,6 +5,7 @@
 #include "libslic3r.h"
 #include "I18N.hpp"
 #include "GCode.hpp"
+#include "GCode/FilamentLookahead.hpp"
 #include "Exception.hpp"
 #include "ExtrusionEntity.hpp"
 #include "EdgeGrid.hpp"
@@ -3330,10 +3331,21 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
 
             tool_ordering.cal_most_used_extruder(print.config());
 
+            // xyz fork: Build Filament Lookahead plan if enabled
+            FilamentLookaheadPlan lookahead_plan;
+            if (print.config().filament_lookahead.value) {
+                lookahead_plan.build(print,
+                    print.config().filament_lookahead_max_height.value,
+                    print.config().filament_lookahead_clearance.value);
+                if (lookahead_plan.enabled())
+                    m_lookahead_plan = &lookahead_plan;
+            }
+
             // Process all layers of all objects (non-sequential mode) with a parallel pipeline:
             // Generate G-code, run the filters (vase mode, cooling buffer), run the G-code analyser
             // and export G-code into file.
             this->process_layers(print, tool_ordering, print_object_instances_ordering, layers_to_print, file);
+            m_lookahead_plan = nullptr; // clear after use
             {
                 //save the flush statitics stored in tool ordering
                 print.m_statistics_by_extruder_count.stats_by_single_extruder = tool_ordering.get_filament_change_stats(ToolOrdering::FilamentChangeMode::SingleExt);
@@ -3552,6 +3564,7 @@ void GCode::process_layers(
                     return LayerResult::make_nop_layer_result();
                 }
             } else {
+                m_current_layer_idx = layer_to_print_idx; // xyz fork: track for Filament Lookahead
                 const std::pair<coordf_t, std::vector<LayerToPrint>>& layer = layers_to_print[layer_to_print_idx++];
                 const LayerTools& layer_tools = tool_ordering.tools_for_layer(layer.first);
                 print.set_status(80, Slic3r::format(_(L("Generating G-code: layer %1%")), std::to_string(layer_to_print_idx)));
@@ -5015,6 +5028,12 @@ LayerResult GCode::process_layer(
     // Extrude the skirt, brim, support, perimeters, infill ordered by the extruders.
     for (unsigned int extruder_id : layer_tools.extruders)
     {
+        // xyz fork: Filament Lookahead - skip extruders already printed by a previous layer's lookahead
+        if (m_lookahead_plan && m_lookahead_plan->already_printed(m_current_layer_idx, extruder_id)) {
+            gcode += "; LOOKAHEAD_SKIP extruder=" + std::to_string(extruder_id) + " (already printed by lookahead)\n";
+            continue;
+        }
+
         if (print.config().skirt_type == stCombined && !print.skirt().empty())
             gcode += generate_skirt(print, print.skirt(), Point(0, 0), layer.object()->config().skirt_start_angle, layer_tools, layer,
                                     extruder_id);
@@ -5313,6 +5332,129 @@ LayerResult GCode::process_layer(
                         }
                     }
                 }
+            }
+        }
+
+        // xyz fork: Filament Lookahead - print extra layers ahead if this extruder is isolated
+        if (m_lookahead_plan && m_lookahead_plan->enabled()) {
+            size_t extra = m_lookahead_plan->extra_layers(m_current_layer_idx, extruder_id);
+            if (extra > 0) {
+                gcode += "; LOOKAHEAD_BEGIN extruder=" + std::to_string(extruder_id)
+                    + " extra_layers=" + std::to_string(extra) + "\n";
+
+                // Emit exclusion zone metadata
+                auto zones = m_lookahead_plan->exclusion_zones(m_current_layer_idx);
+                // Use the plan entry's exclusion bbox
+                {
+                    auto entry_extra = m_lookahead_plan->extra_layers(m_current_layer_idx, extruder_id);
+                    if (entry_extra > 0) {
+                        // Get the entry to access bbox
+                        auto excl_zones = m_lookahead_plan->exclusion_zones(m_current_layer_idx + 1);
+                        for (const auto &zone : excl_zones) {
+                            gcode += "; LOOKAHEAD_EXCLUSION_ZONE"
+                                " x_min=" + std::to_string(unscale<double>(zone.min.x())) +
+                                " y_min=" + std::to_string(unscale<double>(zone.min.y())) +
+                                " x_max=" + std::to_string(unscale<double>(zone.max.x())) +
+                                " y_max=" + std::to_string(unscale<double>(zone.max.y())) +
+                                "\n";
+                        }
+                    }
+                }
+
+                // Save state
+                coordf_t saved_nominal_z = m_nominal_z;
+                float saved_max_layer_z = m_max_layer_z;
+
+                // For each extra layer, generate extrusions for this extruder
+                const PrintObject *obj = print.objects().empty() ? nullptr : print.objects().front();
+                if (obj) {
+                    const auto &obj_layers = obj->layers();
+                    // Find the object layer index matching our current layer
+                    // m_current_layer_idx is the index in layers_to_print
+                    for (size_t k = 1; k <= extra; ++k) {
+                        // Find the object layer at the future Z
+                        size_t future_obj_li = 0;
+                        bool found = false;
+                        for (size_t li = 0; li < obj_layers.size(); ++li) {
+                            // Match approximately
+                            if (li > 0 && obj_layers[li]->print_z > layer_tools.print_z + EPSILON) {
+                                // Count k layers ahead from the current
+                                static size_t last_match = 0;
+                                if (k == 1) {
+                                    // Find the first layer above current
+                                    for (size_t search = 0; search < obj_layers.size(); ++search) {
+                                        if (obj_layers[search]->print_z > layer_tools.print_z + EPSILON) {
+                                            future_obj_li = search;
+                                            last_match = search;
+                                            found = true;
+                                            break;
+                                        }
+                                    }
+                                } else {
+                                    future_obj_li = last_match + k - 1;
+                                    found = (future_obj_li < obj_layers.size());
+                                }
+                                break;
+                            }
+                        }
+
+                        if (!found || future_obj_li >= obj_layers.size())
+                            break;
+
+                        const Layer &future_layer = *obj_layers[future_obj_li];
+                        coordf_t future_z = future_layer.print_z;
+
+                        gcode += "; LOOKAHEAD_LAYER z=" + std::to_string(future_z)
+                            + " extruder=" + std::to_string(extruder_id) + "\n";
+
+                        // Move to future Z
+                        gcode += m_writer.travel_to_z(future_z + m_config.z_offset.value,
+                            "Filament Lookahead: advance to next layer");
+                        m_nominal_z = future_z + m_config.z_offset.value;
+
+                        // Generate extrusions for this extruder from the future layer
+                        // Helper lambda to extrude an entity, recursing into collections
+                        std::function<std::string(const ExtrusionEntity*, const std::string&)> extrude_recursive;
+                        extrude_recursive = [&](const ExtrusionEntity *ee, const std::string &desc) -> std::string {
+                            if (!ee) return {};
+                            if (auto *coll = dynamic_cast<const ExtrusionEntityCollection*>(ee)) {
+                                std::string g;
+                                for (const ExtrusionEntity *child : coll->entities)
+                                    g += extrude_recursive(child, desc);
+                                return g;
+                            }
+                            return this->extrude_entity(*ee, desc);
+                        };
+
+                        for (size_t region_idx = 0; region_idx < future_layer.regions().size(); ++region_idx) {
+                            const LayerRegion *region = future_layer.regions()[region_idx];
+                            if (!region) continue;
+                            unsigned int region_extruder = region->region().config().wall_filament.value - 1;
+                            if (region_extruder != extruder_id) continue;
+
+                            // Print perimeters
+                            for (const ExtrusionEntity *ee : region->perimeters.entities)
+                                gcode += extrude_recursive(ee, "lookahead perimeter");
+                            // Print fills
+                            for (const ExtrusionEntity *ee : region->fills.entities)
+                                gcode += extrude_recursive(ee, "lookahead infill");
+                        }
+
+                        // Update max layer z
+                        m_max_layer_z = std::max(m_max_layer_z, (float)future_z);
+
+                        // Mark as printed
+                        m_lookahead_plan->mark_printed(m_current_layer_idx + k, extruder_id);
+                    }
+                }
+
+                // Return to current layer Z
+                gcode += m_writer.travel_to_z(saved_nominal_z,
+                    "Filament Lookahead: return to current layer");
+                m_nominal_z = saved_nominal_z;
+                // Keep m_max_layer_z elevated for travel safety
+
+                gcode += "; LOOKAHEAD_END\n";
             }
         }
     }
@@ -7031,6 +7173,15 @@ std::string GCode::_encode_label_ids_to_base64(std::vector<size_t> ids)
 // This method accepts &point in print coordinates.
 std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string comment, double z/* = DBL_MAX*/)
 {
+    // xyz fork: Filament Lookahead - raise travel Z if there are raised regions on this layer
+    if (m_lookahead_plan && m_lookahead_plan->enabled() && z == DBL_MAX) {
+        coordf_t raised_z = m_lookahead_plan->max_raised_z(m_current_layer_idx);
+        if (raised_z > 0 && raised_z > m_nominal_z) {
+            // Raise travel to clear the raised region
+            z = raised_z + m_config.z_offset.value + 0.3; // 0.3mm extra clearance
+        }
+    }
+
     /*  Define the travel move as a line between current position and the taget point.
         This is expressed in print coordinates, so it will need to be translated by
         this->origin in order to get G-code coordinates.  */

@@ -27,24 +27,24 @@ static std::map<unsigned int, BoundingBox> compute_per_extruder_bboxes(
         BoundingBox region_bbox;
         bool has_bbox = false;
 
-        if (!region->perimeters.empty()) {
-            for (const ExtrusionEntity *ee : region->perimeters.entities) {
-                if (ee) {
-                    BoundingBox ee_bbox = get_extents(ee->as_polyline());
-                    if (has_bbox) region_bbox.merge(ee_bbox);
-                    else { region_bbox = ee_bbox; has_bbox = true; }
-                }
+        // Recursively collect bounding box from extrusion entities (handles collections)
+        std::function<void(const ExtrusionEntity*)> collect_bbox;
+        collect_bbox = [&](const ExtrusionEntity *ee) {
+            if (!ee) return;
+            if (auto *coll = dynamic_cast<const ExtrusionEntityCollection*>(ee)) {
+                for (const ExtrusionEntity *child : coll->entities)
+                    collect_bbox(child);
+            } else {
+                BoundingBox ee_bbox = get_extents(ee->as_polyline());
+                if (has_bbox) region_bbox.merge(ee_bbox);
+                else { region_bbox = ee_bbox; has_bbox = true; }
             }
-        }
-        if (!region->fills.empty()) {
-            for (const ExtrusionEntity *ee : region->fills.entities) {
-                if (ee) {
-                    BoundingBox ee_bbox = get_extents(ee->as_polyline());
-                    if (has_bbox) region_bbox.merge(ee_bbox);
-                    else { region_bbox = ee_bbox; has_bbox = true; }
-                }
-            }
-        }
+        };
+
+        for (const ExtrusionEntity *ee : region->perimeters.entities)
+            collect_bbox(ee);
+        for (const ExtrusionEntity *ee : region->fills.entities)
+            collect_bbox(ee);
 
         if (has_bbox) {
             auto it = result.find(extruder_id);

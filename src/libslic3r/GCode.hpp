@@ -623,6 +623,10 @@ private:
     //some post-processing on the file, with their data class
     std::unique_ptr<FanMover> m_fan_mover;
 
+    // xyz fork: Filament Lookahead
+    class FilamentLookaheadPlan *m_lookahead_plan = nullptr;
+    size_t m_current_layer_idx = 0;
+
     // BBS
     Print* m_curr_print = nullptr;
     unsigned int m_toolchange_count;
