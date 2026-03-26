@@ -902,6 +902,36 @@ void ToolOrdering::fill_wipe_tower_partitions(const PrintConfig &config, coordf_
             }
     }
 
+    // xyz fork: Stop prime tower early if no more tool changes remain above.
+    // Scan from top to bottom. Track whether any layer above (inclusive) has a tool change.
+    // A tool change on a layer means wipe_tower_partitions > 0 (computed before propagation).
+    // We recompute per-layer partitions without propagation to get the actual tool changes per layer.
+    {
+        // Recompute per-layer tool changes (without the downward propagation that was done earlier)
+        size_t last_ext = size_t(-1);
+        std::vector<size_t> actual_partitions(m_layer_tools.size(), 0);
+        for (size_t i = 0; i < m_layer_tools.size(); ++i) {
+            actual_partitions[i] = m_layer_tools[i].extruders.size();
+            if (!m_layer_tools[i].extruders.empty()) {
+                if (last_ext == size_t(-1) || last_ext == m_layer_tools[i].extruders.front())
+                    --actual_partitions[i];
+                last_ext = m_layer_tools[i].extruders.back();
+            }
+        }
+        // Scan from top: if no tool changes on this layer or any layer above, clear has_wipe_tower
+        bool any_changes_above = false;
+        for (int i = int(m_layer_tools.size()) - 1; i >= 0; --i) {
+            if (actual_partitions[i] > 0)
+                any_changes_above = true;
+            if (!any_changes_above && m_layer_tools[i].has_wipe_tower) {
+                // No tool changes on this layer or above - skip the prime tower
+                // Exception: keep wipe tower for wrapping detection layers and timelapse
+                if (config.timelapse_type != TimelapseType::tlSmooth)
+                    m_layer_tools[i].has_wipe_tower = false;
+            }
+        }
+    }
+
     // Calculate the wipe_tower_layer_height values.
     coordf_t wipe_tower_print_z_last = 0.;
     for (LayerTools &lt : m_layer_tools)
