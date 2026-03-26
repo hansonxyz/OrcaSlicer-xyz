@@ -5045,14 +5045,13 @@ LayerResult GCode::process_layer(
     // Extrude the skirt, brim, support, perimeters, infill ordered by the extruders.
     for (unsigned int extruder_id : layer_tools.extruders)
     {
-        // xyz fork: Filament Lookahead - skip model extrusions for extruders already
-        // printed by lookahead, but keep the full wipe tower sequence so the tower
-        // stays structurally sound and the purge counter stays in sync.
+        // xyz fork: Filament Lookahead - DISABLED for now, visualization only.
+        // When enabled, this would skip model extrusions for extruders already
+        // printed by lookahead. Currently just prints normally on all layers.
         bool lookahead_skip_extrusions = false;
-        if (m_lookahead_plan && m_lookahead_plan->already_printed(m_current_layer_idx, extruder_id)) {
-            gcode += "; LOOKAHEAD_SKIP extruder=" + std::to_string(extruder_id) + " (model extrusions already printed by lookahead)\n";
-            lookahead_skip_extrusions = true;
-        }
+        // if (m_lookahead_plan && m_lookahead_plan->already_printed(m_current_layer_idx, extruder_id)) {
+        //     lookahead_skip_extrusions = true;
+        // }
 
         if (print.config().skirt_type == stCombined && !print.skirt().empty())
             gcode += generate_skirt(print, print.skirt(), Point(0, 0), layer.object()->config().skirt_start_angle, layer_tools, layer,
@@ -5360,8 +5359,10 @@ LayerResult GCode::process_layer(
             }
         }
 
-        // xyz fork: Filament Lookahead - print extra layers ahead if this extruder is isolated
-        if (m_lookahead_plan && m_lookahead_plan->enabled()) {
+        // xyz fork: Filament Lookahead - DISABLED actual printing for now (visualization only).
+        // The exclusion zone comments are emitted per-layer above the extruder loop.
+        // This block would print extra layers ahead - re-enable once visualization is verified.
+        if (false && m_lookahead_plan && m_lookahead_plan->enabled()) {
             size_t extra = m_lookahead_plan->extra_layers(m_current_layer_idx, extruder_id);
             if (extra > 0) {
                 gcode += "; LOOKAHEAD_BEGIN extruder=" + std::to_string(extruder_id)
@@ -7198,14 +7199,14 @@ std::string GCode::_encode_label_ids_to_base64(std::vector<size_t> ids)
 // This method accepts &point in print coordinates.
 std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string comment, double z/* = DBL_MAX*/)
 {
-    // xyz fork: Filament Lookahead - raise travel Z if there are raised regions on this layer
-    if (m_lookahead_plan && m_lookahead_plan->enabled() && z == DBL_MAX) {
-        coordf_t raised_z = m_lookahead_plan->max_raised_z(m_current_layer_idx);
-        if (raised_z > 0 && raised_z > m_nominal_z) {
-            // Raise travel to clear the raised region
-            z = raised_z + m_config.z_offset.value + 0.3; // 0.3mm extra clearance
-        }
-    }
+    // xyz fork: Filament Lookahead - DISABLED travel Z raise for now (visualization only)
+    // Re-enable once actual lookahead printing is working.
+    // if (m_lookahead_plan && m_lookahead_plan->enabled() && z == DBL_MAX) {
+    //     coordf_t raised_z = m_lookahead_plan->max_raised_z(m_current_layer_idx);
+    //     if (raised_z > 0 && raised_z > m_nominal_z) {
+    //         z = raised_z + m_config.z_offset.value + 0.3;
+    //     }
+    // }
 
     /*  Define the travel move as a line between current position and the taget point.
         This is expressed in print coordinates, so it will need to be translated by
