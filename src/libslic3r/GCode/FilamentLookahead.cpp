@@ -229,8 +229,15 @@ void FilamentLookaheadPlan::build(const Print &print,
                     entry.extra_layers = extra;
                     entry.raised_z = layers[li + extra]->print_z;
                     entry.raised_bbox = ext_bbox;
-                    entry.exclusion_bbox = ext_bbox;
-                    entry.exclusion_bbox.offset(clearance_scaled);
+                    // Use MERGED (plate-coordinate) bbox for exclusion zone rendering
+                    auto merged_it = layer_extruder_bboxes[li].find(ext_id);
+                    if (merged_it != layer_extruder_bboxes[li].end()) {
+                        entry.exclusion_bbox = merged_it->second;
+                        entry.exclusion_bbox.offset(clearance_scaled);
+                    } else {
+                        entry.exclusion_bbox = ext_bbox;
+                        entry.exclusion_bbox.offset(clearance_scaled);
+                    }
 
                     m_plan[{li, ext_id}] = entry;
 
