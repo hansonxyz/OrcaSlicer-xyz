@@ -19,7 +19,7 @@ public:
         size_t      extra_layers = 0;       // how many layers ahead to print
         coordf_t    raised_z = 0.;          // max Z of the raised region
         BoundingBox raised_bbox;            // XY bbox of the raised region (scaled coords)
-        BoundingBox exclusion_bbox;         // raised_bbox inflated by clearance
+        std::vector<BoundingBox> exclusion_bboxes; // per-instance exclusion zones inflated by clearance
     };
 
     // Build the plan by analyzing all layers of the print.

@@ -2137,8 +2137,13 @@ void GCode::do_export(Print* print, const char* path, GCodeProcessorResult* resu
     m_processor.finalize(true);
 //    DoExport::update_print_estimated_times_stats(m_processor, print->m_print_statistics);
     DoExport::update_print_estimated_stats(m_processor, m_writer.extruders(), print->m_print_statistics, print->config());
+
+    fprintf(stderr, "LOOKAHEAD_DEBUG: pre-extract zones in m_processor.result()=%zu\n",
+        m_processor.result().lookahead_exclusion_zones.size());
     if (result != nullptr) {
         *result = std::move(m_processor.extract_result());
+        fprintf(stderr, "LOOKAHEAD_DEBUG: post-extract zones in result=%zu\n",
+            result->lookahead_exclusion_zones.size());
         // set the filename to the correct value
         result->filename = path;
     }
@@ -3333,6 +3338,7 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
 
             // xyz fork: Build Filament Lookahead plan if enabled
             FilamentLookaheadPlan lookahead_plan;
+            fprintf(stderr, "LOOKAHEAD_DEBUG: filament_lookahead=%d\n", (int)print.config().filament_lookahead.value);
             if (print.config().filament_lookahead.value) {
                 lookahead_plan.build(print,
                     print.config().filament_lookahead_max_height.value,
@@ -3345,6 +3351,30 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
             // Generate G-code, run the filters (vase mode, cooling buffer), run the G-code analyser
             // and export G-code into file.
             this->process_layers(print, tool_ordering, print_object_instances_ordering, layers_to_print, file);
+
+            // xyz fork: Copy lookahead exclusion zones from the plan to the processor result
+            // so the viewer can render them. Must happen before clearing the plan pointer.
+            if (m_lookahead_plan && m_lookahead_plan->enabled()) {
+                auto &zones = m_processor.result().lookahead_exclusion_zones;
+                const auto &layers = print.objects().front()->layers();
+                for (size_t li = 0; li < layers.size(); ++li) {
+                    auto excl = m_lookahead_plan->exclusion_zones(li);
+                    for (const auto &bbox : excl) {
+                        GCodeProcessorResult::ExclusionZone zone;
+                        zone.x_min = (float)unscale<double>(bbox.min.x());
+                        zone.y_min = (float)unscale<double>(bbox.min.y());
+                        zone.x_max = (float)unscale<double>(bbox.max.x());
+                        zone.y_max = (float)unscale<double>(bbox.max.y());
+                        zone.layer_z = (float)layers[li]->print_z;
+                        zone.z_max = (float)m_lookahead_plan->max_raised_z(li);
+                        zones.push_back(zone);
+                    }
+                }
+                BOOST_LOG_TRIVIAL(info) << "FilamentLookahead: populated " << zones.size() << " exclusion zones for viewer";
+                fprintf(stderr, "LOOKAHEAD_DEBUG: populated %zu zones into m_processor.result()\n", zones.size());
+            } else {
+                fprintf(stderr, "LOOKAHEAD_DEBUG: plan null or not enabled (plan=%p)\n", (void*)m_lookahead_plan);
+            }
             m_lookahead_plan = nullptr; // clear after use
             {
                 //save the flush statitics stored in tool ordering

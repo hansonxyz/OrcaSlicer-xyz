@@ -1584,6 +1584,7 @@ void GCodeProcessorResult::reset() {
     layer_filaments.clear();
     filament_change_count_map.clear();
     warnings.clear();
+    lookahead_exclusion_zones.clear(); // xyz fork
 
     //BBS: add mutex for protection of gcode result
     unlock();
@@ -2566,6 +2567,16 @@ void GCodeProcessor::process_file(const std::string& filename, std::function<voi
 
     // Don't post-process the G-code to update time stamps.
     this->finalize(false);
+
+    // xyz fork debug: log zone count after processing
+    {
+        FILE *dbg = fopen("C:/Users/brian/AppData/Local/Temp/lookahead_process_done.log", "a");
+        if (dbg) {
+            fprintf(dbg, "process_file done: zones=%zu file=%s\n",
+                m_result.lookahead_exclusion_zones.size(), filename.c_str());
+            fclose(dbg);
+        }
+    }
 }
 
 void GCodeProcessor::initialize(const std::string& filename)
@@ -3039,7 +3050,15 @@ void GCodeProcessor::process_tags(const std::string_view comment, bool producers
     }
 
     // xyz fork: parse Filament Lookahead exclusion zone comments
-    if (boost::starts_with(comment, " LOOKAHEAD_EXCLUSION_ZONE")) {
+    if (boost::starts_with(comment, " LOOKAHEAD_EXCLUSION_ZONE") ||
+        boost::starts_with(comment, "LOOKAHEAD_EXCLUSION_ZONE")) {
+        // Debug: write to log file
+        static bool parse_logged = false;
+        if (!parse_logged) {
+            FILE *dbg = fopen("C:/Users/brian/AppData/Local/Temp/lookahead_parse_debug.log", "w");
+            if (dbg) { fprintf(dbg, "Parsing LOOKAHEAD_EXCLUSION_ZONE comment: [%.*s]\n", (int)comment.size(), comment.data()); fclose(dbg); }
+            parse_logged = true;
+        }
         GCodeProcessorResult::ExclusionZone zone{};
         zone.layer_z = m_end_position[2]; // current Z
         // Parse: " LOOKAHEAD_EXCLUSION_ZONE x_min=... y_min=... x_max=... y_max=... z_max=..."

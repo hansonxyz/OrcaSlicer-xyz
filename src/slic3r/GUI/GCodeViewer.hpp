@@ -180,6 +180,7 @@ public:
     // xyz fork: Filament Lookahead exclusion zone rendering
     GLModel m_lookahead_zones_model;
     bool    m_lookahead_zones_dirty = true;
+    bool    m_lookahead_zones_visible = true;
     void    render_lookahead_zones();
     void    update_lookahead_zones();
 

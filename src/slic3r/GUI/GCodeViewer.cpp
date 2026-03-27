@@ -3677,6 +3677,14 @@ void GCodeViewer::render_legend(float &legend_height, int canvas_width, int canv
                     });
             }
         }
+        // xyz fork: Lookahead Zones toggle (only show if zones exist)
+        if (m_gcode_result && !m_gcode_result->lookahead_exclusion_zones.empty()) {
+            append_item(EItemType::Rect, ColorRGBA(1.0f, 0.9f, 0.0f, 0.3f),
+                {{ _u8L("Lookahead Zones"), offsets[0] }}, true, offsets.back(),
+                m_lookahead_zones_visible, [this]() {
+                    m_lookahead_zones_visible = !m_lookahead_zones_visible;
+                });
+        }
         break;
     }
     case libvgcode::EViewType::Height:                   { append_range(m_viewer.get_color_range(libvgcode::EViewType::Height), 2); break; }
@@ -4476,7 +4484,9 @@ void GCodeViewer::update_lookahead_zones()
 
 void GCodeViewer::render_lookahead_zones()
 {
-    if (!m_gcode_result || m_gcode_result->lookahead_exclusion_zones.empty())
+    if (!m_lookahead_zones_visible) return;
+    if (!m_gcode_result) return;
+    if (m_gcode_result->lookahead_exclusion_zones.empty())
         return;
 
     if (m_lookahead_zones_dirty)

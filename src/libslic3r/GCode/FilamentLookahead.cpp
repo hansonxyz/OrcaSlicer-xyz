@@ -5,6 +5,7 @@
 
 #include <boost/log/trivial.hpp>
 #include <queue>
+#include <numeric>
 
 namespace Slic3r {
 
@@ -47,12 +48,16 @@ void FilamentLookaheadPlan::build(const Print &print,
     const size_t num_layers = layers.size();
     m_raised_per_layer.resize(num_layers);
 
+    size_t total_instances = 0;
+    for (const PrintObject *pobj : print.objects())
+        total_instances += pobj->instances().size();
     BOOST_LOG_TRIVIAL(info) << "FilamentLookahead: analyzing " << num_layers << " layers"
         << " max_height=" << max_lookahead_height_mm << "mm"
         << " clearance=" << min_clearance_distance_mm << "mm"
-        << " num_objects=" << print.objects().size();
-    fprintf(stderr, "FilamentLookahead: analyzing %zu layers, max_height=%.1fmm, clearance=%.1fmm, objects=%zu\n",
-        num_layers, max_lookahead_height_mm, min_clearance_distance_mm, print.objects().size());
+        << " num_objects=" << print.objects().size()
+        << " total_instances=" << total_instances;
+    fprintf(stderr, "FilamentLookahead: analyzing %zu layers, max_height=%.1fmm, clearance=%.1fmm, objects=%zu, instances=%zu\n",
+        num_layers, max_lookahead_height_mm, min_clearance_distance_mm, print.objects().size(), total_instances);
 
     // Pre-compute per-extruder bboxes for all layers.
     // Key insight: check isolation PER INSTANCE, not across all instances merged.
@@ -60,22 +65,54 @@ void FilamentLookaheadPlan::build(const Print &print,
     // This handles plates with multiple objects where each object's gold nub is
     // isolated from its own body but the merged bboxes would overlap.
 
-    // Helper to collect bbox from extrusion entities recursively
-    std::function<void(const ExtrusionEntity*, BoundingBox&, bool&)> collect_bbox;
-    collect_bbox = [&](const ExtrusionEntity *ee, BoundingBox &bbox, bool &has) {
+    // Helper to collect individual bboxes from extrusion entities recursively
+    std::function<void(const ExtrusionEntity*, std::vector<BoundingBox>&)> collect_bboxes;
+    collect_bboxes = [&](const ExtrusionEntity *ee, std::vector<BoundingBox> &out) {
         if (!ee) return;
         if (auto *coll = dynamic_cast<const ExtrusionEntityCollection*>(ee)) {
             for (const ExtrusionEntity *child : coll->entities)
-                collect_bbox(child, bbox, has);
+                collect_bboxes(child, out);
         } else {
-            BoundingBox ee_bbox = get_extents(ee->as_polyline());
-            if (has) bbox.merge(ee_bbox);
-            else { bbox = ee_bbox; has = true; }
+            out.push_back(get_extents(ee->as_polyline()));
         }
     };
 
-    // For the merged view (used for the final plan), we still need per-extruder bboxes
-    std::vector<std::map<unsigned int, BoundingBox>> layer_extruder_bboxes(num_layers);
+    // Cluster bboxes into spatially connected groups.
+    // Two bboxes are in the same cluster if they overlap when inflated by clearance.
+    auto cluster_bboxes = [](const std::vector<BoundingBox> &bboxes, coord_t clearance) -> std::vector<BoundingBox> {
+        if (bboxes.empty()) return {};
+        // Union-find
+        std::vector<size_t> parent(bboxes.size());
+        std::iota(parent.begin(), parent.end(), 0);
+        std::function<size_t(size_t)> find = [&](size_t i) -> size_t {
+            return parent[i] == i ? i : (parent[i] = find(parent[i]));
+        };
+        for (size_t i = 0; i < bboxes.size(); ++i) {
+            for (size_t j = i + 1; j < bboxes.size(); ++j) {
+                if (bboxes_too_close(bboxes[i], bboxes[j], clearance)) {
+                    parent[find(i)] = find(j);
+                }
+            }
+        }
+        // Merge bboxes by cluster
+        std::map<size_t, BoundingBox> clusters;
+        for (size_t i = 0; i < bboxes.size(); ++i) {
+            size_t root = find(i);
+            auto it = clusters.find(root);
+            if (it != clusters.end())
+                it->second.merge(bboxes[i]);
+            else
+                clusters[root] = bboxes[i];
+        }
+        std::vector<BoundingBox> result;
+        for (auto &[_, bbox] : clusters)
+            result.push_back(bbox);
+        return result;
+    };
+
+    // Per-layer: per-extruder individual entity bboxes in plate coordinates
+    // These will be clustered into spatially connected groups for exclusion zones
+    std::vector<std::map<unsigned int, std::vector<BoundingBox>>> layer_extruder_entity_bboxes(num_layers);
 
     // Per-layer: per-extruder bboxes for a SINGLE object (before instance translation)
     // We check isolation on the single-object level since all instances share the same geometry
@@ -92,30 +129,33 @@ void FilamentLookaheadPlan::build(const Print &print,
 
                 unsigned int extruder_id = region->region().config().wall_filament.value - 1;
 
-                BoundingBox region_bbox;
-                bool has_bbox = false;
+                // Collect individual entity bboxes
+                std::vector<BoundingBox> entity_bboxes;
                 for (const ExtrusionEntity *ee : region->perimeters.entities)
-                    collect_bbox(ee, region_bbox, has_bbox);
+                    collect_bboxes(ee, entity_bboxes);
                 for (const ExtrusionEntity *ee : region->fills.entities)
-                    collect_bbox(ee, region_bbox, has_bbox);
+                    collect_bboxes(ee, entity_bboxes);
 
-                if (has_bbox) {
-                    // Single-object bboxes (no instance translation)
+                if (!entity_bboxes.empty()) {
+                    // Single-object merged bbox (for isolation check)
+                    BoundingBox region_bbox = entity_bboxes.front();
+                    for (size_t i = 1; i < entity_bboxes.size(); ++i)
+                        region_bbox.merge(entity_bboxes[i]);
+
                     auto it = layer_extruder_bboxes_single[li].find(extruder_id);
                     if (it != layer_extruder_bboxes_single[li].end())
                         it->second.merge(region_bbox);
                     else
                         layer_extruder_bboxes_single[li][extruder_id] = region_bbox;
 
-                    // Merged bboxes (with instance translation, for the plan)
+                    // Per-entity bboxes in plate coordinates (for clustering)
+                    auto &plate_bboxes = layer_extruder_entity_bboxes[li][extruder_id];
                     for (const PrintInstance &inst : pobj->instances()) {
-                        BoundingBox inst_bbox = region_bbox;
-                        inst_bbox.translate(inst.shift);
-                        auto it2 = layer_extruder_bboxes[li].find(extruder_id);
-                        if (it2 != layer_extruder_bboxes[li].end())
-                            it2->second.merge(inst_bbox);
-                        else
-                            layer_extruder_bboxes[li][extruder_id] = inst_bbox;
+                        for (const auto &eb : entity_bboxes) {
+                            BoundingBox pb = eb;
+                            pb.translate(inst.shift);
+                            plate_bboxes.push_back(pb);
+                        }
                     }
                 }
             }
@@ -229,14 +269,18 @@ void FilamentLookaheadPlan::build(const Print &print,
                     entry.extra_layers = extra;
                     entry.raised_z = layers[li + extra]->print_z;
                     entry.raised_bbox = ext_bbox;
-                    // Use MERGED (plate-coordinate) bbox for exclusion zone rendering
-                    auto merged_it = layer_extruder_bboxes[li].find(ext_id);
-                    if (merged_it != layer_extruder_bboxes[li].end()) {
-                        entry.exclusion_bbox = merged_it->second;
-                        entry.exclusion_bbox.offset(clearance_scaled);
+                    // Cluster entity bboxes into spatially connected groups
+                    auto ent_it = layer_extruder_entity_bboxes[li].find(ext_id);
+                    if (ent_it != layer_extruder_entity_bboxes[li].end()) {
+                        auto clusters = cluster_bboxes(ent_it->second, clearance_scaled);
+                        for (auto &cb : clusters) {
+                            cb.offset(clearance_scaled);
+                            entry.exclusion_bboxes.push_back(cb);
+                        }
                     } else {
-                        entry.exclusion_bbox = ext_bbox;
-                        entry.exclusion_bbox.offset(clearance_scaled);
+                        BoundingBox fb = ext_bbox;
+                        fb.offset(clearance_scaled);
+                        entry.exclusion_bboxes.push_back(fb);
                     }
 
                     m_plan[{li, ext_id}] = entry;
@@ -246,13 +290,14 @@ void FilamentLookaheadPlan::build(const Print &print,
                         if (future_li < m_raised_per_layer.size()) {
                             m_raised_per_layer[future_li].max_z = std::max(
                                 m_raised_per_layer[future_li].max_z, entry.raised_z);
-                            m_raised_per_layer[future_li].exclusion_bboxes.push_back(entry.exclusion_bbox);
+                            for (const auto &eb : entry.exclusion_bboxes)
+                                m_raised_per_layer[future_li].exclusion_bboxes.push_back(eb);
                         }
                     }
 
                     m_enabled = true;
-                    fprintf(stderr, "  PLAN: L%zu ext=%u extra=%zu raised_z=%.2f\n",
-                        li, ext_id, extra, entry.raised_z);
+                    fprintf(stderr, "  PLAN: L%zu ext=%u extra=%zu raised_z=%.2f zones=%zu\n",
+                        li, ext_id, extra, entry.raised_z, entry.exclusion_bboxes.size());
                 }
                 continue; // skip the bbox-based forward scan
             }
@@ -310,8 +355,19 @@ void FilamentLookaheadPlan::build(const Print &print,
                 entry.extra_layers = extra;
                 entry.raised_z = layers[li + extra]->print_z;
                 entry.raised_bbox = accumulated_bbox;
-                entry.exclusion_bbox = accumulated_bbox;
-                entry.exclusion_bbox.offset(clearance_scaled);
+                // Cluster entity bboxes into spatially connected groups
+                auto ent_it = layer_extruder_entity_bboxes[li].find(ext_id);
+                if (ent_it != layer_extruder_entity_bboxes[li].end()) {
+                    auto clusters = cluster_bboxes(ent_it->second, clearance_scaled);
+                    for (auto &cb : clusters) {
+                        cb.offset(clearance_scaled);
+                        entry.exclusion_bboxes.push_back(cb);
+                    }
+                } else {
+                    BoundingBox fb = accumulated_bbox;
+                    fb.offset(clearance_scaled);
+                    entry.exclusion_bboxes.push_back(fb);
+                }
 
                 m_plan[{li, ext_id}] = entry;
 
@@ -321,7 +377,8 @@ void FilamentLookaheadPlan::build(const Print &print,
                     if (future_li < m_raised_per_layer.size()) {
                         m_raised_per_layer[future_li].max_z = std::max(
                             m_raised_per_layer[future_li].max_z, entry.raised_z);
-                        m_raised_per_layer[future_li].exclusion_bboxes.push_back(entry.exclusion_bbox);
+                        for (const auto &eb : entry.exclusion_bboxes)
+                            m_raised_per_layer[future_li].exclusion_bboxes.push_back(eb);
                     }
                 }
 

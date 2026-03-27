@@ -80,6 +80,11 @@ powershell.exe -Command "Start-Process -FilePath 'build\OrcaSlicer\orca-slicer.e
 - Pass the current test file as a CLI argument to save the user a step
 - For headless/CLI testing, invoke directly and capture output
 - Current test file: `Z:\cabinets\Things\Projects\drg_buff_beer_mugs_coloration_2.3mf` (plate 1)
+- If OrcaSlicer is blocking a build (DLL locked), kill it before building:
+  ```bash
+  # taskkill does NOT work reliably from Git Bash. Use PowerShell:
+  powershell.exe -Command "Stop-Process -Name orca-slicer -Force"
+  ```
 
 ### CLI Headless Slicing (for testing xyz fork features)
 OrcaSlicer supports headless CLI slicing. This is useful for testing features like Filament Lookahead without the GUI:
