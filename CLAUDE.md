@@ -8,42 +8,23 @@ OrcaSlicer is an open-source 3D slicer application forked from Bambu Studio, bui
 
 ## Build Commands
 
-### Building on Windows
-**Always use this command to build the project when testing build issues on Windows.**
+### Building on Windows (xyz fork)
+**Always use the incremental build script for development iteration on Windows.** It handles vcvars64 environment sourcing, Ninja, idle CPU priority, install, and DLL copy in one step:
 ```bash
-cmake --build . --config %build_type% --target ALL_BUILD -- -m
+powershell.exe -ExecutionPolicy Bypass -File xyz/build_artifacts/build_incremental.ps1
 ```
+This is the **only correct way** to build from Git Bash. Do NOT invoke `cmake --build` directly from Git Bash — it lacks the VS environment (INCLUDE/LIB paths) needed by MSVC, which the PowerShell script sources via vcvars64.bat.
+
+The script lives at `xyz/build_artifacts/build_incremental.ps1` and auto-detects the repo root. See the "xyz Fork: Local Development Environment" section at the end of this file for full build documentation including deps, full rebuilds, and the idle-priority helper.
 
 ### Building on macOS
-**Always use this command to build the project when testing build issues on macOS.**
 ```bash
 cmake --build build/arm64 --config RelWithDebInfo --target all --
 ```
 
 ### Building on Linux
- **Always use this command to build the project when testing build issues on Linux.**
-```bash
-cmake --build build/arm64 --config RelWithDebInfo --target all --
-
-```
-### Build test:
-
-**Always use this command to build the project when testing build issues on Windows.**
-```bash
-cmake --build . --config %build_type% --target ALL_BUILD -- -m
-```
-
-### Building on macOS
-**Always use this command to build the project when testing build issues on macOS.**
-```bash
-cmake --build build/arm64 --config RelWithDebInfo --target all --
-```
-
-### Building on Linux
- **Always use this command to build the project when testing build issues on Linux.**
 ```bash
 cmake --build build --config RelWithDebInfo --target all --
-
 ```
 
 
@@ -89,6 +70,36 @@ ctest --test-dir ./tests/sla_print/sla_print_tests
 # and so on
 ```
 
+### Post-Build Testing Workflow
+After building, always launch the software for the user to test:
+```bash
+# GUI launch (pass test file as argument when available):
+powershell.exe -Command "Start-Process -FilePath 'build\OrcaSlicer\orca-slicer.exe' -ArgumentList 'path\to\test.3mf' -WorkingDirectory 'build\OrcaSlicer'"
+```
+- Always launch the app after a successful build if testing a visual feature
+- Pass the current test file as a CLI argument to save the user a step
+- For headless/CLI testing, invoke directly and capture output
+- Current test file: `Z:\cabinets\Things\Projects\drg_buff_beer_mugs_coloration_2.3mf` (plate 1)
+- If OrcaSlicer is blocking a build (DLL locked), kill it before building:
+  ```bash
+  # taskkill does NOT work reliably from Git Bash. Use PowerShell:
+  powershell.exe -Command "Stop-Process -Name orca-slicer -Force"
+  ```
+
+### CLI Headless Slicing (for testing xyz fork features)
+OrcaSlicer supports headless CLI slicing. This is useful for testing features like Filament Lookahead without the GUI:
+```bash
+# Slice plate 2 of a 3MF file and output gcode
+build/OrcaSlicer/orca-slicer.exe --slice 2 "Z:\cabinets\Things\Projects\drg_buff_beer_mugs_coloration_2.3mf"
+
+# Then inspect the gcode for feature-specific metadata:
+grep "LOOKAHEAD_EXCLUSION_ZONE" output.gcode    # Filament Lookahead exclusion zones
+grep "ANY_TYPE_DEBUG" output.gcode               # Any Type support material debug
+```
+
+**Test files:**
+- `Z:\cabinets\Things\Projects\drg_buff_beer_mugs_coloration_2.3mf` (plate 2) - multi-material model with spatially isolated regions, good for testing Filament Lookahead
+
 ## Architecture
 
 ### Core Libraries
@@ -108,6 +119,19 @@ ctest --test-dir ./tests/sla_print/sla_print_tests
   - GUI application built with wxWidgets
   - Integration between libslic3r core and user interface
   - Located in `src/slic3r/GUI/` (not shown in this directory but exists)
+
+### Two GCode Paths (Slicer vs. Viewer)
+OrcaSlicer has **two separate GCode processing paths** that produce independent `GCodeProcessorResult` objects. This is critical to understand when adding features that need data visible in the preview:
+
+1. **Slicer path** (`GCode::_do_export()` in `GCode.cpp`): Generates the gcode file and runs its own `GCodeProcessor` to parse it. The result is stored via `m_processor.result()` and extracted with `extract_result()` into the partplate system. This is the path that feeds the **GUI preview** (GCodeViewer).
+
+2. **CLI/file path** (`GCodeProcessor::process_file()` in `GCodeProcessor.cpp`): Parses an existing gcode file from disk. Used by CLI headless slicing and when loading external gcode files. This is a **separate** GCodeProcessor instance with its own result.
+
+**Key implication**: Custom gcode comments (like `; LOOKAHEAD_EXCLUSION_ZONE`) parsed by `process_tags()` in the GCodeProcessor will only appear in whichever path actually runs. The GUI slicing path does NOT re-parse the temp gcode file for the viewer — it uses `extract_result()` directly from the slicer's processor. So if you need data in the preview, you must either:
+- Populate it directly into `m_processor.result()` before `extract_result()` is called in `_do_export()` (preferred for slicer-computed data)
+- Or ensure the comment parsing runs in the slicer's GCodeProcessor (works for data derived from gcode content)
+
+The `GCodeViewer` (`src/slic3r/GUI/GCodeViewer.cpp`) receives its data from the partplate's `GCodeProcessorResult` — which came from path #1 above. It uses `libvgcode::Viewer` for toolpath rendering and custom `GLModel` objects for overlay geometry.
 
 ### Key Algorithmic Components
 - **Arachne Wall Generation**: Variable-width perimeter generation using skeletal trapezoidation
@@ -232,3 +256,167 @@ ctest --test-dir ./tests/sla_print/sla_print_tests
 - **Performance benchmarks** help catch performance regressions
 - **Memory leak** detection important for long-running GUI application
 - **Cross-platform** testing required before releases
+
+---
+
+## xyz Fork: Local Development Environment
+
+This section documents the local development environment, build tooling, and conventions for working on this OrcaSlicer fork (branch `xyz`).
+
+### Development Environment
+
+- **OS:** Windows 11 Pro
+- **Shell:** Git Bash (default Claude Code shell on this system)
+- **Python:** 3.14
+- **Branch:** `xyz` (our feature branch, forked from `main`)
+
+### Build Tooling
+
+- **VS2022 Build Tools** (not the full IDE) - installed via `choco install visualstudio2022buildtools` with VCTools workload
+  - MSVC compiler version: 14.44
+  - Location: `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\`
+- **CMake 3.31.6** - installed via `choco install cmake --version=3.31.6`
+  - Location: `C:\Program Files\CMake\bin\cmake.exe`
+  - **Not in Git Bash PATH by default** - must use full path or prepend to PATH
+  - **Do NOT use CMake 4.x** - wxWidgets' bundled cotire has `cmake_minimum_required` below 3.5, which CMake 4.x rejects. The OrcaSlicer CMakeLists.txt sets `CMAKE_POLICY_VERSION_MINIMUM=3.5` but this doesn't propagate into wxWidgets' internal builds. Stick with 3.31.x.
+- **Windows SDK:** 10.0.26100.0
+- **Strawberry Perl** - required by OpenSSL dep build. Location: `C:\Strawberry\perl\bin\`
+- **NASM** - required by OpenSSL dep build. Location: `C:\Program Files\NASM\`
+- **Ninja** - fast build system used for slicer builds (deps still use VS generator). Location: in PATH via choco.
+- Perl, NASM, Ninja installed via choco: `choco install nasm strawberryperl ninja -y`
+
+### Shell & Script Execution Rules
+
+- **Use PowerShell for build operations.** Git Bash has issues invoking .bat files and cmake is not in its PATH. Write PowerShell scripts to a temp directory and execute them via:
+  ```bash
+  powershell.exe -ExecutionPolicy Bypass -File "C:/Users/brian/AppData/Local/Temp/orcabuild/scriptname.ps1"
+  ```
+- **Always prepend cmake to PATH** at the top of every PowerShell build script:
+  ```powershell
+  $env:PATH = "C:\Program Files\CMake\bin;C:\Strawberry\perl\bin;C:\Program Files\NASM;" + $env:PATH
+  ```
+- **Temp script directory:** `C:\Users\brian\AppData\Local\Temp\orcabuild\`
+
+### CPU Priority for Builds
+
+**All CPU-intensive build steps must run at Idle priority** to keep the system responsive.
+
+#### Invoke-IdlePriority helper function (copy into every build script)
+
+Uses `System.Diagnostics.ProcessStartInfo` to launch the process, then immediately sets it to Idle priority. A background PowerShell job monitors for child processes (`cl`, `msbuild`, `link`) spawned by the build and forces them to Idle too.
+
+**Important:** The `$ArgString` parameter is a single pre-formatted string, NOT an array. This is required because `ProcessStartInfo.Arguments` is a flat string - if you pass arguments as an array they get split on spaces and quoted generator names like `"Visual Studio 17 2022"` break apart. Use single-quoted strings with embedded double quotes for arguments that contain spaces.
+
+```powershell
+function Invoke-IdlePriority {
+    param([string]$Exe, [string]$ArgString)
+    Write-Host "Running at IDLE priority: $Exe $ArgString"
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $Exe
+    $psi.Arguments = $ArgString
+    $psi.UseShellExecute = $false
+    $proc = [System.Diagnostics.Process]::Start($psi)
+    Start-Sleep -Milliseconds 500
+    try { $proc.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::Idle } catch {}
+    $monitor = Start-Job -ScriptBlock {
+        while ($true) {
+            Get-Process -Name cl,msbuild,link,MSBuild -ErrorAction SilentlyContinue | ForEach-Object {
+                try { $_.PriorityClass = 'Idle' } catch {}
+            }
+            Start-Sleep -Seconds 3
+        }
+    }
+    $proc.WaitForExit()
+    Stop-Job $monitor -ErrorAction SilentlyContinue
+    Remove-Job $monitor -ErrorAction SilentlyContinue
+    if ($proc.ExitCode -ne 0) {
+        Write-Host "FAILED with exit code $($proc.ExitCode)"
+        exit 1
+    }
+}
+```
+
+#### Usage example
+
+```powershell
+Invoke-IdlePriority -Exe "cmake" -ArgString '../ -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release'
+Invoke-IdlePriority -Exe "cmake" -ArgString '--build . --config Release --target deps -- -m'
+```
+
+### Build Process
+
+The build has two phases:
+
+#### Phase 1: Dependencies (one-time, ~30-60 min at normal priority, longer at idle)
+```
+cd deps/build
+cmake ../ -G "Visual Studio 17 2022" -A x64 -DCMAKE_BUILD_TYPE=Release
+cmake --build . --config Release --target deps
+```
+**Do NOT use `-- -m` (parallel MSBuild) for deps.** OpenSSL builds with nmake in-source and hits PDB file contention (`fatal error C1041: cannot open program database 'app.pdb'`) when MSBuild runs multiple sub-targets in parallel. The slicer build can safely use `-m`.
+
+**OpenSSL NUL file cleanup:** OpenSSL creates a file literally named `NUL` in its source tree (a reserved Windows device name). Neither PowerShell's `Remove-Item` nor `cmd /c rd /s /q` can delete it. Use `robocopy /MIR` with an empty directory to clean it:
+```powershell
+$emptyDir = "$env:TEMP\orcabuild_empty"
+New-Item -ItemType Directory -Path $emptyDir -Force | Out-Null
+robocopy $emptyDir "dep_OpenSSL-prefix" /MIR /NFL /NDL /NJH /NJS /nc /ns /np 2>$null
+Remove-Item -Recurse -Force "dep_OpenSSL-prefix" -ErrorAction SilentlyContinue
+Remove-Item -Recurse -Force $emptyDir -ErrorAction SilentlyContinue
+```
+
+#### Phase 2: Slicer (after deps, faster for incremental rebuilds)
+
+Uses **Ninja** generator for faster incremental builds. Requires vcvars64 environment sourced first.
+
+```
+cmake -S <repo_root> -B <repo_root>/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DORCA_TOOLS=ON -DDEP_BUILD_DIR=<repo_root>/deps/build
+cmake --build build --config Release
+```
+
+**Must use `-S`/`-B` flags** for the configure step. Passing the source dir as a positional argument causes CMake to generate in-source instead of in `build/`.
+
+**Must pass `-DDEP_BUILD_DIR`** pointing to `deps/build`. Without it, CMake infers the wrong path and can't find the built dependencies.
+
+**Ninja vs Visual Studio generator:** Ninja has much faster incremental build detection (checks timestamps directly instead of going through MSBuild's project system). The deps build still uses the VS generator because OpenSSL's build system depends on nmake/msbuild internally.
+
+**Selective /LTCG:** The final link targets (OrcaSlicer, OrcaSlicer_app_gui) use `/LTCG` in Release mode to prevent linker restarts from TBB's `/GL`-compiled objects. This is applied only to these targets, not globally, so incremental linking is preserved for library targets during development.
+
+Output binary: `build/src/orca-slicer.exe` (raw build output, missing DLLs)
+
+**Runnable installation:** `build/OrcaSlicer/orca-slicer.exe` (after install step - has all DLLs, resources, and WebView2). Always run from this location, not from `build/src/`.
+
+### Build Policy
+
+**Always use incremental builds for development iteration.** Full rebuilds are only needed when:
+- Switching CMake generators (e.g., VS to Ninja)
+- Build directory becomes corrupted
+- First-time setup (deps + initial slicer build)
+
+Never wipe the build directory just to rebuild after code changes. Ninja's incremental builds are fast and reliable.
+
+### Build Artifacts Directory
+
+`xyz/build_artifacts/` contains reusable build scripts and tooling for this fork. This directory is committed separately so it can be excluded when cherry-picking feature commits for upstream PRs.
+
+- `build_all.ps1` - Full build script (deps + slicer + install + DLL copy). Only for first-time setup or generator changes.
+- `build_incremental.ps1` - **Use this for development.** Builds changed files, installs, and copies DLLs.
+  ```bash
+  powershell.exe -ExecutionPolicy Bypass -File xyz/build_artifacts/build_incremental.ps1
+  ```
+  Both scripts auto-detect the repo root relative to their own location.
+
+### Git Workflow
+
+- Feature branch: `xyz` (off `main`)
+- Clean, atomic commits suitable for upstream PR submission
+- One feature at a time, in order listed in GOALS.md
+
+### Git Remotes
+
+- **origin** - upstream OrcaSlicer (SoftFever/OrcaSlicer on GitHub)
+- **internal** - `git@git.internal.hanson.xyz:brianhansonxyz/orcaslicer_mod.git` - our internal repository for this fork. Push feature work here after committing.
+- **Public fork:** https://github.com/hansonxyz/OrcaSlicer-xyz - public GitHub repo for releases and bug reports
+
+### Auto-Update Mechanism
+
+OrcaSlicer checks for updates via GitHub releases API. The update URL is configured in `src/slic3r/GUI/GUI_App.cpp` (search for `orca-update` or `github.com/SoftFever`). For our fork, this must point to `https://github.com/hansonxyz/OrcaSlicer-xyz/releases` so users of the fork get our releases, not upstream's. The update check uses the version string from `version.inc` to compare against release tags.
