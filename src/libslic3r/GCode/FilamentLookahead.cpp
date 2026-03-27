@@ -269,18 +269,33 @@ void FilamentLookaheadPlan::build(const Print &print,
                     entry.extra_layers = extra;
                     entry.raised_z = layers[li + extra]->print_z;
                     entry.raised_bbox = ext_bbox;
-                    // Cluster entity bboxes into spatially connected groups
+                    // Cluster entity bboxes into spatially connected groups,
+                    // then filter: only keep clusters isolated from other extruders
                     auto ent_it = layer_extruder_entity_bboxes[li].find(ext_id);
                     if (ent_it != layer_extruder_entity_bboxes[li].end()) {
                         auto clusters = cluster_bboxes(ent_it->second, clearance_scaled);
                         for (auto &cb : clusters) {
-                            cb.offset(clearance_scaled);
-                            entry.exclusion_bboxes.push_back(cb);
+                            // Check this cluster against all other extruders' entities
+                            bool cluster_isolated = true;
+                            for (const auto &[other_id, other_ents] : layer_extruder_entity_bboxes[li]) {
+                                if (other_id == ext_id) continue;
+                                for (const auto &ob : other_ents) {
+                                    if (bboxes_too_close(cb, ob, clearance_scaled)) {
+                                        cluster_isolated = false;
+                                        break;
+                                    }
+                                }
+                                if (!cluster_isolated) break;
+                            }
+                            if (cluster_isolated) {
+                                cb.offset(clearance_scaled);
+                                entry.exclusion_bboxes.push_back(cb);
+                            }
                         }
-                    } else {
-                        BoundingBox fb = ext_bbox;
-                        fb.offset(clearance_scaled);
-                        entry.exclusion_bboxes.push_back(fb);
+                    }
+                    if (entry.exclusion_bboxes.empty()) {
+                        // No isolated clusters — skip this plan entry
+                        continue;
                     }
 
                     m_plan[{li, ext_id}] = entry;
@@ -355,19 +370,30 @@ void FilamentLookaheadPlan::build(const Print &print,
                 entry.extra_layers = extra;
                 entry.raised_z = layers[li + extra]->print_z;
                 entry.raised_bbox = accumulated_bbox;
-                // Cluster entity bboxes into spatially connected groups
+                // Cluster entity bboxes, filter to only isolated clusters
                 auto ent_it = layer_extruder_entity_bboxes[li].find(ext_id);
                 if (ent_it != layer_extruder_entity_bboxes[li].end()) {
                     auto clusters = cluster_bboxes(ent_it->second, clearance_scaled);
                     for (auto &cb : clusters) {
-                        cb.offset(clearance_scaled);
-                        entry.exclusion_bboxes.push_back(cb);
+                        bool cluster_isolated = true;
+                        for (const auto &[other_id, other_ents] : layer_extruder_entity_bboxes[li]) {
+                            if (other_id == ext_id) continue;
+                            for (const auto &ob : other_ents) {
+                                if (bboxes_too_close(cb, ob, clearance_scaled)) {
+                                    cluster_isolated = false;
+                                    break;
+                                }
+                            }
+                            if (!cluster_isolated) break;
+                        }
+                        if (cluster_isolated) {
+                            cb.offset(clearance_scaled);
+                            entry.exclusion_bboxes.push_back(cb);
+                        }
                     }
-                } else {
-                    BoundingBox fb = accumulated_bbox;
-                    fb.offset(clearance_scaled);
-                    entry.exclusion_bboxes.push_back(fb);
                 }
+                if (entry.exclusion_bboxes.empty())
+                    continue; // no isolated clusters
 
                 m_plan[{li, ext_id}] = entry;
 
