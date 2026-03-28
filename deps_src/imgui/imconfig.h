@@ -232,8 +232,8 @@ namespace ImGui
     const wchar_t BoundedFillDarkIcon  = 0x085D;
     const wchar_t AutoSegmentIcon      = 0x085E;
     const wchar_t AutoSegmentDarkIcon  = 0x085F;
-    const wchar_t EdgePainterIcon      = 0x0860;
-    const wchar_t EdgePainterDarkIcon  = 0x0861;
+    const wchar_t BoundaryPainterIcon     = 0x0860;
+    const wchar_t BoundaryPainterDarkIcon = 0x0861;
 
     //    void MyFunction(const char* name, const MyMatrix44& v);
 

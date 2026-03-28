@@ -74,8 +74,8 @@ static const std::map<const wchar_t, std::string> font_icons = {
     {ImGui::BoundedFillDarkIcon    , "bounded_fill_dark"             },
     {ImGui::AutoSegmentIcon        , "auto_segment"                  },
     {ImGui::AutoSegmentDarkIcon    , "auto_segment_dark"             },
-    {ImGui::EdgePainterIcon        , "edge_painter"                  },
-    {ImGui::EdgePainterDarkIcon    , "edge_painter_dark"             },
+    {ImGui::BoundaryPainterIcon       , "edge_painter"                  },
+    {ImGui::BoundaryPainterDarkIcon   , "edge_painter_dark"             },
     {ImGui::FoldButtonIcon         , "im_fold"                       },
     {ImGui::UnfoldButtonIcon       , "im_unfold"                     },
     {ImGui::gCodeButtonIcon        , "im_code"                       }, //ORCA
