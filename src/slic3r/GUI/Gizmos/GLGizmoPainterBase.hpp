@@ -264,6 +264,7 @@ protected:
         GAP_FILL,
         // xyz fork
         BOUNDED_FILL,
+        BOUNDARY_PAINTER,
     };
 
     struct ProjectedMousePosition

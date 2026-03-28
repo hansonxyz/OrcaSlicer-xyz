@@ -455,6 +455,8 @@ set(lisbslic3r_sources
     TriangleMeshSlicer.hpp
     TriangleSelector.cpp
     TriangleSelector.hpp
+    MeshPathFinder.cpp
+    MeshPathFinder.hpp
     TriangleSetSampling.cpp
     TriangleSetSampling.hpp
     TriangulateWall.cpp

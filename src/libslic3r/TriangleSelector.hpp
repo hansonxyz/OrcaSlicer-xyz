@@ -5,6 +5,7 @@
 
 
 #include <cfloat>
+#include <functional>
 #include "Point.hpp"
 #include "TriangleMesh.hpp"
 
@@ -318,12 +319,17 @@ public:
                                     float               highlight_by_angle_deg = 0.f, // The maximal angle of overhang. If it is set to a non-zero value, it is possible to paint only the triangles of overhang defined by this angle in degrees.
                                     bool                force_reselection = false);   // force reselection of the triangle mesh even in cases that mouse is pointing on the selected triangle
 
+    // xyz fork: EdgeBlockPredicate returns true if the edge between two original-mesh
+    // vertices should block fill propagation (used by boundary painter tool).
+    using EdgeBlockPredicate = std::function<bool(int, int)>;
+
     void bucket_fill_select_triangles(const Vec3f         &hit,                        // point where to start
                                       int                  facet_start,                // facet of the original mesh (unsplit) that the hit point belongs to
                                       const ClippingPlane &clp,                        // Clipping plane to limit painting to not clipped facets only
                                       float                seed_fill_angle,            // BBS: the maximal angle between two facets to be painted by the same color
                                       bool                 propagate,                  // if bucket fill is propagated to neighbor faces or if it fills the only facet of the modified mesh that the hit point belongs to.
-                                      bool                 force_reselection = false); // force reselection of the triangle mesh even in cases that mouse is pointing on the selected triangle
+                                      bool                 force_reselection = false,  // force reselection of the triangle mesh even in cases that mouse is pointing on the selected triangle
+                                      const EdgeBlockPredicate &edge_block = nullptr); // xyz fork: optional boundary edge blocker
 
     bool                 has_facets(EnforcerBlockerType state) const;
     static bool          has_facets(const TriangleSplittingData &data, EnforcerBlockerType test_state);

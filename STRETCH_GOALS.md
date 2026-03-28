@@ -2,6 +2,10 @@
 
 These are evaluated paint tool improvement ideas for future implementation, ranked by impact/effort ratio. The top 3 (Bounded Fill, Auto-Segment Face Groups, Sharp Edge Preview) are being implemented now and documented in GOALS.md.
 
+## Refactor xyz Paint Tools into MeshAnalysis Module
+
+Move the mesh analysis functions added by the xyz fork (precompute_vertex_curvature, get_sharp_edges, compute_face_groups) out of TriangleSelector and into a standalone `MeshAnalysis.hpp/cpp` utility. These are pure functions that don't depend on TriangleSelector state. The edge-snap brush and sharp edge preview would call MeshAnalysis instead of TriangleSelector methods. This reduces the invasiveness of the fork's changes to existing files and establishes the modular pattern used by the boundary painter.
+
 ## Lasso/Freehand Selection
 Draw a freehand loop on the screen; all visible triangles whose projected centroids fall inside the loop are selected/painted. Most intuitive selection tool for arbitrary regions. Requires capturing mouse path as a 2D polygon, projecting triangle centroids to screen space, and point-in-polygon testing with backface culling. Moderate-high effort due to new 2D polygon capture and projection code needed.
 

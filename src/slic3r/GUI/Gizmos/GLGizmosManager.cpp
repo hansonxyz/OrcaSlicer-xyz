@@ -1010,12 +1010,22 @@ bool GLGizmosManager::on_key(wxKeyEvent& evt)
                         processed = mmu_seg->on_number_key_down(keyCode - '0');
                     }
                 }
-                else if (keyCode == 'F' || keyCode == 'T' || keyCode == 'S' || keyCode == 'C' || keyCode == 'H' || keyCode == 'G') {
+                else if (keyCode == 'F' || keyCode == 'T' || keyCode == 'S' || keyCode == 'C' || keyCode == 'H' || keyCode == 'G' || keyCode == 'B' || keyCode == 'D') {
                     processed = mmu_seg->on_key_down_select_tool_type(keyCode);
                     if (processed) {
                         // force extra frame to automatically update window size
                         wxGetApp().imgui()->set_requires_extra_frame();
                     }
+                }
+                // xyz fork: Ctrl+Z undo for boundary painter (only when boundary tool is active)
+                else if (keyCode == 'Z' && evt.CmdDown() && mmu_seg->is_boundary_painter_active()) {
+                    bool had_something = false;
+                    for (auto &bp : mmu_seg->m_boundary_painters)
+                        if (bp.is_initialized() && (bp.has_pending() || bp.boundary_count() > 0)) {
+                            bp.undo_last_segment();
+                            had_something = true;
+                        }
+                    processed = had_something; // fall through to normal undo if nothing to undo
                 }
             }
         }
