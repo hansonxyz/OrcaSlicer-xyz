@@ -29,6 +29,15 @@ void PaintToolBoundary::init(const TriangleMesh &mesh)
     m_neighbors_storage = std::move(neighbors);
     m_path_finder = std::make_unique<MeshPathFinder>(
         its.vertices, its.indices, m_neighbors_storage);
+
+    // Compute face normals for planar intersection
+    m_face_normals_storage.resize(its.indices.size());
+    for (size_t i = 0; i < its.indices.size(); ++i) {
+        const auto &tri = its.indices[i];
+        Vec3f e1 = its.vertices[tri[1]] - its.vertices[tri[0]];
+        Vec3f e2 = its.vertices[tri[2]] - its.vertices[tri[0]];
+        m_face_normals_storage[i] = e1.cross(e2).normalized();
+    }
 }
 
 void PaintToolBoundary::clear()
@@ -37,7 +46,10 @@ void PaintToolBoundary::clear()
     m_boundary_edges.clear();
     m_pending_vertices.clear();
     m_pending_segment_marks.clear();
+    m_pending_segment_is_straight.clear();
+    m_prev_hit_stack.clear();
     m_preview_path.clear();
+    m_last_hit_facet = -1;
     m_boundaries_model.reset();
     m_preview_model.reset();
     m_points_model.reset();
@@ -47,7 +59,8 @@ void PaintToolBoundary::clear()
 }
 
 bool PaintToolBoundary::add_point(const Vec3f &hit, int facet_idx,
-                                   bool snap_to_curve, float curvature_threshold_deg)
+                                   bool snap_to_curve, float curvature_threshold_deg,
+                                   bool direct_path)
 {
     if (!m_path_finder)
         return false;
@@ -61,8 +74,9 @@ bool PaintToolBoundary::add_point(const Vec3f &hit, int facet_idx,
         int start = m_pending_vertices.front();
         if (vertex == start) {
             // Close the boundary: add path from last vertex back to start
-            auto closing_path = m_path_finder->find_path(
-                m_pending_vertices.back(), start);
+            auto closing_path = direct_path
+                ? m_path_finder->find_path_direct(m_pending_vertices.back(), start)
+                : m_path_finder->find_path(m_pending_vertices.back(), start);
             if (!closing_path.empty()) {
                 // Build the full closed path
                 std::vector<int> full_path = m_pending_vertices;
@@ -85,18 +99,40 @@ bool PaintToolBoundary::add_point(const Vec3f &hit, int facet_idx,
     // Not closing — add a new segment
     // Record segment mark for undo support
     m_pending_segment_marks.push_back(m_pending_vertices.size());
+
+    // Save previous hit for undo
+    m_prev_hit_stack.push_back({m_last_hit_pos, m_last_hit_facet});
+
     if (!m_pending_vertices.empty()) {
-        // Find path from last vertex to new vertex
-        auto segment = m_path_finder->find_path(m_pending_vertices.back(), vertex);
+        // Find path — either planar (shift) or A* (default)
+        std::vector<int> segment;
+        if (direct_path && m_last_hit_facet >= 0
+            && m_last_hit_facet < (int)m_face_normals_storage.size()
+            && facet_idx < (int)m_face_normals_storage.size()) {
+            segment = m_path_finder->find_path_planar(
+                m_last_hit_pos, m_last_hit_facet, hit, facet_idx,
+                m_face_normals_storage[m_last_hit_facet],
+                m_face_normals_storage[facet_idx]);
+            m_pending_segment_is_straight.push_back(true);
+        } else {
+            segment = m_path_finder->find_path(m_pending_vertices.back(), vertex);
+            m_pending_segment_is_straight.push_back(false);
+        }
         if (segment.size() > 1) {
-            for (size_t i = 1; i < segment.size(); ++i)
+            // Skip first vertex if it matches the last pending (avoid duplicate)
+            size_t start_i = (segment.front() == m_pending_vertices.back()) ? 1 : 0;
+            for (size_t i = start_i; i < segment.size(); ++i)
                 m_pending_vertices.push_back(segment[i]);
         } else {
             m_pending_vertices.push_back(vertex);
         }
     } else {
+        // First point
         m_pending_vertices.push_back(vertex);
     }
+
+    m_last_hit_pos = hit;
+    m_last_hit_facet = facet_idx;
 
     m_boundaries_dirty = true;
     m_preview_dirty = true;
@@ -107,7 +143,10 @@ void PaintToolBoundary::cancel_current()
 {
     m_pending_vertices.clear();
     m_pending_segment_marks.clear();
+    m_pending_segment_is_straight.clear();
+    m_prev_hit_stack.clear();
     m_preview_path.clear();
+    m_last_hit_facet = -1;
     m_boundaries_dirty = true;
     m_preview_dirty = true;
 }
@@ -141,24 +180,35 @@ bool PaintToolBoundary::close_boundary()
 void PaintToolBoundary::undo_last_segment()
 {
     if (!m_pending_segment_marks.empty()) {
-        // Undo last segment of the in-progress boundary
         size_t mark = m_pending_segment_marks.back();
         m_pending_segment_marks.pop_back();
         m_pending_vertices.resize(mark);
+
+        if (!m_pending_segment_is_straight.empty())
+            m_pending_segment_is_straight.pop_back();
+
+        // Restore previous hit position for correct planar origin
+        if (!m_prev_hit_stack.empty()) {
+            auto [prev_pos, prev_facet] = m_prev_hit_stack.back();
+            m_prev_hit_stack.pop_back();
+            m_last_hit_pos = prev_pos;
+            m_last_hit_facet = prev_facet;
+        }
+
         m_preview_path.clear();
     } else if (!m_completed_paths.empty()) {
-        // No pending segments — undo the last completed boundary
         m_completed_paths.pop_back();
         rebuild_edge_set();
     } else {
-        return; // nothing to undo
+        return;
     }
     m_boundaries_dirty = true;
     m_preview_dirty = true;
 }
 
 void PaintToolBoundary::update_preview(const Vec3f &cursor_hit, int cursor_facet,
-                                        bool snap_to_curve, float curvature_threshold_deg)
+                                        bool snap_to_curve, float curvature_threshold_deg,
+                                        bool direct_path)
 {
     m_preview_path.clear();
     if (!m_path_finder || m_pending_vertices.empty())
@@ -168,15 +218,82 @@ void PaintToolBoundary::update_preview(const Vec3f &cursor_hit, int cursor_facet
     if (cursor_vertex < 0)
         return;
 
-    m_preview_path = m_path_finder->find_path(m_pending_vertices.back(), cursor_vertex);
+    m_preview_is_direct = direct_path;
+    if (direct_path && m_last_hit_facet >= 0
+        && m_last_hit_facet < (int)m_face_normals_storage.size()
+        && cursor_facet < (int)m_face_normals_storage.size()) {
+        m_preview_path = m_path_finder->find_path_planar(
+            m_last_hit_pos, m_last_hit_facet, cursor_hit, cursor_facet,
+            m_face_normals_storage[m_last_hit_facet],
+            m_face_normals_storage[cursor_facet]);
+    } else {
+        m_preview_path = m_path_finder->find_path(m_pending_vertices.back(), cursor_vertex);
+    }
     m_preview_dirty = true;
 }
 
-bool PaintToolBoundary::is_edge_blocked(int vertex_a, int vertex_b) const
+// 3D segment-segment crossing test.
+// Two 3D segments "cross" if they are close and their projections onto
+// a common plane intersect. Works for segments on a mesh surface.
+static bool segments_cross_3d(const Vec3f &a1, const Vec3f &a2, const Vec3f &b1, const Vec3f &b2)
 {
-    int lo = std::min(vertex_a, vertex_b);
-    int hi = std::max(vertex_a, vertex_b);
-    return m_boundary_edges.count({lo, hi}) > 0;
+    // Find the best projection plane (drop the axis with smallest segment extent)
+    Vec3f extent = (a2 - a1).cwiseAbs() + (b2 - b1).cwiseAbs();
+    int drop_axis;
+    extent.minCoeff(&drop_axis);
+
+    int ax0 = (drop_axis + 1) % 3;
+    int ax1 = (drop_axis + 2) % 3;
+
+    Vec2f pa1(a1[ax0], a1[ax1]), pa2(a2[ax0], a2[ax1]);
+    Vec2f pb1(b1[ax0], b1[ax1]), pb2(b2[ax0], b2[ax1]);
+
+    Vec2f d1 = pa2 - pa1, d2 = pb2 - pb1;
+    float denom = d1.x() * d2.y() - d1.y() * d2.x();
+    if (std::abs(denom) < 1e-10f) return false;
+    Vec2f d = pb1 - pa1;
+    float t = (d.x() * d2.y() - d.y() * d2.x()) / denom;
+    float u = (d.x() * d1.y() - d.y() * d1.x()) / denom;
+    return t > 0.01f && t < 0.99f && u > 0.01f && u < 0.99f;
+}
+
+void PaintToolBoundary::sync_to_selector(TriangleSelector &selector) const
+{
+    selector.clear_boundary_triangles();
+
+    if (m_completed_paths.empty())
+        return;
+
+    // Collect all boundary edges (vertex index pairs in mesh.its space)
+    std::set<std::pair<int,int>> boundary_edge_set;
+    for (const auto &path : m_completed_paths) {
+        auto edges = MeshPathFinder::path_to_edges(path);
+        for (const auto &e : edges)
+            boundary_edge_set.insert(e);
+    }
+
+    if (boundary_edge_set.empty())
+        return;
+
+    // Find all original mesh triangles that contain a boundary edge.
+    // These triangles form the "boundary wall" that fill won't cross into.
+    std::set<int> boundary_tris;
+    const auto &indices = selector.get_mesh_indices();
+    for (size_t ti = 0; ti < indices.size(); ++ti) {
+        const Vec3i32 &tri = indices[ti];
+        for (int ei = 0; ei < 3; ++ei) {
+            int v0 = tri[ei];
+            int v1 = tri[(ei + 1) % 3];
+            int lo = std::min(v0, v1);
+            int hi = std::max(v0, v1);
+            if (boundary_edge_set.count({lo, hi}) > 0) {
+                boundary_tris.insert((int)ti);
+                break; // this triangle is on the boundary, no need to check more edges
+            }
+        }
+    }
+
+    selector.set_boundary_triangles(boundary_tris);
 }
 
 void PaintToolBoundary::add_path_edges(const std::vector<int> &path)
@@ -229,24 +346,51 @@ static void build_line_model(GLModel &model, const std::vector<std::vector<int>>
 
 void PaintToolBoundary::update_boundary_model(const std::vector<stl_vertex> &vertices)
 {
-    // Include both completed paths and the pending path
-    std::vector<std::vector<int>> all_paths = m_completed_paths;
-    if (m_pending_vertices.size() >= 2)
-        all_paths.push_back(m_pending_vertices);
+    m_boundaries_model.reset();
 
-    build_line_model(m_boundaries_model, all_paths, vertices,
-                     ColorRGBA(0.0f, 1.0f, 0.4f, 1.0f)); // bright green
+    GLModel::Geometry init_data;
+    init_data.format = { GLModel::Geometry::EPrimitiveType::Lines,
+                         GLModel::Geometry::EVertexLayout::P3 };
+    init_data.color = ColorRGBA(0.0f, 1.0f, 0.4f, 1.0f); // bright green
+
+    unsigned int vcount = 0;
+
+    // Helper: add a vertex-index path
+    auto add_vertex_path = [&](const std::vector<int> &path) {
+        for (size_t i = 0; i + 1 < path.size(); ++i) {
+            init_data.add_vertex(vertices[path[i]]);
+            init_data.add_vertex(vertices[path[i + 1]]);
+            init_data.add_line(vcount, vcount + 1);
+            vcount += 2;
+        }
+    };
+
+    // Completed boundaries
+    for (const auto &path : m_completed_paths)
+        add_vertex_path(path);
+    // Pending boundary
+    if (m_pending_vertices.size() >= 2)
+        add_vertex_path(m_pending_vertices);
+
+    // Count total for reserve (approximate)
+    if (!init_data.is_empty())
+        m_boundaries_model.init_from(std::move(init_data));
+
     m_boundaries_dirty = false;
 }
 
 void PaintToolBoundary::update_preview_model(const std::vector<stl_vertex> &vertices)
 {
-    std::vector<std::vector<int>> paths;
-    if (m_preview_path.size() >= 2)
-        paths.push_back(m_preview_path);
-
-    build_line_model(m_preview_model, paths, vertices,
-                     ColorRGBA(0.0f, 0.8f, 1.0f, 0.7f)); // light blue, slightly transparent
+    if (m_preview_path.size() >= 2) {
+        // Red for shift/planar mode, light blue for edge-following mode
+        ColorRGBA color = m_preview_is_direct
+            ? ColorRGBA(1.0f, 0.2f, 0.2f, 0.9f)
+            : ColorRGBA(0.0f, 0.8f, 1.0f, 0.7f);
+        std::vector<std::vector<int>> paths = { m_preview_path };
+        build_line_model(m_preview_model, paths, vertices, color);
+    } else {
+        m_preview_model.reset();
+    }
     m_preview_dirty = false;
 }
 
@@ -259,32 +403,85 @@ void PaintToolBoundary::render_gl_model(GLModel &model, const Transform3d &matri
     if (curr_shader != nullptr)
         curr_shader->stop_using();
 
-    auto *contour_shader = wxGetApp().get_shader("mm_contour");
-    if (contour_shader != nullptr) {
-        contour_shader->start_using();
-        contour_shader->set_uniform("offset",
-            OpenGLManager::get_gl_info().is_mesa() ? 0.0005 : 0.00001);
+    auto *shader = wxGetApp().get_shader("flat");
+    if (shader != nullptr) {
+        shader->start_using();
         const Camera &camera = wxGetApp().plater()->get_camera();
-        contour_shader->set_uniform("view_model_matrix", camera.get_view_matrix() * matrix);
-        contour_shader->set_uniform("projection_matrix", camera.get_projection_matrix());
+        shader->set_uniform("view_model_matrix", camera.get_view_matrix() * matrix);
+        shader->set_uniform("projection_matrix", camera.get_projection_matrix());
 
+        // Disable depth test so boundary lines always render on top of the mesh
+        glsafe(::glDisable(GL_DEPTH_TEST));
+        glsafe(::glEnable(GL_BLEND));
+        glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
         glsafe(::glLineWidth(6.0f));
+
         model.render();
 
-        contour_shader->stop_using();
+        glsafe(::glEnable(GL_DEPTH_TEST));
+
+        shader->stop_using();
     }
 
     if (curr_shader != nullptr)
         curr_shader->start_using();
 }
 
+void PaintToolBoundary::render_start_marker(const Transform3d &matrix, const std::vector<stl_vertex> &vertices)
+{
+    if (!has_pending() || m_pending_vertices.empty())
+        return;
+
+    int start_v = m_pending_vertices.front();
+    if (start_v < 0 || start_v >= (int)vertices.size())
+        return;
+
+    // Build a small diamond centered on the start vertex, always 5px on screen
+    const Vec3f &center = vertices[start_v];
+
+    m_points_model.reset();
+    GLModel::Geometry init_data;
+    init_data.format = { GLModel::Geometry::EPrimitiveType::Triangles,
+                         GLModel::Geometry::EVertexLayout::P3 };
+    init_data.color = ColorRGBA(1.0f, 0.9f, 0.0f, 1.0f); // yellow
+
+    const Camera &camera = wxGetApp().plater()->get_camera();
+
+    // Compute world-space size of 5 pixels at the diamond's depth
+    Vec3d center_world = (matrix * center.cast<double>());
+    Vec3d center_eye = camera.get_view_matrix() * center_world;
+    double depth = -center_eye.z(); // distance from camera
+    double fov_y = camera.get_fov(); // degrees
+    int viewport_h = camera.get_viewport()[3];
+    double pixel_size = 2.0 * depth * std::tan(fov_y * M_PI / 360.0) / viewport_h;
+    float sz = (float)(pixel_size * 3.5); // 3.5 pixels half-size = ~5px diamond
+
+    // Screen-facing vectors in mesh-local space
+    Vec3f cam_right = (matrix.inverse().matrix().block<3,3>(0,0) * camera.get_view_matrix().matrix().block<3,1>(0,0)).cast<float>().normalized();
+    Vec3f cam_up = (matrix.inverse().matrix().block<3,3>(0,0) * camera.get_view_matrix().matrix().block<3,1>(0,1)).cast<float>().normalized();
+    Vec3f top    = center + cam_up * sz;
+    Vec3f bottom = center - cam_up * sz;
+    Vec3f left   = center - cam_right * sz;
+    Vec3f right_pt = center + cam_right * sz;
+
+    init_data.add_vertex(top);       // 0
+    init_data.add_vertex(right_pt);  // 1
+    init_data.add_vertex(bottom);    // 2
+    init_data.add_vertex(left);      // 3
+
+    init_data.add_triangle(0, 1, 2);
+    init_data.add_triangle(0, 2, 3);
+
+    if (!init_data.is_empty())
+        m_points_model.init_from(std::move(init_data));
+
+    render_gl_model(m_points_model, matrix);
+}
+
 void PaintToolBoundary::render_boundaries(const Transform3d &matrix)
 {
-    if (m_boundaries_dirty || !m_boundaries_model.is_initialized()) {
-        // Caller should have called update_boundary_model first
-        // but render gracefully if not
+    if (!m_boundaries_model.is_initialized())
         return;
-    }
     render_gl_model(m_boundaries_model, matrix);
 }
 

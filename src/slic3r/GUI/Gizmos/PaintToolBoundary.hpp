@@ -1,6 +1,7 @@
 #pragma once
 
 #include "libslic3r/MeshPathFinder.hpp"
+#include "libslic3r/TriangleSelector.hpp"
 #include "slic3r/GUI/GLModel.hpp"
 
 #include <vector>
@@ -34,9 +35,11 @@ public:
     // Add a point to the current boundary. hit is the 3D position,
     // facet_idx is the triangle hit. If snap_to_edge is true, snaps
     // the vertex to the nearest high-curvature edge.
+    // If direct_path is true, uses the most direct route (Shift key).
     // Returns true if the boundary was closed (clicked near start point).
     bool add_point(const Vec3f &hit, int facet_idx,
-                   bool snap_to_curve, float curvature_threshold_deg);
+                   bool snap_to_curve, float curvature_threshold_deg,
+                   bool direct_path = false);
 
     // Cancel the in-progress boundary (discard unclosed points).
     void cancel_current();
@@ -62,21 +65,18 @@ public:
     // Compute preview path from last placed point to cursor position.
     // Call on mouse move. Sets internal state for render_preview().
     void update_preview(const Vec3f &cursor_hit, int cursor_facet,
-                        bool snap_to_curve, float curvature_threshold_deg);
+                        bool snap_to_curve, float curvature_threshold_deg,
+                        bool direct_path = false);
 
     // --- Edge blocking predicate for fill tools ---
 
-    // Returns true if the edge between vertex a and vertex b is crossed
-    // by any boundary. Use as predicate in fill functions.
-    bool is_edge_blocked(int vertex_a, int vertex_b) const;
-
-    // Get a std::function wrapper for is_edge_blocked.
-    std::function<bool(int, int)> get_edge_predicate() const {
-        return [this](int a, int b) { return is_edge_blocked(a, b); };
-    }
+    // Sync boundary data to a TriangleSelector for fill operations.
+    // Marks original mesh triangles that boundary paths cross through.
+    // Call this before fill operations.
+    void sync_to_selector(TriangleSelector &selector) const;
 
     // Are there any boundaries defined?
-    bool has_boundaries() const { return !m_boundary_edges.empty(); }
+    bool has_boundaries() const { return !m_completed_paths.empty(); }
 
     // --- Rendering ---
 
@@ -92,17 +92,21 @@ public:
     // Render the preview path (last point to cursor).
     void render_preview(const Transform3d &matrix);
 
+    // Render start point marker (yellow diamond). Call with mesh transform.
+    void render_start_marker(const Transform3d &matrix, const std::vector<stl_vertex> &vertices);
+
     // Number of completed boundaries.
     size_t boundary_count() const { return m_completed_paths.size(); }
 
 private:
     std::unique_ptr<MeshPathFinder> m_path_finder;
     std::vector<Vec3i32> m_neighbors_storage; // owned copy for MeshPathFinder
+    std::vector<Vec3f> m_face_normals_storage; // face normals for planar intersection
 
     // Completed boundaries: each is a closed loop of vertex indices
     std::vector<std::vector<int>> m_completed_paths;
 
-    // All blocked edges (from completed boundaries), stored as sorted (min,max) pairs
+    // All boundary edges stored as sorted (min,max) vertex index pairs (for rendering)
     std::set<std::pair<int,int>> m_boundary_edges;
 
     // In-progress boundary: vertices placed so far (not yet closed)
@@ -110,9 +114,17 @@ private:
     // Indices into m_pending_vertices marking where each click-segment starts
     // (for undo support — each undo removes vertices back to the previous mark)
     std::vector<size_t> m_pending_segment_marks;
+    // Track whether each segment is straight-line (true) or edge-based (false)
+    std::vector<bool> m_pending_segment_is_straight;
+    // Last placed hit position and facet (needed for straight-line tracing)
+    Vec3f m_last_hit_pos = Vec3f::Zero();
+    int   m_last_hit_facet = -1;
+    // Stack of previous hit positions for undo (one per segment)
+    std::vector<std::pair<Vec3f, int>> m_prev_hit_stack;
 
     // Preview path: from last pending vertex to cursor
     std::vector<int> m_preview_path;
+    bool m_preview_is_direct = false; // true when shift mode, for color change
 
     // GL models for rendering
     GLModel m_boundaries_model;

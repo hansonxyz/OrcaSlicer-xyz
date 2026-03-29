@@ -877,11 +877,11 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
                     }
                     bp.add_point(pos.mesh_hit, int(pos.facet_idx),
                                  mmu_gizmo->m_boundary_snap_to_curve,
-                                 mmu_gizmo->m_boundary_curvature_threshold);
+                                 mmu_gizmo->m_boundary_curvature_threshold,
+                                 shift_down);
                 }
             }
             else if (m_tool_type == ToolType::SMART_FILL || m_tool_type == ToolType::BUCKET_FILL
-                || m_tool_type == ToolType::BOUNDED_FILL
                 || (m_tool_type == ToolType::BRUSH && m_cursor_type == TriangleSelector::CursorType::POINTER)) {
                 for(const ProjectedMousePosition &projected_mouse_position : projected_mouse_positions) {
                     assert(projected_mouse_position.mesh_idx == mesh_idx);
@@ -892,24 +892,22 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
                         m_triangle_selectors[mesh_idx]->seed_fill_select_triangles(mesh_hit, facet_idx, trafo_matrix_not_translate, clp, m_smart_fill_angle,
                                                                                        m_paint_on_overhangs_only ? m_highlight_by_angle_threshold_deg : 0.f, true);
                     else if (m_tool_type == ToolType::BRUSH && m_cursor_type == TriangleSelector::CursorType::POINTER)
-                        // BBS: add infill_angle parameter
                         m_triangle_selectors[mesh_idx]->bucket_fill_select_triangles(mesh_hit, facet_idx, clp, -1.f, false, true);
                     else if (m_tool_type == ToolType::BUCKET_FILL) {
-                        // xyz fork: pass boundary edge predicate if boundaries exist
-                        TriangleSelector::EdgeBlockPredicate edge_block = nullptr;
+                        // xyz fork: unified fill with constraint checkboxes
                         auto *mmu_gizmo = dynamic_cast<GLGizmoMmuSegmentation*>(this);
-                        if (mmu_gizmo && mesh_idx < (int)mmu_gizmo->m_boundary_painters.size()
+                        float fill_angle = (mmu_gizmo && mmu_gizmo->m_fill_respect_angle)
+                            ? m_smart_fill_angle : -1.f;
+                        bool respect_color = !mmu_gizmo || mmu_gizmo->m_fill_respect_color;
+                        // Sync boundary data to selector before fill
+                        if (mmu_gizmo && mmu_gizmo->m_fill_respect_boundary
+                            && mesh_idx < (int)mmu_gizmo->m_boundary_painters.size()
                             && mmu_gizmo->m_boundary_painters[mesh_idx].has_boundaries())
-                            edge_block = mmu_gizmo->m_boundary_painters[mesh_idx].get_edge_predicate();
-                        m_triangle_selectors[mesh_idx]->bucket_fill_select_triangles(mesh_hit, facet_idx, clp, m_smart_fill_angle, true, true, edge_block);
-                    }
-                    else if (m_tool_type == ToolType::BOUNDED_FILL) {
-                        TriangleSelector::EdgeBlockPredicate edge_block = nullptr;
-                        auto *mmu_gizmo = dynamic_cast<GLGizmoMmuSegmentation*>(this);
-                        if (mmu_gizmo && mesh_idx < (int)mmu_gizmo->m_boundary_painters.size()
-                            && mmu_gizmo->m_boundary_painters[mesh_idx].has_boundaries())
-                            edge_block = mmu_gizmo->m_boundary_painters[mesh_idx].get_edge_predicate();
-                        m_triangle_selectors[mesh_idx]->bucket_fill_select_triangles(mesh_hit, facet_idx, clp, -1.f, true, true, edge_block);
+                            mmu_gizmo->m_boundary_painters[mesh_idx].sync_to_selector(*m_triangle_selectors[mesh_idx]);
+                        else
+                            m_triangle_selectors[mesh_idx]->clear_boundary_triangles();
+                        m_triangle_selectors[mesh_idx]->bucket_fill_select_triangles(
+                            mesh_hit, facet_idx, clp, fill_angle, true, true, respect_color);
                     }
 
                     m_seed_fill_last_mesh_id = -1;
@@ -946,7 +944,7 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
         return true;
     }
 
-    if (action == SLAGizmoEventType::Moving && (m_tool_type == ToolType::SMART_FILL || m_tool_type == ToolType::BUCKET_FILL || (m_tool_type == ToolType::BRUSH && m_cursor_type == TriangleSelector::CursorType::POINTER))) {
+    if (action == SLAGizmoEventType::Moving && (m_tool_type == ToolType::SMART_FILL || m_tool_type == ToolType::BUCKET_FILL || m_tool_type == ToolType::BOUNDARY_PAINTER || (m_tool_type == ToolType::BRUSH && m_cursor_type == TriangleSelector::CursorType::POINTER))) {
         if (m_triangle_selectors.empty())
             return false;
 
@@ -1011,11 +1009,33 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
         else if (m_tool_type == ToolType::BRUSH && m_cursor_type == TriangleSelector::CursorType::POINTER)
             // BBS: add infill_angle parameter
             m_triangle_selectors[m_rr.mesh_id]->bucket_fill_select_triangles(m_rr.hit, int(m_rr.facet), clp, -1.f, false);
-        else if (m_tool_type == ToolType::BUCKET_FILL)
-            // BBS: add infill_angle parameter
-            m_triangle_selectors[m_rr.mesh_id]->bucket_fill_select_triangles(m_rr.hit, int(m_rr.facet), clp, m_smart_fill_angle, true);
-        else if (m_tool_type == ToolType::BOUNDED_FILL)
-            m_triangle_selectors[m_rr.mesh_id]->bucket_fill_select_triangles(m_rr.hit, int(m_rr.facet), clp, -1.f, true);
+        else if (m_tool_type == ToolType::BUCKET_FILL) {
+            auto *mmu_gizmo = dynamic_cast<GLGizmoMmuSegmentation*>(this);
+            float fill_angle = (mmu_gizmo && mmu_gizmo->m_fill_respect_angle) ? m_smart_fill_angle : -1.f;
+            bool respect_color = !mmu_gizmo || mmu_gizmo->m_fill_respect_color;
+            // Sync boundaries for hover preview too
+            if (mmu_gizmo && mmu_gizmo->m_fill_respect_boundary
+                && m_rr.mesh_id < (int)mmu_gizmo->m_boundary_painters.size()
+                && mmu_gizmo->m_boundary_painters[m_rr.mesh_id].has_boundaries())
+                mmu_gizmo->m_boundary_painters[m_rr.mesh_id].sync_to_selector(*m_triangle_selectors[m_rr.mesh_id]);
+            else
+                m_triangle_selectors[m_rr.mesh_id]->clear_boundary_triangles();
+            m_triangle_selectors[m_rr.mesh_id]->bucket_fill_select_triangles(
+                m_rr.hit, int(m_rr.facet), clp, fill_angle, true, false, respect_color);
+        }
+        // xyz fork: boundary painter preview on mouse move
+        else if (m_tool_type == ToolType::BOUNDARY_PAINTER) {
+            auto *mmu_gizmo = dynamic_cast<GLGizmoMmuSegmentation*>(this);
+            if (mmu_gizmo && m_rr.mesh_id < (int)mmu_gizmo->m_boundary_painters.size()) {
+                auto &bp = mmu_gizmo->m_boundary_painters[m_rr.mesh_id];
+                if (bp.is_initialized() && bp.has_pending()) {
+                    bp.update_preview(m_rr.hit, int(m_rr.facet),
+                                      mmu_gizmo->m_boundary_snap_to_curve,
+                                      mmu_gizmo->m_boundary_curvature_threshold,
+                                      shift_down);
+                }
+            }
+        }
         m_triangle_selectors[m_rr.mesh_id]->request_update_render_data();
         m_seed_fill_last_mesh_id = m_rr.mesh_id;
         return true;
