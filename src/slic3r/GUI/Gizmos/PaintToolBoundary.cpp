@@ -6,6 +6,7 @@
 #include "slic3r/GUI/OpenGLManager.hpp"
 
 #include <GL/glew.h>
+#include <chrono>
 
 namespace Slic3r {
 namespace GUI {
@@ -51,6 +52,7 @@ void PaintToolBoundary::clear()
     m_preview_path.clear();
     m_last_hit_facet = -1;
     m_boundaries_model.reset();
+    m_boundaries_model_alt.reset();
     m_preview_model.reset();
     m_points_model.reset();
     m_boundaries_dirty = true;
@@ -344,37 +346,80 @@ static void build_line_model(GLModel &model, const std::vector<std::vector<int>>
         model.init_from(std::move(init_data));
 }
 
-void PaintToolBoundary::update_boundary_model(const std::vector<stl_vertex> &vertices)
+void PaintToolBoundary::update_boundary_model(const std::vector<stl_vertex> &vertices, bool animate)
 {
     m_boundaries_model.reset();
+    m_boundaries_model_alt.reset();
 
-    GLModel::Geometry init_data;
-    init_data.format = { GLModel::Geometry::EPrimitiveType::Lines,
-                         GLModel::Geometry::EVertexLayout::P3 };
-    init_data.color = ColorRGBA(0.0f, 1.0f, 0.4f, 1.0f); // bright green
+    // Collect all segments as vertex pairs
+    struct Seg { Vec3f a, b; };
+    std::vector<Seg> all_segments;
 
-    unsigned int vcount = 0;
-
-    // Helper: add a vertex-index path
-    auto add_vertex_path = [&](const std::vector<int> &path) {
-        for (size_t i = 0; i + 1 < path.size(); ++i) {
-            init_data.add_vertex(vertices[path[i]]);
-            init_data.add_vertex(vertices[path[i + 1]]);
-            init_data.add_line(vcount, vcount + 1);
-            vcount += 2;
-        }
+    auto collect_path = [&](const std::vector<int> &path) {
+        for (size_t i = 0; i + 1 < path.size(); ++i)
+            all_segments.push_back({vertices[path[i]], vertices[path[i + 1]]});
     };
 
-    // Completed boundaries
     for (const auto &path : m_completed_paths)
-        add_vertex_path(path);
-    // Pending boundary
+        collect_path(path);
     if (m_pending_vertices.size() >= 2)
-        add_vertex_path(m_pending_vertices);
+        collect_path(m_pending_vertices);
 
-    // Count total for reserve (approximate)
-    if (!init_data.is_empty())
-        m_boundaries_model.init_from(std::move(init_data));
+    if (all_segments.empty())
+        return;
+
+    if (!animate) {
+        // Static yellow line
+        GLModel::Geometry data;
+        data.format = { GLModel::Geometry::EPrimitiveType::Lines, GLModel::Geometry::EVertexLayout::P3 };
+        data.color = ColorRGBA(1.0f, 0.9f, 0.0f, 1.0f);
+        unsigned int vc = 0;
+        for (const auto &seg : all_segments) {
+            data.add_vertex(seg.a);
+            data.add_vertex(seg.b);
+            data.add_line(vc, vc + 1);
+            vc += 2;
+        }
+        if (!data.is_empty())
+            m_boundaries_model.init_from(std::move(data));
+        return;
+    }
+
+    // Compute animation phase: shift by 1 segment every 120ms
+    auto now = std::chrono::steady_clock::now();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+    int phase = (int)(ms / 120) % 6; // 6-segment dash cycle
+
+    // Split segments into two groups based on (index + phase) % 6
+    // Group A (yellow): segments where ((idx + phase) / 3) is even
+    // Group B (black):  segments where ((idx + phase) / 3) is odd
+    // This creates dashes 3 segments long that march forward
+    GLModel::Geometry data_a, data_b;
+    data_a.format = { GLModel::Geometry::EPrimitiveType::Lines, GLModel::Geometry::EVertexLayout::P3 };
+    data_b.format = { GLModel::Geometry::EPrimitiveType::Lines, GLModel::Geometry::EVertexLayout::P3 };
+    data_a.color = ColorRGBA(1.0f, 0.9f, 0.0f, 1.0f); // yellow
+    data_b.color = ColorRGBA(0.1f, 0.1f, 0.1f, 1.0f); // near-black
+
+    unsigned int va_count = 0, vb_count = 0;
+    for (size_t i = 0; i < all_segments.size(); ++i) {
+        bool is_a = (((int)i + phase) % 6) < 3;
+        if (is_a) {
+            data_a.add_vertex(all_segments[i].a);
+            data_a.add_vertex(all_segments[i].b);
+            data_a.add_line(va_count, va_count + 1);
+            va_count += 2;
+        } else {
+            data_b.add_vertex(all_segments[i].a);
+            data_b.add_vertex(all_segments[i].b);
+            data_b.add_line(vb_count, vb_count + 1);
+            vb_count += 2;
+        }
+    }
+
+    if (!data_a.is_empty())
+        m_boundaries_model.init_from(std::move(data_a));
+    if (!data_b.is_empty())
+        m_boundaries_model_alt.init_from(std::move(data_b));
 
     m_boundaries_dirty = false;
 }
@@ -394,7 +439,7 @@ void PaintToolBoundary::update_preview_model(const std::vector<stl_vertex> &vert
     m_preview_dirty = false;
 }
 
-void PaintToolBoundary::render_gl_model(GLModel &model, const Transform3d &matrix)
+void PaintToolBoundary::render_gl_model(GLModel &model, const Transform3d &matrix, bool /*marching_ants*/)
 {
     if (!model.is_initialized())
         return;
@@ -410,16 +455,14 @@ void PaintToolBoundary::render_gl_model(GLModel &model, const Transform3d &matri
         shader->set_uniform("view_model_matrix", camera.get_view_matrix() * matrix);
         shader->set_uniform("projection_matrix", camera.get_projection_matrix());
 
-        // Disable depth test so boundary lines always render on top of the mesh
         glsafe(::glDisable(GL_DEPTH_TEST));
         glsafe(::glEnable(GL_BLEND));
         glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
-        glsafe(::glLineWidth(6.0f));
+        glsafe(::glLineWidth(3.0f));
 
         model.render();
 
         glsafe(::glEnable(GL_DEPTH_TEST));
-
         shader->stop_using();
     }
 
@@ -480,9 +523,11 @@ void PaintToolBoundary::render_start_marker(const Transform3d &matrix, const std
 
 void PaintToolBoundary::render_boundaries(const Transform3d &matrix)
 {
-    if (!m_boundaries_model.is_initialized())
-        return;
-    render_gl_model(m_boundaries_model, matrix);
+    // Render both halves of the marching ants (yellow + black alternating segments)
+    if (m_boundaries_model.is_initialized())
+        render_gl_model(m_boundaries_model, matrix);
+    if (m_boundaries_model_alt.is_initialized())
+        render_gl_model(m_boundaries_model_alt, matrix);
 }
 
 void PaintToolBoundary::render_preview(const Transform3d &matrix)

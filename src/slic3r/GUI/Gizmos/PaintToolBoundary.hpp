@@ -81,7 +81,8 @@ public:
     // --- Rendering ---
 
     // Rebuild the GL model for all completed boundaries.
-    void update_boundary_model(const std::vector<stl_vertex> &vertices);
+    // animate=true for marching ants, false for static yellow line.
+    void update_boundary_model(const std::vector<stl_vertex> &vertices, bool animate = true);
 
     // Rebuild the GL model for the preview path.
     void update_preview_model(const std::vector<stl_vertex> &vertices);
@@ -126,8 +127,9 @@ private:
     std::vector<int> m_preview_path;
     bool m_preview_is_direct = false; // true when shift mode, for color change
 
-    // GL models for rendering
+    // GL models for rendering (two models for marching ants animation)
     GLModel m_boundaries_model;
+    GLModel m_boundaries_model_alt; // alternating color for marching ants
     GLModel m_preview_model;
     GLModel m_points_model;
     bool    m_boundaries_dirty = true;
@@ -139,8 +141,8 @@ private:
     void add_path_edges(const std::vector<int> &path);
     void rebuild_edge_set();
 
-    // Render helper using mm_contour shader
-    static void render_gl_model(GLModel &model, const Transform3d &matrix);
+    // Render helper — marching_ants=true for boundaries, false for preview
+    static void render_gl_model(GLModel &model, const Transform3d &matrix, bool marching_ants = false);
 };
 
 } // namespace GUI
