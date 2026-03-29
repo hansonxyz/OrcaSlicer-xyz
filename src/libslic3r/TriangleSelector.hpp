@@ -319,9 +319,12 @@ public:
                                     float               highlight_by_angle_deg = 0.f, // The maximal angle of overhang. If it is set to a non-zero value, it is possible to paint only the triangles of overhang defined by this angle in degrees.
                                     bool                force_reselection = false);   // force reselection of the triangle mesh even in cases that mouse is pointing on the selected triangle
 
-    // xyz fork: EdgeBlockPredicate returns true if the edge between two original-mesh
-    // vertices should block fill propagation (used by boundary painter tool).
-    using EdgeBlockPredicate = std::function<bool(int, int)>;
+    // xyz fork: Boundary painter — original mesh triangles that form a boundary wall.
+    // Fill BFS will not cross into these triangles.
+    std::set<int> m_boundary_triangles;
+    void set_boundary_triangles(const std::set<int> &tris) { m_boundary_triangles = tris; }
+    void clear_boundary_triangles() { m_boundary_triangles.clear(); }
+    const std::vector<Vec3i32> &get_mesh_indices() const { return m_mesh.its.indices; }
 
     void bucket_fill_select_triangles(const Vec3f         &hit,                        // point where to start
                                       int                  facet_start,                // facet of the original mesh (unsplit) that the hit point belongs to
@@ -329,7 +332,7 @@ public:
                                       float                seed_fill_angle,            // BBS: the maximal angle between two facets to be painted by the same color
                                       bool                 propagate,                  // if bucket fill is propagated to neighbor faces or if it fills the only facet of the modified mesh that the hit point belongs to.
                                       bool                 force_reselection = false,  // force reselection of the triangle mesh even in cases that mouse is pointing on the selected triangle
-                                      const EdgeBlockPredicate &edge_block = nullptr); // xyz fork: optional boundary edge blocker
+                                      bool                 respect_color = true);      // xyz fork: stop at color boundaries
 
     bool                 has_facets(EnforcerBlockerType state) const;
     static bool          has_facets(const TriangleSplittingData &data, EnforcerBlockerType test_state);

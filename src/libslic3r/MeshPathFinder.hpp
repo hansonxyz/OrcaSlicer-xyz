@@ -23,6 +23,19 @@ public:
     // from start to end (inclusive). Empty if no path found.
     std::vector<int> find_path(int start_vertex, int end_vertex) const;
 
+    // Find most direct path (topology distance — fewest edges, biased toward
+    // the straight-line direction). Use when user holds Shift.
+    std::vector<int> find_path_direct(int start_vertex, int end_vertex) const;
+
+    // Find path by intersecting the mesh with a plane defined by the start/end
+    // points and the averaged normals of their triangles. Returns vertex indices
+    // (nearest vertex to each edge intersection) in the same format as find_path.
+    // Use for shift-mode "straight line" boundaries.
+    std::vector<int> find_path_planar(
+        const Vec3f &start_pos, int start_facet,
+        const Vec3f &end_pos, int end_facet,
+        const Vec3f &start_normal, const Vec3f &end_normal) const;
+
     // Find shortest path with curvature-weighted edges.
     // edge_weight: optional per-edge cost multiplier. Called with (vertex_a, vertex_b).
     //   Return higher values to discourage crossing that edge (e.g., flat areas),

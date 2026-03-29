@@ -479,7 +479,7 @@ void TriangleSelector::append_touching_edges(int itriangle, int vertexi, int ver
 }
 
 // BBS: add seed_fill_angle parameter
-void TriangleSelector::bucket_fill_select_triangles(const Vec3f& hit, int facet_start, const ClippingPlane &clp, float seed_fill_angle, bool propagate, bool force_reselection, const EdgeBlockPredicate &edge_block)
+void TriangleSelector::bucket_fill_select_triangles(const Vec3f& hit, int facet_start, const ClippingPlane &clp, float seed_fill_angle, bool propagate, bool force_reselection, bool respect_color)
 {
     int start_facet_idx = select_unsplit_triangle(hit, facet_start);
     assert(start_facet_idx != -1);
@@ -530,28 +530,15 @@ void TriangleSelector::bucket_fill_select_triangles(const Vec3f& hit, int facet_
 
             std::vector<int> touching_triangles = get_all_touching_triangles(current_facet, neighbors[current_facet], neighbors_propagated[current_facet]);
             for(const int tr_idx : touching_triangles) {
-                if (tr_idx < 0 || visited[tr_idx] || m_triangles[tr_idx].get_state() != start_facet_state || is_facet_clipped(tr_idx, clp))
+                if (tr_idx < 0 || visited[tr_idx] || is_facet_clipped(tr_idx, clp))
                     continue;
-
-                // xyz fork: check boundary edge blocker
-                if (edge_block) {
-                    // Find the shared edge vertices between current_facet and tr_idx
-                    const auto &cv = m_triangles[current_facet].verts_idxs;
-                    const auto &nv = m_triangles[tr_idx].verts_idxs;
-                    bool blocked = false;
-                    for (int ci = 0; ci < 3 && !blocked; ++ci) {
-                        for (int ni = 0; ni < 3; ++ni) {
-                            if (cv[ci] == nv[ni] && cv[(ci + 1) % 3] == nv[(ni + 2) % 3]) {
-                                blocked = edge_block(cv[ci], cv[(ci + 1) % 3]);
-                                break;
-                            }
-                            if (cv[ci] == nv[ni] && cv[(ci + 2) % 3] == nv[(ni + 1) % 3]) {
-                                blocked = edge_block(cv[ci], cv[(ci + 2) % 3]);
-                                break;
-                            }
-                        }
-                    }
-                    if (blocked)
+                // xyz fork: color boundary check is optional
+                if (respect_color && m_triangles[tr_idx].get_state() != start_facet_state)
+                    continue;
+                // xyz fork: boundary painter — stop at boundary triangles
+                if (!m_boundary_triangles.empty()) {
+                    int src = m_triangles[tr_idx].source_triangle;
+                    if (m_boundary_triangles.count(src) > 0)
                         continue;
                 }
 

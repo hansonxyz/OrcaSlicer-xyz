@@ -45,7 +45,54 @@ void MeshPathFinder::build_vertex_adjacency()
 
 std::vector<int> MeshPathFinder::find_path(int start_vertex, int end_vertex) const
 {
-    return find_path_weighted(start_vertex, end_vertex, nullptr);
+    // Smart heuristic: compute edge-following path, then compare to direct path.
+    // If edge-following is only marginally shorter than direct, prefer direct
+    // (it looks more intuitive). Only follow edges when there's a clear groove.
+    auto edge_path = find_path_weighted(start_vertex, end_vertex, nullptr);
+    if (edge_path.size() <= 2)
+        return edge_path; // trivial path, no comparison needed
+
+    // Compute edge-following path length
+    float edge_path_len = 0.f;
+    for (size_t i = 0; i + 1 < edge_path.size(); ++i)
+        edge_path_len += (m_vertices[edge_path[i]] - m_vertices[edge_path[i + 1]]).norm();
+
+    // Compare to Euclidean distance
+    float direct_dist = (m_vertices[start_vertex] - m_vertices[end_vertex]).norm();
+    if (direct_dist < 1e-6f)
+        return edge_path;
+
+    // If the edge path is less than 30% longer than the direct distance,
+    // use the direct (topology) path instead — it'll look straighter
+    float ratio = edge_path_len / direct_dist;
+    if (ratio < 1.3f)
+        return find_path_direct(start_vertex, end_vertex);
+
+    return edge_path;
+}
+
+std::vector<int> MeshPathFinder::find_path_direct(int start_vertex, int end_vertex) const
+{
+    // Use topology distance (1.0 per edge) with a directional bias:
+    // edges that point toward the goal cost less than edges that deviate.
+    // This produces straighter, more direct paths.
+    if (start_vertex == end_vertex)
+        return {start_vertex};
+    if (start_vertex < 0 || end_vertex < 0)
+        return {};
+
+    const Vec3f &goal = m_vertices[end_vertex];
+    const Vec3f &start = m_vertices[start_vertex];
+    const Vec3f ideal_dir = (goal - start).normalized();
+
+    auto weight = [&](int from, int to) -> float {
+        Vec3f edge_dir = (m_vertices[to] - m_vertices[from]).normalized();
+        float alignment = ideal_dir.dot(edge_dir); // -1 to 1
+        // Cost: 1.0 for perfectly aligned, up to 3.0 for perpendicular/backward
+        return 2.0f - alignment;
+    };
+
+    return find_path_weighted(start_vertex, end_vertex, weight);
 }
 
 std::vector<int> MeshPathFinder::find_path_weighted(
@@ -181,6 +228,47 @@ std::vector<std::pair<int,int>> MeshPathFinder::path_to_edges(const std::vector<
         edges.emplace_back(lo, hi);
     }
     return edges;
+}
+
+std::vector<int> MeshPathFinder::find_path_planar(
+    const Vec3f &start_pos, int start_facet,
+    const Vec3f &end_pos, int end_facet,
+    const Vec3f &start_normal, const Vec3f &end_normal) const
+{
+    int start_v = nearest_vertex_on_triangle(start_pos, start_facet);
+    int end_v = nearest_vertex_on_triangle(end_pos, end_facet);
+    if (start_v < 0 || end_v < 0)
+        return {};
+    if (start_v == end_v)
+        return {start_v};
+
+    // Compute the cutting plane:
+    Vec3f avg_normal = (start_normal + end_normal) * 0.5f;
+    if (avg_normal.squaredNorm() < 0.01f)
+        avg_normal = start_normal;
+    avg_normal.normalize();
+
+    Vec3f ab_dir = (end_pos - start_pos);
+    Vec3f plane_normal = ab_dir.cross(avg_normal);
+    if (plane_normal.squaredNorm() < 1e-10f)
+        return find_path_direct(start_v, end_v);
+    plane_normal.normalize();
+
+    // Use A* with edge weights that penalize distance from the cutting plane.
+    // Edges near the plane are cheap, edges far away are expensive.
+    // This produces a path that hugs the cutting plane while staying on mesh edges.
+    auto weight = [&](int from, int to) -> float {
+        float dist_from = std::abs(plane_normal.dot(m_vertices[from] - start_pos));
+        float dist_to   = std::abs(plane_normal.dot(m_vertices[to] - start_pos));
+        float avg_dist = (dist_from + dist_to) * 0.5f;
+        // Base cost of 1.0, plus penalty proportional to plane distance squared.
+        // The squaring makes the path strongly prefer staying near the plane.
+        float edge_len = (m_vertices[to] - m_vertices[from]).norm();
+        if (edge_len < 1e-8f) edge_len = 1e-8f;
+        return 1.0f + (avg_dist * avg_dist) / (edge_len * edge_len) * 10.0f;
+    };
+
+    return find_path_weighted(start_v, end_v, weight);
 }
 
 } // namespace Slic3r

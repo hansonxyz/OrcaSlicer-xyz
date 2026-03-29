@@ -124,6 +124,10 @@ protected:
     bool                              m_show_sharp_edges = false;
     float                             m_sharp_edges_cached_angle = -1.f;
 public:
+    // xyz fork: Fill tool constraint checkboxes (public for GLGizmoPainterBase access)
+    bool                              m_fill_respect_angle = true;     // stop at surface angle changes
+    bool                              m_fill_respect_color = true;     // stop at color boundaries
+    bool                              m_fill_respect_boundary = true;  // stop at boundary painter lines
     // xyz fork: Crease-snapping brush (public for GLGizmoPainterBase access)
     bool                              m_snap_to_edges = false;
     float                             m_snap_curvature_threshold = 15.f;
