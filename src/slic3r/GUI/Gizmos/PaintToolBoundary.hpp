@@ -99,6 +99,13 @@ public:
     // Number of completed boundaries.
     size_t boundary_count() const { return m_completed_paths.size(); }
 
+    // Serialize completed boundaries to a string for saving with the model.
+    // Format: paths separated by "|", vertices within a path separated by ",".
+    std::string serialize() const;
+
+    // Deserialize boundaries from a string. Replaces current completed boundaries.
+    void deserialize(const std::string &data);
+
 private:
     std::unique_ptr<MeshPathFinder> m_path_finder;
     std::vector<Vec3i32> m_neighbors_storage; // owned copy for MeshPathFinder

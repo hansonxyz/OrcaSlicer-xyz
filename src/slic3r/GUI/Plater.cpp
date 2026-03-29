@@ -15982,8 +15982,15 @@ void Plater::print_job_finished(wxCommandEvent &evt)
     p->main_frame->request_select_tab(MainFrame::TabPosition::tpMonitor);
     //jump to monitor and select device status panel
     MonitorPanel* curr_monitor = p->main_frame->m_monitor;
-    if(curr_monitor)
+    if (curr_monitor) {
        curr_monitor->get_tabpanel()->ChangeSelection(MonitorPanel::PrinterTab::PT_STATUS);
+       // xyz fork: auto-start camera after sending a print job
+       if (wxGetApp().app_config->get_bool("auto_start_camera")) {
+           try {
+               curr_monitor->jump_to_LiveView();
+           } catch (...) {}
+       }
+    }
 }
 
 void Plater::send_job_finished(wxCommandEvent& evt)

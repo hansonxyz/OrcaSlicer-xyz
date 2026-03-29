@@ -312,6 +312,61 @@ void PaintToolBoundary::rebuild_edge_set()
         add_path_edges(path);
 }
 
+std::string PaintToolBoundary::serialize() const
+{
+    // Format: paths separated by "|", vertex indices within a path separated by ","
+    // Example: "10,20,30,40|50,60,70,80"
+    std::string result;
+    for (size_t pi = 0; pi < m_completed_paths.size(); ++pi) {
+        if (pi > 0) result += '|';
+        const auto &path = m_completed_paths[pi];
+        for (size_t vi = 0; vi < path.size(); ++vi) {
+            if (vi > 0) result += ',';
+            result += std::to_string(path[vi]);
+        }
+    }
+    return result;
+}
+
+void PaintToolBoundary::deserialize(const std::string &data)
+{
+    // Clear existing completed paths (keep the path finder intact)
+    m_completed_paths.clear();
+    m_boundary_edges.clear();
+    m_boundaries_dirty = true;
+
+    if (data.empty())
+        return;
+
+    // Parse "|"-separated paths, each with ","-separated vertex indices
+    size_t pos = 0;
+    while (pos < data.size()) {
+        size_t pipe = data.find('|', pos);
+        if (pipe == std::string::npos) pipe = data.size();
+
+        std::string path_str = data.substr(pos, pipe - pos);
+        if (!path_str.empty()) {
+            std::vector<int> path;
+            size_t vpos = 0;
+            while (vpos < path_str.size()) {
+                size_t comma = path_str.find(',', vpos);
+                if (comma == std::string::npos) comma = path_str.size();
+                std::string num = path_str.substr(vpos, comma - vpos);
+                if (!num.empty())
+                    path.push_back(std::stoi(num));
+                vpos = comma + 1;
+            }
+            if (path.size() >= 2) {
+                m_completed_paths.push_back(std::move(path));
+            }
+        }
+        pos = pipe + 1;
+    }
+
+    // Rebuild edge set from deserialized paths
+    rebuild_edge_set();
+}
+
 static void build_line_model(GLModel &model, const std::vector<std::vector<int>> &paths,
                               const std::vector<stl_vertex> &vertices,
                               const ColorRGBA &color)

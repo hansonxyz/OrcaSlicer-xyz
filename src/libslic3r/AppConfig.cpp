@@ -342,6 +342,11 @@ void AppConfig::set_defaults()
         set_bool("auto_arrange", true);
     }
 
+    // xyz fork: default auto-start camera to enabled
+    if(get("auto_start_camera").empty()) {
+        set_bool("auto_start_camera", true);
+    }
+
     if (get("show_model_mesh").empty()) {
         set_bool("show_model_mesh", false);
     }

@@ -928,6 +928,17 @@ void GLGizmoMmuSegmentation::update_model_object()
             continue;
         ++idx;
         updated |= mv->mmu_segmentation_facets.set(*m_triangle_selectors[idx].get());
+        // xyz fork: save boundary paths to model volume
+        if (idx < (int)m_boundary_painters.size() && m_boundary_painters[idx].has_boundaries()) {
+            std::string data = m_boundary_painters[idx].serialize();
+            if (data != mv->boundary_paths_data) {
+                mv->boundary_paths_data = data;
+                updated = true;
+            }
+        } else if (!mv->boundary_paths_data.empty()) {
+            mv->boundary_paths_data.clear();
+            updated = true;
+        }
     }
 
     if (updated) {
@@ -1001,6 +1012,23 @@ void GLGizmoMmuSegmentation::update_from_model_object(bool first_update)
         this->init_extruders_data();
 
     this->init_model_triangle_selectors();
+
+    // xyz fork: restore boundary paths from model volumes
+    {
+        const ModelObject *mo = m_c->selection_info()->model_object();
+        int bp_idx = -1;
+        m_boundary_painters.clear();
+        for (const ModelVolume *mv : mo->volumes) {
+            if (!mv->is_model_part())
+                continue;
+            ++bp_idx;
+            m_boundary_painters.emplace_back();
+            if (!mv->boundary_paths_data.empty()) {
+                m_boundary_painters.back().init(mv->mesh());
+                m_boundary_painters.back().deserialize(mv->boundary_paths_data);
+            }
+        }
+    }
 
     // ORCA: Refresh cache when model changes
     this->update_used_filaments();
