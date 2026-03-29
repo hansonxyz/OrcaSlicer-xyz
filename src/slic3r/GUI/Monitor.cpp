@@ -432,8 +432,17 @@ bool MonitorPanel::Show(bool show)
             obj = dev->get_selected_machine();
             if (obj == nullptr) {
                 dev->load_last_machine();
+                obj = dev->get_selected_machine();
             } else {
                 obj->reset_update_time();
+            }
+            // xyz fork: auto-start camera if printer has an active print job
+            if (obj && MachineObject::is_in_printing_status(obj->print_status)) {
+                try {
+                    m_status_info_panel->get_media_play_ctrl()->jump_to_play();
+                } catch (...) {
+                    // Suppress errors on automatic camera start — user can retry manually
+                }
             }
         }
     } else {
