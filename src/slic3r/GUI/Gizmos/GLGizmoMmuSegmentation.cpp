@@ -172,11 +172,16 @@ void GLGizmoMmuSegmentation::render_painter_gizmo()
                 continue;
             Transform3d trafo = mo_bp->instances[selection.get_instance_idx()]->get_transformation().get_matrix() * mv->get_matrix();
             const auto &verts = mv->mesh().its.vertices;
-            bp.update_boundary_model(verts);
+            bp.update_boundary_model(verts, m_boundary_animate);
             bp.update_preview_model(verts);
             bp.render_boundaries(trafo);
             bp.render_preview(trafo);
             bp.render_start_marker(trafo, verts);
+            // Request continuous repaint for marching ants animation
+            if (m_boundary_animate && (bp.has_boundaries() || bp.has_pending())) {
+                m_parent.set_as_dirty();
+                m_parent.request_extra_frame();
+            }
         }
     }
 
@@ -568,7 +573,7 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
             m_imgui->bbl_checkbox(_L("Snap to edges"), m_snap_to_edges);
             if (m_snap_to_edges) {
                 ImGui::AlignTextToFramePadding();
-                m_imgui->text(_L("Edge sensitivity") + ":");
+                m_imgui->text(_L("Min edge angle"));
                 std::string fmt = std::string("%.f") + I18N::translate_utf8("°", "Edge snap threshold");
                 ImGui::SameLine(circle_max_width);
                 ImGui::PushItemWidth(sliders_width);
@@ -576,6 +581,7 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
                 ImGui::SameLine(drag_left_width + circle_max_width);
                 ImGui::PushItemWidth(1.5 * slider_icon_width);
                 ImGui::BBLDragFloat("##snap_threshold_input", &m_snap_curvature_threshold, 0.05f, 0.0f, 0.0f, "%.2f");
+                m_imgui->text(_L("Lower = sharper edges only. Higher = gentler curves."));
             }
         }
 
@@ -740,10 +746,13 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
         m_imgui->bbl_checkbox(_L("Snap to sharp edges"), m_boundary_snap_to_curve);
         if (m_boundary_snap_to_curve) {
             ImGui::AlignTextToFramePadding();
-            m_imgui->text(_L("Edge angle"));
+            m_imgui->text(_L("Min edge angle"));
             ImGui::SameLine(sliders_left_width);
             ImGui::PushItemWidth(sliders_width);
-            m_imgui->bbl_slider_float_style("##boundary_curvature", &m_boundary_curvature_threshold, 5.f, 90.f, "%.0f");
+            std::string angle_fmt = std::string("%.0f") + I18N::translate_utf8("°",
+                "Edge angle threshold for snap-to-edge");
+            m_imgui->bbl_slider_float_style("##boundary_curvature", &m_boundary_curvature_threshold, 5.f, 90.f, angle_fmt.data());
+            m_imgui->text(_L("Lower = sharper edges only. Higher = gentler curves."));
         }
 
         // Show boundary count and clear button
@@ -773,6 +782,7 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
                 for (auto &bp : m_boundary_painters)
                     bp.clear();
             }
+            m_imgui->bbl_checkbox(_L("Animate boundaries"), m_boundary_animate);
         }
     }
     // xyz fork: Bounded Fill tool removed — merged into Fill tool with checkboxes

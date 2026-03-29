@@ -2,6 +2,10 @@
 
 These are evaluated paint tool improvement ideas for future implementation, ranked by impact/effort ratio. The top 3 (Bounded Fill, Auto-Segment Face Groups, Sharp Edge Preview) are being implemented now and documented in GOALS.md.
 
+## Precise Boundary Lines via Triangle Bisection
+
+Upgrade boundary painter fill to split triangles along the boundary line for pixel-precise boundaries instead of the current "boundary triangles form a wall" approach. Research complete (2026-03-28): TriangleSelector's existing `split_triangle`/`perform_split` mechanism can be reused. The brush tool splits edges at midpoints based on edge length, creates child triangles with same `source_triangle`, and recursively tests cursor intersection. For boundary lines: (1) replace the edge-length test with a boundary-line-crossing test, (2) use the same `perform_split` to subdivide, (3) test which side of the boundary each child falls on. The fill would then paint only the children on the correct side. When filling from a triangle that has a boundary through it, split first and fill from the side the user clicked. Significant work but the mechanism is well-understood and proven. The current wall-of-triangles approach works well for most use cases.
+
 ## Refactor xyz Paint Tools into MeshAnalysis Module
 
 Move the mesh analysis functions added by the xyz fork (precompute_vertex_curvature, get_sharp_edges, compute_face_groups) out of TriangleSelector and into a standalone `MeshAnalysis.hpp/cpp` utility. These are pure functions that don't depend on TriangleSelector state. The edge-snap brush and sharp edge preview would call MeshAnalysis instead of TriangleSelector methods. This reduces the invasiveness of the fork's changes to existing files and establishes the modular pattern used by the boundary painter.

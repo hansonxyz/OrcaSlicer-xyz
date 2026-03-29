@@ -135,6 +135,7 @@ public:
     std::vector<PaintToolBoundary>    m_boundary_painters; // one per mesh
     bool                              m_boundary_snap_to_curve = false;
     float                             m_boundary_curvature_threshold = 30.f;
+    bool                              m_boundary_animate = true;
     bool is_boundary_painter_active() const { return m_tool_type == ToolType::BOUNDARY_PAINTER; }
 protected:
 
