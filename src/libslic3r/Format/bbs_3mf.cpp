@@ -4936,6 +4936,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     volume->source.is_converted_from_inches = metadata.value == "1";
                 else if (metadata.key == SOURCE_IN_METERS)
                     volume->source.is_converted_from_meters = metadata.value == "1";
+                else if (metadata.key == "boundary_paths_data") // xyz fork
+                    volume->boundary_paths_data = metadata.value;
                 else if ((metadata.key == MATRIX_KEY) || (metadata.key == MESH_SHARED_KEY))
                     continue;
                 else
@@ -5086,6 +5088,8 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                     volume->source.is_converted_from_inches = metadata.value == "1";
                 else if (metadata.key == SOURCE_IN_METERS)
                     volume->source.is_converted_from_meters = metadata.value == "1";
+                else if (metadata.key == "boundary_paths_data") // xyz fork
+                    volume->boundary_paths_data = metadata.value;
                 else
                     volume->config.set_deserialize(metadata.key, metadata.value, config_substitutions);
             }
@@ -7689,6 +7693,11 @@ void PlateData::parse_filament_info(GCodeProcessorResult *result)
                             // stores volume's config data
                             for (const std::string& key : volume->config.keys()) {
                                 stream << "      <" << METADATA_TAG << " "<< KEY_ATTR << "=\"" << key << "\" " << VALUE_ATTR << "=\"" << volume->config.opt_serialize(key) << "\"/>\n";
+                            }
+
+                            // xyz fork: save boundary painter paths
+                            if (!volume->boundary_paths_data.empty()) {
+                                stream << "      <" << METADATA_TAG << " " << KEY_ATTR << "=\"boundary_paths_data\" " << VALUE_ATTR << "=\"" << volume->boundary_paths_data << "\"/>\n";
                             }
 
                             if (const std::optional<EmbossShape> &es = volume->emboss_shape; es.has_value()) {

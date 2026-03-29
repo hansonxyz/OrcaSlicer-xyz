@@ -437,7 +437,8 @@ bool MonitorPanel::Show(bool show)
                 obj->reset_update_time();
             }
             // xyz fork: auto-start camera if printer has an active print job
-            if (obj && MachineObject::is_in_printing_status(obj->print_status)) {
+            if (obj && MachineObject::is_in_printing_status(obj->print_status)
+                && wxGetApp().app_config->get_bool("auto_start_camera")) {
                 try {
                     m_status_info_panel->get_media_play_ctrl()->jump_to_play();
                 } catch (...) {

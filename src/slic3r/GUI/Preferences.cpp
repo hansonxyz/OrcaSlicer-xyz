@@ -1360,6 +1360,12 @@ void PreferencesDialog::create_items()
     auto item_show_splash_scr  = create_item_checkbox(_L("Show splash screen"), _L("Show the splash screen during startup."), "show_splash_screen");
     g_sizer->Add(item_show_splash_scr);
 
+    // xyz fork: auto-start camera preference
+    auto item_auto_camera = create_item_checkbox(_L("Auto-start camera"),
+        _L("Automatically start the camera stream when viewing a printer with an active print job, or after sending a print."),
+        "auto_start_camera");
+    g_sizer->Add(item_auto_camera);
+
     //auto item_hints            = create_item_checkbox(_L("Show \"Daily Tips\" after start"), page, _L("If enabled, useful hints are displayed at startup."), "show_daily_tips");
     //g_sizer->Add(item_hints);
 
