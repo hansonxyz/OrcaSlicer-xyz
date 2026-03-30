@@ -557,6 +557,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/PurgeCalibrationDialog.hpp
     GUI/PurgeCalibrationGenerator.cpp
     GUI/PurgeCalibrationGenerator.hpp
+    GUI/CalibrationStrokeFont.cpp
+    GUI/CalibrationStrokeFont.hpp
     GUI/wxExtensions.cpp
     GUI/wxExtensions.hpp
     pchheader.cpp

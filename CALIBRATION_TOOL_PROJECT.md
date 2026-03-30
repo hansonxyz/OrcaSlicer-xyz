@@ -164,23 +164,47 @@ PurgeCalibrationGenerator (new class, src/slic3r/GUI/PurgeCalibrationGenerator.h
 
 ### Geometry Generation
 
-**Rectangle mesh:** Simple `indexed_triangle_set` with 2 triangles (quad). Extruded to layer_height. Trivial to generate programmatically.
+**Single grouped object:** All calibration geometry (base, strips, notches, labels) is created as volumes within ONE ModelObject. This allows the user to delete the entire calibration as a single item.
 
-**Ruler notches:** Thin rectangles (0.5mm wide) at calculated positions along each strip. Same simple mesh generation.
+**Rectangle mesh:** Simple `indexed_triangle_set` cube. Extruded to layer_height.
 
-**Text meshes (Phase 3):** Font → SVG → mesh conversion. For Phase 1, use simple line-segment digit rendering or numbered markers. Full text generation is a separate sub-project.
+**Ruler notches:** Thin rectangles at calculated positions along each strip.
+
+**Label text:** LCD calculator-style 7-segment stroke font (CalibrationStrokeFont) with diamond-cut parallelogram ends. Shows filament numbers with an arrow mesh between them (e.g., "1 → 3"). Arrow is a simple triangle mesh, not a digit character.
+
+**Base layer:** Must extend to cover the label area below the strips. Labels are positioned below strips and must sit on top of the base, not float in air.
 
 ### Strip Sizing
 
-For a given flush volume V (mm³), nozzle width W, and layer height H:
+For a given flush volume V (mm³), the strip must contain exactly V mm³ of extruded material. The actual volume deposited by the slicer depends on:
 ```
-strip_fill_area = V / H
-strip_length = strip_fill_area / strip_width
+volume_per_mm_length = extrusion_width × layer_height × (strip_width / line_spacing)
 ```
 
-Where strip_width is chosen to fit the grid layout on the bed (e.g., 15-20mm per strip).
+For solid infill with line_spacing ≈ extrusion_width:
+```
+volume_per_mm_length ≈ layer_height × strip_width
+strip_length = V / volume_per_mm_length
+```
 
-The strip starts at the "50mm³" point (that much was already purged to waste). The ruler's "0" mark = 50mm³ actual. Each subsequent 20mm³ notch represents additional purge. The user measures where the color is clean and reads the total from the ruler (add 50 to get actual purge volume needed).
+IMPORTANT: Verify strip sizes against the slicer's actual fill output. The formula assumes 100% solid fill — real extrusion may have gaps, overlap, or perimeter effects that change the effective volume per mm. If strips appear oversized, adjust the formula with a calibration factor.
+
+The strip starts at the "50mm³" point (that much was already purged to waste). The ruler's "0" mark = 50mm³ actual. Each subsequent 20mm³ notch represents additional purge.
+
+### Print Direction Requirements
+
+**Fill pattern:** Strips must use rectilinear fill along the X axis (not diagonal monotonic). Set per-object overrides:
+- `top_surface_pattern = rectilinear`
+- `infill_direction = 0` (X-axis aligned lines)
+
+**Print order within strips:** Lines should be printed from Y=0 to Y=max so the bottom of each strip (the contaminated end) is printed first and the clean end is printed last. This ensures the color transition gradient is accurate.
+- Phase 1: Set rectilinear + 0° direction via per-object config (gets ~90% correct, slicer may vary line start)
+- Phase 2: Post-process gcode to guarantee Y-ascending fill order within each strip
+- Gcode generation phase: pass a flag to the slicer/gcode generator that this is a calibration print — all print operations should start as close to X=0 and Y=0 as possible for every object
+
+### Object Management
+
+All calibration geometry is created as separate ModelObjects (for distinct gcode labeling with `calib_X_Y` markers). The objects remain separate so the gcode post-processor can identify each strip. Future improvement: group objects visually in the object list so the user can delete them as one unit.
 
 ### Flush Volume Calculation from Measurement
 

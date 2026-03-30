@@ -1,4 +1,5 @@
 #include "PurgeCalibrationGenerator.hpp"
+#include "CalibrationStrokeFont.hpp"
 #include "GUI_App.hpp"
 #include "Plater.hpp"
 #include "MainFrame.hpp"
@@ -119,7 +120,9 @@ bool PurgeCalibrationGenerator::generate(const Options &opts)
     }
 
     auto max_dims = calc_strip_dims(max_flush_vol, layer_height, extrusion_width);
-    double cell_depth = max_dims.length + strip_gap;
+    double label_height = 4.0; // mm — height of label text
+    double label_gap = 1.5;   // mm — gap between strip and label
+    double cell_depth = max_dims.length + label_gap + label_height + strip_gap;
 
     // How many fit on the bed?
     int max_cols = std::max(1, (int)(usable_width / cell_width));
@@ -157,17 +160,19 @@ bool PurgeCalibrationGenerator::generate(const Options &opts)
     double base_height = opts.base_layers > 0 ? opts.base_layers * layer_height : 0;
 
     // --- Add base layer object (optional) ---
+    // Base extends below the grid to cover the label text area
     if (opts.base_layers > 0) {
         double base_margin = 2.0;
+        double base_extend_below = label_height + label_gap + base_margin;
         TriangleMesh base_mesh = make_rect(
             grid_width + 2 * base_margin,
-            grid_depth + 2 * base_margin,
+            grid_depth + base_margin + base_extend_below,
             base_height);
         ModelObject *base_obj = model.add_object("calib_base", "", std::move(base_mesh));
         auto *base_inst = base_obj->add_instance();
         base_inst->set_offset(Vec3d(
             plate_origin.x() + offset_x - base_margin,
-            plate_origin.y() + offset_y - base_margin,
+            plate_origin.y() + offset_y - base_extend_below,
             0));
 
         if (!base_obj->volumes.empty())
@@ -209,6 +214,10 @@ bool PurgeCalibrationGenerator::generate(const Options &opts)
         obj->config.set_key_value("internal_solid_infill_speed", new ConfigOptionFloat(opts.strip_speed));
         obj->config.set_key_value("top_surface_speed", new ConfigOptionFloat(opts.strip_speed));
 
+        // Per-object fill pattern: rectilinear along X axis for consistent purge gradient
+        obj->config.set_key_value("top_surface_pattern", new ConfigOptionEnum<InfillPattern>(ipRectilinear));
+        obj->config.set_key_value("infill_direction", new ConfigOptionFloat(0.0)); // X-axis aligned
+
         BOOST_LOG_TRIVIAL(info) << "PurgeCalibration: strip " << name
             << " at (" << x << "," << y << ") " << dims.width << "x" << dims.length;
     }
@@ -243,6 +252,42 @@ bool PurgeCalibrationGenerator::generate(const Options &opts)
             if (!nobj->volumes.empty())
                 nobj->volumes[0]->config.set_key_value("extruder", new ConfigOptionInt(opts.label_filament + 1));
         }
+    }
+
+    // --- Add label text objects below each strip ---
+    for (int i = 0; i < n_pairs; ++i) {
+        const auto &pair = ordered_pairs[i];
+        int col = i % grid_cols;
+        int row = i / grid_cols;
+
+        auto dims = calc_strip_dims(200.0, layer_height, extrusion_width); // just for positioning
+        double flush_vol = 300;
+        if (pair.from_filament < (int)recommended.size() &&
+            pair.to_filament < (int)recommended[pair.from_filament].size())
+            flush_vol = recommended[pair.from_filament][pair.to_filament];
+        flush_vol = std::max(200.0, flush_vol);
+        dims = calc_strip_dims(flush_vol, layer_height, extrusion_width);
+
+        double x = offset_x + col * cell_width;
+        double y = offset_y + row * cell_depth;
+
+        // Label: "F1>F3" style (from_filament > to_filament)
+        std::string label = std::to_string(pair.from_filament + 1) + ">"
+                          + std::to_string(pair.to_filament + 1);
+
+        TriangleMesh text_mesh = CalibrationStrokeFont::render_text(label, label_height, layer_height);
+        if (text_mesh.empty()) continue;
+
+        // Position below the strip
+        double label_y = y - label_gap - label_height;
+
+        std::string lname = "label_" + std::to_string(pair.from_filament) + "_" + std::to_string(pair.to_filament);
+        ModelObject *lobj = model.add_object(lname.c_str(), "", std::move(text_mesh));
+        auto *linst = lobj->add_instance();
+        linst->set_offset(Vec3d(plate_origin.x() + x, plate_origin.y() + label_y, base_height));
+
+        if (!lobj->volumes.empty())
+            lobj->volumes[0]->config.set_key_value("extruder", new ConfigOptionInt(opts.label_filament + 1));
     }
 
     // --- Assign all new objects to the temp plate ---

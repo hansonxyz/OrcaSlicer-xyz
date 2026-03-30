@@ -160,11 +160,21 @@ void PurgeCalibrationDialog::on_message(const std::string &message)
             opts.base_filament = j.value("base_filament", 0);
             opts.label_filament = j.value("label_filament", 0);
 
-            // Find a strip filament that isn't the label filament
+            // Pick strip filament: distinct from both base and label if 3+ filaments,
+            // otherwise same as base (only 2 filaments available)
             auto &preset_bundle = *wxGetApp().preset_bundle;
             auto *color_opt = preset_bundle.project_config.option<ConfigOptionStrings>("filament_colour");
             int n_filaments = color_opt ? (int)color_opt->values.size() : 2;
-            opts.strip_filament = (opts.label_filament == 0 && n_filaments > 1) ? 1 : 0;
+            opts.strip_filament = opts.base_filament; // default: same as base
+            if (n_filaments >= 3) {
+                // Find a filament that isn't base or label
+                for (int i = 0; i < n_filaments; ++i) {
+                    if (i != opts.base_filament && i != opts.label_filament) {
+                        opts.strip_filament = i;
+                        break;
+                    }
+                }
+            }
 
             // Close this dialog before generating
             if (IsModal()) EndModal(wxID_OK);

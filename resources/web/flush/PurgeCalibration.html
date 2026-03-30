@@ -98,7 +98,7 @@
           <div class="ButtonStyleRegular ButtonTypeCompact" onclick="deselectAll()">Deselect All</div>
         </div>
         <div class="button-right">
-          <div class="ButtonStyleConfirm ButtonTypeChoice" onclick="generate()">Generate Test Print</div>
+          <div class="ButtonStyleConfirm ButtonTypeWindow" onclick="generate()">Generate Test Print</div>
           <div class="ButtonStyleRegular ButtonTypeChoice" onclick="cancel()">Cancel</div>
         </div>
       </div>
@@ -146,6 +146,12 @@
           baseSelect.add(new Option((f.index + 1) + ': ' + f.name, f.index));
           labelSelect.add(new Option((f.index + 1) + ': ' + f.name, f.index));
         }
+
+        // Smart defaults: base = filament 0, label = filament 1 (distinct from base)
+        // If only 1 filament, both default to 0
+        var n = m_filaments.length;
+        baseSelect.value = 0;
+        labelSelect.value = (n > 1) ? 1 : 0;
 
         // Populate type dropdown
         var typeSelect = document.getElementById('type_select');
