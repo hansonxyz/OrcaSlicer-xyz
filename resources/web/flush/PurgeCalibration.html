@@ -91,6 +91,7 @@
       </div>
 
       <div id="warning_panel" class="warning-text" style="display:none;"></div>
+      <div id="strip_limit_warning" class="warning-text" style="display:none;"></div>
 
       <div class="button-row">
         <div class="button-left">
@@ -98,8 +99,8 @@
           <div class="ButtonStyleRegular ButtonTypeCompact" onclick="deselectAll()">Deselect All</div>
         </div>
         <div class="button-right">
-          <div class="ButtonStyleConfirm ButtonTypeWindow" onclick="generate()">Generate Test Print</div>
-          <div class="ButtonStyleRegular ButtonTypeChoice" onclick="cancel()">Cancel</div>
+          <div class="ButtonStyleConfirm ButtonTypeWindow" id="generate_btn" onclick="generate()">Generate Test Print</div>
+          <div class="ButtonStyleRegular ButtonTypeWindow" onclick="cancel()">Cancel</div>
         </div>
       </div>
     </div>
@@ -109,6 +110,7 @@
       let m_recommended_matrix = [];
       let m_selected_indices = [];
       let m_checkboxes = [];
+      let m_max_strips = 99;
 
       // Same luminance function as WipingDialog
       function getLuminance(color) {
@@ -133,6 +135,7 @@
       function buildCalibration(data) {
         m_filaments = data.filaments;
         m_recommended_matrix = data.recommended_matrix;
+        m_max_strips = data.max_strips || 99;
 
         if (data.is_dark_mode) document.body.classList.add('dark-mode');
 
@@ -240,6 +243,7 @@
             cb.checked = true;
             cb.dataset.from = fromF.index;
             cb.dataset.to = toF.index;
+            cb.addEventListener('change', validateSelection);
             m_checkboxes.push(cb);
 
             var span = document.createElement('span');
@@ -255,10 +259,35 @@
           }
           tbody.appendChild(tr);
         }
+        validateSelection();
       }
 
-      function selectAll() { for (var i = 0; i < m_checkboxes.length; i++) m_checkboxes[i].checked = true; }
-      function deselectAll() { for (var i = 0; i < m_checkboxes.length; i++) m_checkboxes[i].checked = false; }
+      function selectAll() { for (var i = 0; i < m_checkboxes.length; i++) m_checkboxes[i].checked = true; validateSelection(); }
+      function deselectAll() { for (var i = 0; i < m_checkboxes.length; i++) m_checkboxes[i].checked = false; validateSelection(); }
+
+      function validateSelection() {
+        var count = 0;
+        for (var i = 0; i < m_checkboxes.length; i++)
+          if (m_checkboxes[i].checked) count++;
+
+        var warn = document.getElementById('strip_limit_warning');
+        var btn = document.getElementById('generate_btn');
+        if (count > m_max_strips) {
+          warn.style.display = 'block';
+          warn.innerText = 'Too many pairs selected (' + count + '). Maximum ' + m_max_strips +
+            ' test strips fit on the bed. Deselect some pairs and calibrate the rest on another print.';
+          btn.style.opacity = '0.4';
+          btn.style.pointerEvents = 'none';
+        } else if (count === 0) {
+          warn.style.display = 'none';
+          btn.style.opacity = '0.4';
+          btn.style.pointerEvents = 'none';
+        } else {
+          warn.style.display = 'none';
+          btn.style.opacity = '1';
+          btn.style.pointerEvents = 'auto';
+        }
+      }
 
       function generate() {
         var pairs = [];

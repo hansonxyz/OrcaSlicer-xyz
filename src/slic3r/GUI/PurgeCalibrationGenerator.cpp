@@ -177,24 +177,44 @@ bool PurgeCalibrationGenerator::generate(const Options &opts)
 
     double base_height = opts.base_layers > 0 ? opts.base_layers * layer_height : 0;
 
-    // --- Add base layer object (optional) ---
-    // Base extends below the grid to cover the label text area
+    // --- Add per-strip base pads (optional) ---
+    // Each strip gets its own base pad with 3mm margin on top and sides,
+    // extending down to cover the ruler notches and label text below
+    double base_pad_margin = 3.0;
     if (opts.base_layers > 0) {
-        double base_margin = 2.0;
-        double base_extend_below = label_height + label_gap + base_margin;
-        TriangleMesh base_mesh = make_rect(
-            grid_width + 2 * base_margin,
-            grid_depth + base_margin + base_extend_below,
-            base_height);
-        ModelObject *base_obj = model.add_object("calib_base", "", std::move(base_mesh));
-        auto *base_inst = base_obj->add_instance();
-        base_inst->set_offset(Vec3d(
-            plate_origin.x() + offset_x - base_margin,
-            plate_origin.y() + offset_y - base_extend_below,
-            0));
+        for (int i = 0; i < n_pairs; ++i) {
+            const auto &pair = ordered_pairs[i];
+            int col = i % grid_cols;
+            int row = i / grid_cols;
 
-        if (!base_obj->volumes.empty())
-            base_obj->volumes[0]->config.set_key_value("extruder", new ConfigOptionInt(opts.base_filament + 1));
+            double flush_vol = 300;
+            if (pair.from_filament < (int)recommended.size() &&
+                pair.to_filament < (int)recommended[pair.from_filament].size())
+                flush_vol = recommended[pair.from_filament][pair.to_filament];
+            flush_vol = std::max(200.0, flush_vol);
+            auto dims = calc_strip_dims(flush_vol, layer_height, extrusion_width);
+
+            double x = offset_x + col * cell_width;
+            double y = offset_y + row * cell_depth;
+
+            // Pad covers: strip + notch area on right + label below
+            double pad_w = dims.width + notch_area + base_pad_margin * 2;
+            double pad_top = base_pad_margin;
+            double pad_bottom = label_gap + label_height + base_pad_margin;
+            double pad_h = dims.length + pad_top + pad_bottom;
+
+            TriangleMesh pad_mesh = make_rect(pad_w, pad_h, base_height);
+            std::string pname = "base_" + std::to_string(pair.from_filament) + "_" + std::to_string(pair.to_filament);
+            ModelObject *pad_obj = model.add_object(pname.c_str(), "", std::move(pad_mesh));
+            auto *pad_inst = pad_obj->add_instance();
+            pad_inst->set_offset(Vec3d(
+                plate_origin.x() + x - base_pad_margin,
+                plate_origin.y() + y - pad_bottom,
+                0));
+
+            if (!pad_obj->volumes.empty())
+                pad_obj->volumes[0]->config.set_key_value("extruder", new ConfigOptionInt(opts.base_filament + 1));
+        }
     }
 
     // --- Add calibration strip objects ---
@@ -235,6 +255,9 @@ bool PurgeCalibrationGenerator::generate(const Options &opts)
         // Per-object fill pattern: rectilinear along X axis for consistent purge gradient
         obj->config.set_key_value("top_surface_pattern", new ConfigOptionEnum<InfillPattern>(ipRectilinear));
         obj->config.set_key_value("infill_direction", new ConfigOptionFloat(0.0)); // X-axis aligned
+
+        // No walls on test strips — only infill, so the color transition is fully visible
+        obj->config.set_key_value("wall_loops", new ConfigOptionInt(0));
 
         BOOST_LOG_TRIVIAL(info) << "PurgeCalibration: strip " << name
             << " at (" << x << "," << y << ") " << dims.width << "x" << dims.length;
