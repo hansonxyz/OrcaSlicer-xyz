@@ -18014,6 +18014,18 @@ void Plater::reset_gcode_toolpaths()
     p->reset_gcode_toolpaths();
 }
 
+// xyz fork: public wrapper to fully reset the background slicing process
+// and clear the Print's object list to prevent stale pointer access
+void Plater::reset_background_process()
+{
+    p->background_process.reset();
+    // Also clear the Print's object list — background_process.reset() only
+    // invalidates steps but doesn't clear m_objects (by design), leaving
+    // stale pointers that crash in Print::support_material_extruders
+    if (auto *print = p->background_process.fff_print())
+        print->clear();
+}
+
 const Mouse3DController& Plater::get_mouse3d_controller() const
 {
     return p->mouse3d_controller;

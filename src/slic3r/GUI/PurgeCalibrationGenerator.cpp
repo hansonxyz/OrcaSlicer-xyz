@@ -2,6 +2,7 @@
 #include "CalibrationStrokeFont.hpp"
 #include "GUI_App.hpp"
 #include "Plater.hpp"
+#include "I18N.hpp"
 #include "MainFrame.hpp"
 #include "WipeTowerDialog.hpp"
 #include "libslic3r/Model.hpp"
@@ -11,11 +12,23 @@
 #include "libslic3r/FlushVolCalc.hpp"
 
 #include <boost/log/trivial.hpp>
+#include <boost/filesystem.hpp>
+#include <wx/timer.h>
+#include <wx/msgdlg.h>
 #include <algorithm>
 #include <cmath>
 
 namespace Slic3r {
 namespace GUI {
+
+// Static state for async cleanup after slicing
+static struct {
+    bool active = false;
+    int temp_plate_idx = -1;
+    int original_plate_idx = 0;
+    size_t obj_start_idx = 0;
+    std::string gcode_path;
+} s_cleanup_state;
 
 TriangleMesh PurgeCalibrationGenerator::make_rect(double width, double length, double height)
 {
@@ -145,8 +158,12 @@ bool PurgeCalibrationGenerator::generate(const Options &opts)
     double offset_x = (bed_width - grid_width) / 2.0;
     double offset_y = (bed_depth - grid_depth) / 2.0;
 
-    // --- Create new plate and switch to it ---
+    // --- Take undo snapshot so we can restore after gcode export ---
+    plater->take_snapshot("Purge Calibration");
+
+    // --- Save state and create new plate ---
     auto &plate_list = plater->get_partplate_list();
+    int original_plate = plate_list.get_curr_plate_index();
     int temp_plate_idx = plate_list.create_plate(true);
     plate_list.select_plate(temp_plate_idx);
 
@@ -299,13 +316,105 @@ bool PurgeCalibrationGenerator::generate(const Options &opts)
         }
     }
 
-    // Update the view
+    // --- Disable prime tower for calibration ---
+    auto &print_config = preset_bundle.prints.get_edited_preset().config;
+    bool original_prime_tower = print_config.opt_bool("enable_prime_tower");
+    print_config.set_key_value("enable_prime_tower", new ConfigOptionBool(false));
+
+    // --- Update view and trigger slicing ---
     plater->update();
     plater->get_view3D_canvas3D()->reload_scene(true);
 
     BOOST_LOG_TRIVIAL(info) << "PurgeCalibration: created " << (obj_end_idx - obj_start_idx)
         << " objects on plate " << temp_plate_idx;
 
+    // Generate temp gcode output path
+    boost::filesystem::path temp_dir = boost::filesystem::temp_directory_path() / "orcaslicer_calib";
+    boost::filesystem::create_directories(temp_dir);
+    boost::filesystem::path gcode_path = temp_dir / "purge_calibration.gcode";
+    std::string gcode_path_str = gcode_path.string();
+
+    // Store cleanup state
+    s_cleanup_state.active = true;
+    s_cleanup_state.temp_plate_idx = temp_plate_idx;
+    s_cleanup_state.original_plate_idx = original_plate;
+    s_cleanup_state.obj_start_idx = obj_start_idx;
+    s_cleanup_state.gcode_path = gcode_path_str;
+
+    // Trigger reslice (just slices, no save dialog)
+    BOOST_LOG_TRIVIAL(info) << "PurgeCalibration: triggering reslice...";
+    plater->reslice();
+
+    // Poll for slice completion, then copy gcode, cleanup, and show result
+    auto *timer = new wxTimer();
+    timer->Bind(wxEVT_TIMER, [plater, gcode_path_str, temp_plate_idx, obj_start_idx, original_prime_tower, timer](wxTimerEvent &) {
+        int original_plate = s_cleanup_state.original_plate_idx;
+
+        if (plater->is_background_process_slicing())
+            return; // still slicing
+
+        timer->Stop();
+        BOOST_LOG_TRIVIAL(info) << "PurgeCalibration: slicing complete, starting cleanup";
+
+        // Get the sliced gcode from the plate's temp path
+        BOOST_LOG_TRIVIAL(info) << "PurgeCalibration: getting gcode path from plate " << temp_plate_idx;
+        auto *plate = plater->get_partplate_list().get_plate(temp_plate_idx);
+        std::string sliced_gcode;
+        if (plate)
+            sliced_gcode = plate->get_tmp_gcode_path();
+        BOOST_LOG_TRIVIAL(info) << "PurgeCalibration: sliced_gcode=" << sliced_gcode;
+
+        if (!sliced_gcode.empty() && boost::filesystem::exists(sliced_gcode)) {
+            try {
+                boost::filesystem::copy_file(sliced_gcode, gcode_path_str,
+                    boost::filesystem::copy_options::overwrite_existing);
+                BOOST_LOG_TRIVIAL(info) << "PurgeCalibration: gcode copied to " << gcode_path_str;
+            } catch (const std::exception &e) {
+                BOOST_LOG_TRIVIAL(error) << "PurgeCalibration: copy failed: " << e.what();
+            }
+        } else {
+            BOOST_LOG_TRIVIAL(warning) << "PurgeCalibration: no gcode file found";
+        }
+
+        // --- Restore prime tower setting (safe, doesn't touch model) ---
+        BOOST_LOG_TRIVIAL(info) << "PurgeCalibration: restoring prime tower setting";
+        auto &print_cfg = wxGetApp().preset_bundle->prints.get_edited_preset().config;
+        print_cfg.set_key_value("enable_prime_tower", new ConfigOptionBool(original_prime_tower));
+
+        // NOTE: We do NOT delete the calibration objects/plate here.
+        // Deleting model objects while the Print still references them causes
+        // an access violation in Print::support_material_extruders.
+        // The user can delete the calibration plate manually, or we add
+        // a cleanup step later that properly invalidates the Print first.
+
+        // --- Cleanup: undo to restore project state ---
+        BOOST_LOG_TRIVIAL(info) << "PurgeCalibration: undoing to restore project";
+        plater->undo();
+
+        // Restore prime tower (undo restores the model but not runtime config changes)
+        auto &print_cfg2 = wxGetApp().preset_bundle->prints.get_edited_preset().config;
+        print_cfg2.set_key_value("enable_prime_tower", new ConfigOptionBool(original_prime_tower));
+
+        // Show result
+        BOOST_LOG_TRIVIAL(info) << "PurgeCalibration: showing result";
+        if (boost::filesystem::exists(gcode_path_str)) {
+            wxMessageBox(wxString::Format(
+                _L("Calibration gcode exported to:\n%s"),
+                wxString::FromUTF8(gcode_path_str)),
+                _L("Purge Calibration"), wxOK | wxICON_INFORMATION);
+        } else {
+            wxMessageBox(_L("Slicing did not produce gcode. Please try again."),
+                _L("Purge Calibration"), wxOK | wxICON_WARNING);
+        }
+
+        // Re-enable background processing
+        plater->schedule_background_process(true);
+
+        BOOST_LOG_TRIVIAL(info) << "PurgeCalibration: done";
+        delete timer;
+    });
+
+    timer->Start(500);
     return true;
 }
 
