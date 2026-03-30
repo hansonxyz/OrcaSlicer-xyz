@@ -94,6 +94,27 @@ Use OrcaSlicer's own slicer to generate gcode, then post-process it to inject cu
 
 #### 6. Post-process gcode
 
+**Key findings from gcode analysis (2026-03-30):**
+- Since all strips use the same dummy filament, the slicer generates NO mid-print filament changes between strips
+- Object markers exist: `; start printing object, unique label id: XXX` and `; stop printing object calib_X_Y id:...`
+- Filament changes must be INSERTED (not replaced) before each `calib_X_Y` object
+- The `change_filament_gcode` template is BBL-specific with `M620`/`T`/`M621` AMS commands
+- Key flush parameters: `flush_length_1` through `flush_length_4` control purge passes
+- The `M620.10 A1 F... L[flush_length]` command sets the total flush amount
+
+**Implementation approach:**
+1. Read the `change_filament_gcode` template from the printer profile
+2. Use OrcaSlicer's PlaceholderParser to evaluate the template with custom parameters
+3. For each `calib_X_Y` strip object marker in the gcode:
+   a. If filament A needs loading (first strip, or A differs from previous B):
+      - Insert evaluated change_filament_gcode: previous → A, default flush
+   b. Insert evaluated change_filament_gcode: A → B, 50mm³ flush (set flush_length_1=50, others=0)
+4. The strip's infill printing follows naturally after the change
+
+**Alternative simpler approach (V1):**
+For BBL printers, construct the filament change block directly using M620/T/M621 commands
+with hardcoded flush amounts, bypassing template evaluation. Less general but faster to implement.
+
 **Find the label→strip filament change:**
 The slicer will emit a filament change from the label filament to the strip filament. Find this transition and **remove it**.
 
