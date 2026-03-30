@@ -1,4 +1,5 @@
 #include "PurgeCalibrationGenerator.hpp"
+#include "PurgeCalibrationDialog.hpp"
 #include "CalibrationStrokeFont.hpp"
 #include "GUI_App.hpp"
 #include "Plater.hpp"
@@ -376,10 +377,9 @@ bool PurgeCalibrationGenerator::generate(const Options &opts)
             BOOST_LOG_TRIVIAL(warning) << "PurgeCalibration: no gcode file found";
         }
 
-        // --- Restore prime tower setting (safe, doesn't touch model) ---
-        BOOST_LOG_TRIVIAL(info) << "PurgeCalibration: restoring prime tower setting";
-        auto &print_cfg = wxGetApp().preset_bundle->prints.get_edited_preset().config;
-        print_cfg.set_key_value("enable_prime_tower", new ConfigOptionBool(original_prime_tower));
+        // Don't restore prime tower yet — keep it disabled while the calibration
+        // plate is active. The undo (Ctrl+Z) will restore all settings including
+        // prime tower when the user is done with the calibration print.
 
         // NOTE: We do NOT delete the calibration objects/plate here.
         // Deleting model objects while the Print still references them causes
@@ -387,28 +387,57 @@ bool PurgeCalibrationGenerator::generate(const Options &opts)
         // The user can delete the calibration plate manually, or we add
         // a cleanup step later that properly invalidates the Print first.
 
-        // --- Cleanup: undo to restore project state ---
-        BOOST_LOG_TRIVIAL(info) << "PurgeCalibration: undoing to restore project";
-        plater->undo();
+        // --- Keep calibration plate, switch to Preview ---
+        // Don't undo yet — the plate must remain for the Print button to work.
+        // The gcode is on the plate from slicing. Switch to Preview tab.
+        BOOST_LOG_TRIVIAL(info) << "PurgeCalibration: switching to preview";
 
-        // Restore prime tower (undo restores the model but not runtime config changes)
-        auto &print_cfg2 = wxGetApp().preset_bundle->prints.get_edited_preset().config;
-        print_cfg2.set_key_value("enable_prime_tower", new ConfigOptionBool(original_prime_tower));
-
-        // Show result
-        BOOST_LOG_TRIVIAL(info) << "PurgeCalibration: showing result";
         if (boost::filesystem::exists(gcode_path_str)) {
-            wxMessageBox(wxString::Format(
-                _L("Calibration gcode exported to:\n%s"),
-                wxString::FromUTF8(gcode_path_str)),
-                _L("Purge Calibration"), wxOK | wxICON_INFORMATION);
+            // Point the plate's gcode path to our file and mark as valid
+            auto *plate = plater->get_partplate_list().get_plate(temp_plate_idx);
+            if (plate) {
+                plate->set_tmp_gcode_path(gcode_path_str);
+                plate->update_slice_result_valid_state(true);
+            }
+
+            // Switch to Preview tab and zoom to the calibration plate
+            wxGetApp().mainframe->select_tab(MainFrame::tpPreview);
+            plater->get_view3D_canvas3D()->zoom_to_plate(temp_plate_idx);
+
+            // Open the print dialog (blocks until user prints or cancels)
+            int orig_plate = s_cleanup_state.original_plate_idx;
+            bool orig_prime = original_prime_tower;
+            wxGetApp().CallAfter([plater, temp_plate_idx, gcode_path_str, orig_plate, orig_prime] {
+                BOOST_LOG_TRIVIAL(info) << "PurgeCalibration: opening print dialog";
+                plater->send_to_printer(false);
+
+                // Print dialog has closed (user printed or cancelled).
+                BOOST_LOG_TRIVIAL(info) << "PurgeCalibration: print dialog closed, restoring project";
+
+                // Switch back to Prepare tab
+                wxGetApp().mainframe->select_tab(MainFrame::tp3DEditor);
+
+                // Undo to remove calibration plate and restore model
+                plater->undo();
+
+                // Restore prime tower setting (undo may not restore edited preset config)
+                auto &print_cfg = wxGetApp().preset_bundle->prints.get_edited_preset().config;
+                print_cfg.set_key_value("enable_prime_tower", new ConfigOptionBool(orig_prime));
+
+                // Zoom camera back to the original plate
+                plater->get_view3D_canvas3D()->zoom_to_plate(orig_plate);
+
+                // Show post-calibration dialog
+                wxGetApp().CallAfter([] {
+                    open_purge_calibration_result_dialog(wxGetApp().mainframe);
+                });
+            });
         } else {
+            // Slicing failed — undo and report
+            plater->undo();
             wxMessageBox(_L("Slicing did not produce gcode. Please try again."),
                 _L("Purge Calibration"), wxOK | wxICON_WARNING);
         }
-
-        // Re-enable background processing
-        plater->schedule_background_process(true);
 
         BOOST_LOG_TRIVIAL(info) << "PurgeCalibration: done";
         delete timer;

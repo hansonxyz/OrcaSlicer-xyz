@@ -20,6 +20,7 @@ private:
 };
 
 void open_purge_calibration_dialog(wxWindow *parent);
+void open_purge_calibration_result_dialog(wxWindow *parent);
 
 } // namespace GUI
 } // namespace Slic3r

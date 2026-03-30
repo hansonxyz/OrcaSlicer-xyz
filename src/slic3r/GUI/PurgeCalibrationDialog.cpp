@@ -194,5 +194,38 @@ void PurgeCalibrationDialog::on_message(const std::string &message)
     }
 }
 
+void open_purge_calibration_result_dialog(wxWindow *parent)
+{
+    // Placeholder WebView dialog — will become the measurement input UI
+    wxDialog dlg(parent, wxID_ANY, _L("Calibration Results"),
+        wxDefaultPosition, wxSize(parent->FromDIP(500), parent->FromDIP(350)),
+        wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
+    dlg.SetBackgroundColour(wxGetApp().get_window_default_clr());
+
+    auto *sizer = new wxBoxSizer(wxVERTICAL);
+
+    auto *webview = wxWebView::New(&dlg, wxID_ANY, wxEmptyString,
+        wxDefaultPosition, wxDefaultSize, wxWebViewBackendDefault, wxNO_BORDER);
+    sizer->Add(webview, 1, wxEXPAND);
+
+    // Load a simple inline page
+    wxString html = R"(
+        <html><head><style>
+            body { font-family: sans-serif; padding: 20px; background: #2d2d31; color: #e0e0e0; }
+            h2 { color: #26A69A; }
+        </style></head><body>
+            <h2>Hello World</h2>
+            <p>This dialog will become the measurement input screen where you enter
+            your calibration results to update the flushing volume matrix.</p>
+        </body></html>
+    )";
+    webview->SetPage(html, "");
+
+    dlg.SetSizer(sizer);
+    wxGetApp().UpdateDlgDarkUI(&dlg);
+    dlg.CenterOnParent();
+    dlg.ShowModal();
+}
+
 } // namespace GUI
 } // namespace Slic3r
