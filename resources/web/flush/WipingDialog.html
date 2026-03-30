@@ -273,13 +273,20 @@
         in Orca Slicer &gt; Preferences.
       </div>
 
-      <div style="margin-bottom: 10px; display: flex; align-items: center;">
+      <div style="margin-bottom: 10px; display: flex; align-items: center; gap: 8px;">
         <div
           class="ButtonStyleConfirm ButtonTypeWindow"
           onclick="calcFlushingVolumes()"
           id="calc_btn"
         >
           Re-Calculate
+      </div>
+        <div
+          class="ButtonStyleRegular ButtonTypeWindow"
+          onclick="openCalibrationTestPrint()"
+          id="calib_btn"
+        >
+          Calibration Test Print
       </div>
         <select
           id="extruders"
@@ -382,6 +389,11 @@
           msg: 'updateMatrix',
           extruder_id: m_curr_extruder_id
         })
+        window.wipingDialog.postMessage(data);
+      }
+
+      function openCalibrationTestPrint() {
+        var data = JSON.stringify({ msg: 'openCalibration' });
         window.wipingDialog.postMessage(data);
       }
 

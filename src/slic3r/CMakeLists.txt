@@ -553,6 +553,10 @@ set(SLIC3R_GUI_SOURCES
     GUI/Widgets/WebView.cpp
     GUI/Widgets/WebView.hpp
     GUI/WipeTowerDialog.cpp
+    GUI/PurgeCalibrationDialog.cpp
+    GUI/PurgeCalibrationDialog.hpp
+    GUI/PurgeCalibrationGenerator.cpp
+    GUI/PurgeCalibrationGenerator.hpp
     GUI/wxExtensions.cpp
     GUI/wxExtensions.hpp
     pchheader.cpp

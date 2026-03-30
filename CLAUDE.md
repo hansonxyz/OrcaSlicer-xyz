@@ -71,34 +71,56 @@ ctest --test-dir ./tests/sla_print/sla_print_tests
 ```
 
 ### Post-Build Testing Workflow
-After building, always launch the software for the user to test:
+
+**Standard test cycle (kill → build → launch):**
 ```bash
-# GUI launch (pass test file as argument when available):
-powershell.exe -Command "Start-Process -FilePath 'build\OrcaSlicer\orca-slicer.exe' -ArgumentList 'path\to\test.3mf' -WorkingDirectory 'build\OrcaSlicer'"
+# Step 1: Kill any running instance (MUST use PowerShell, not taskkill)
+powershell.exe -Command "Stop-Process -Name orca-slicer -Force -ErrorAction SilentlyContinue"
+
+# Step 2: Build
+powershell.exe -ExecutionPolicy Bypass -File xyz/build_artifacts/build_incremental.ps1
+
+# Step 3: Launch with test file (note: inner quotes needed for paths with spaces)
+powershell.exe -Command "Start-Process -FilePath 'C:\Users\brian\bin\orca_conf_gen\reference\orcaslicer\build\OrcaSlicer\orca-slicer.exe' -ArgumentList '\"C:\Users\brian\Desktop\Crystal Dragon Statue - Spryo.3mf\"' -WorkingDirectory 'C:\Users\brian\bin\orca_conf_gen\reference\orcaslicer\build\OrcaSlicer'"
 ```
-- Always launch the app after a successful build if testing a visual feature
-- Pass the current test file as a CLI argument to save the user a step
-- For headless/CLI testing, invoke directly and capture output
-- Current test file: `Z:\cabinets\Things\Projects\drg_buff_beer_mugs_coloration_2.3mf` (plate 1)
-- If OrcaSlicer is blocking a build (DLL locked), kill it before building:
-  ```bash
-  # taskkill does NOT work reliably from Git Bash. Use PowerShell:
-  powershell.exe -Command "Stop-Process -Name orca-slicer -Force"
-  ```
+
+**Detecting if the app is running:**
+```bash
+# DO NOT use tasklist from Git Bash — it silently fails and gives false negatives.
+# ALWAYS use PowerShell Get-Process:
+powershell.exe -Command "Get-Process -Name 'orca-slicer' -ErrorAction SilentlyContinue | Select-Object Id, ProcessName"
+```
+
+**Killing the app before builds:**
+```bash
+# taskkill does NOT work reliably from Git Bash. Always use PowerShell:
+powershell.exe -Command "Stop-Process -Name orca-slicer -Force -ErrorAction SilentlyContinue"
+```
+
+**Resource file changes (HTML, images, etc.):**
+The incremental build script syncs `resources/` to `build/OrcaSlicer/resources/` using `robocopy /E` after each build. This ensures HTML changes (like WebView dialogs) are deployed without a full reinstall. Do NOT use `robocopy /MIR` — the `/MIR` flag deletes destination files not in the source, which destroys cmake-installed generated files and causes startup crashes.
+
+**Intermittent startup crashes:**
+OrcaSlicer occasionally crashes on startup due to a race condition in the Bambu networking plugin (`bambu_networking_*.dll` in `%APPDATA%/OrcaSlicer/plugins/`). The crash manifests as `STATUS_STACK_BUFFER_OVERRUN (0xc0000409)` in `ucrtbase.dll` and happens before the crash handler is set up, so no crash log is written. Investigation findings:
+- The crash is in the Bambu closed-source networking DLL, not our code
+- It is intermittent — the app may start on the 1st or 5th attempt
+- Renaming the Bambu DLL does NOT prevent the crash (ruled out as sole cause)
+- The crash occurs identically on clean builds with no xyz fork changes (confirmed by stashing all changes and testing)
+- `procdump` cannot catch it because the process dies during CRT initialization
+- Windows Event Log shows the crash consistently at the same `ucrtbase.dll` offset
+- A full clean reinstall of the `build/OrcaSlicer/` directory sometimes helps
+- Restarting the computer sometimes helps
+- The crash resilience feature (retry on DLL load failure) is a future improvement
+
+**Current test files:**
+- `C:\Users\brian\Desktop\Crystal Dragon Statue - Spryo.3mf` — multi-material Spyro statue, good for testing paint tools, boundary painter, flushing volumes, tree supports
+- `Z:\cabinets\Things\Projects\drg_buff_beer_mugs_coloration_2.3mf` (plate 2) — multi-material model with spatially isolated regions
 
 ### CLI Headless Slicing (for testing xyz fork features)
-OrcaSlicer supports headless CLI slicing. This is useful for testing features like Filament Lookahead without the GUI:
+OrcaSlicer supports headless CLI slicing:
 ```bash
-# Slice plate 2 of a 3MF file and output gcode
-build/OrcaSlicer/orca-slicer.exe --slice 2 "Z:\cabinets\Things\Projects\drg_buff_beer_mugs_coloration_2.3mf"
-
-# Then inspect the gcode for feature-specific metadata:
-grep "LOOKAHEAD_EXCLUSION_ZONE" output.gcode    # Filament Lookahead exclusion zones
-grep "ANY_TYPE_DEBUG" output.gcode               # Any Type support material debug
+build/OrcaSlicer/orca-slicer.exe --slice 2 "path\to\model.3mf"
 ```
-
-**Test files:**
-- `Z:\cabinets\Things\Projects\drg_buff_beer_mugs_coloration_2.3mf` (plate 2) - multi-material model with spatially isolated regions, good for testing Filament Lookahead
 
 ## Architecture
 

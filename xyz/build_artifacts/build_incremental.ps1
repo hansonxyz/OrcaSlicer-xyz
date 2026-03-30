@@ -72,5 +72,16 @@ if (Test-Path $webview2Dll) {
     Copy-Item $webview2Dll $installDir -Force
 }
 
+# Sync resources from source tree to installed location
+# The cmake install target doesn't always detect resource-only changes
+# Use /E (copy all subdirs) not /MIR (mirror/delete) to avoid removing
+# generated files that cmake install placed in the destination
+Write-Host "=== Syncing resources ==="
+$srcResources = "$WP\resources"
+$dstResources = "$installDir\resources"
+if (Test-Path $srcResources) {
+    robocopy $srcResources $dstResources /E /NFL /NDL /NJH /NJS /nc /ns /np /XD .git 2>$null | Out-Null
+}
+
 Write-Host "=== BUILD COMPLETE ==="
 Write-Host "Run: $installDir\orca-slicer.exe"
