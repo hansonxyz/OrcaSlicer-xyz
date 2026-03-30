@@ -258,6 +258,7 @@ bool PurgeCalibrationGenerator::generate(const Options &opts)
 
         // No walls on test strips — only infill, so the color transition is fully visible
         obj->config.set_key_value("wall_loops", new ConfigOptionInt(0));
+        obj->config.set_key_value("alternate_extra_wall", new ConfigOptionBool(false));
 
         BOOST_LOG_TRIVIAL(info) << "PurgeCalibration: strip " << name
             << " at (" << x << "," << y << ") " << dims.width << "x" << dims.length;
