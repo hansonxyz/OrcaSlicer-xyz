@@ -787,16 +787,16 @@ struct DynamicFilamentList : DynamicList
             cb->Append(label);
         }
 
-        if (old_index >= 0 && (unsigned int) old_index < cb->GetCount()) {
-            cb->SetSelection(old_index);
-            return;
-        }
-
+        // xyz fork: restore selection by string label first (not index),
+        // because the list contents may have changed (e.g., PLA removed, PETG added)
+        // and the same index now points to a different item.
         int new_index = cb->FindString(old_selection);
-        if (old_index == cb->GetCount()) {
-            cb->SetSelection(old_index - 1);
-        } else if (new_index != wxNOT_FOUND) {
+        if (new_index != wxNOT_FOUND) {
             cb->SetSelection(new_index);
+        } else if (old_index >= 0 && (unsigned int) old_index < cb->GetCount()) {
+            cb->SetSelection(old_index);
+        } else if (old_index == (int)cb->GetCount()) {
+            cb->SetSelection(old_index - 1);
         } else {
             cb->SetSelection(0);
         }

@@ -1222,9 +1222,35 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
                 for (const auto &ft : m_config.filament_type.values) {
                     if (ft == type_name) { found = true; break; }
                 }
-                if (!found)
-                    return { format(L("Support filament is set to \"Any %1%\" but no %1% filament is available in the project. "
-                                      "Please add a %1% filament or select a different support material."), type_name) };
+                if (!found) {
+                    // xyz fork: auto-correct to the only available "Any X" type if there's exactly one
+                    std::set<std::string> available_types;
+                    for (const auto &ft : m_config.filament_type.values) {
+                        if (ft != "PVA" && ft != "BVOH")
+                            available_types.insert(ft);
+                    }
+                    if (available_types.size() == 1) {
+                        std::string new_type = *available_types.begin();
+                        int new_value = support_filament_any_type_value_for_name(new_type);
+                        if (new_value >= 0) {
+                            BOOST_LOG_TRIVIAL(info) << "Auto-correcting support filament from Any "
+                                << type_name << " to Any " << new_type;
+                            // Fix the stored value on the object config
+                            auto &obj_cfg = const_cast<PrintObjectConfig&>(object->config());
+                            if (support_val == obj_cfg.support_filament.value)
+                                obj_cfg.support_filament.value = new_value;
+                            if (support_val == obj_cfg.support_interface_filament.value)
+                                obj_cfg.support_interface_filament.value = new_value;
+                            // Continue validation — don't return error
+                        } else {
+                            return { format(L("Support filament is set to \"Any %1%\" but no %1% filament is available in the project. "
+                                              "Please add a %1% filament or select a different support material."), type_name) };
+                        }
+                    } else {
+                        return { format(L("Support filament is set to \"Any %1%\" but no %1% filament is available in the project. "
+                                          "Please add a %1% filament or select a different support material."), type_name) };
+                    }
+                }
             }
         }
     }

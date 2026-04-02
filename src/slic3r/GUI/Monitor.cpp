@@ -123,6 +123,18 @@ MonitorPanel::MonitorPanel(wxWindow* parent, wxWindowID id, const wxPoint& pos, 
     Bind(wxEVT_SIZE, &MonitorPanel::on_size, this);
     Bind(wxEVT_COMMAND_CHOICE_SELECTED, &MonitorPanel::on_select_printer, this);
 
+    // xyz fork: bind window activate/iconize for camera auto-pause/resume
+    if (auto *frame = dynamic_cast<wxFrame*>(wxGetApp().mainframe)) {
+        frame->Bind(wxEVT_ACTIVATE, [this](wxActivateEvent &e) {
+            on_window_activate(e.GetActive());
+            e.Skip();
+        });
+        frame->Bind(wxEVT_ICONIZE, [this](wxIconizeEvent &e) {
+            on_window_iconize(e.IsIconized());
+            e.Skip();
+        });
+    }
+
     m_select_machine.Bind(EVT_FINISHED_UPDATE_MACHINE_LIST, [this](wxCommandEvent& e) {
         m_side_tools->start_interval();
         });
@@ -389,6 +401,31 @@ void MonitorPanel::update_all()
     }
 
     update_hms_tag();
+
+    // xyz fork: detect if user manually stopped camera
+    if (m_camera_auto_state == CameraAutoState::ACTIVE) {
+        auto *ctrl = m_status_info_panel->get_media_play_ctrl();
+        if (ctrl && ctrl->is_idle()) {
+            // Camera was ACTIVE but is now IDLE — user stopped it manually
+            m_camera_auto_state = CameraAutoState::OFF;
+            m_camera_user_stopped = true;
+        }
+    }
+
+    // xyz fork: detect print start while on Device tab → auto-start camera
+    if (obj) {
+        bool is_printing = MachineObject::is_in_printing_status(obj->print_status);
+        if (is_printing && !m_was_printing && !m_camera_user_stopped) {
+            // Print just started
+            if (wxGetApp().mainframe && wxGetApp().mainframe->IsIconized()) {
+                // Window is minimized — set to PAUSED so it resumes when visible
+                m_camera_auto_state = CameraAutoState::PAUSED;
+            } else {
+                check_camera_auto_start();
+            }
+        }
+        m_was_printing = is_printing;
+    }
 }
 
 void MonitorPanel::update_hms_tag()
@@ -436,17 +473,17 @@ bool MonitorPanel::Show(bool show)
             } else {
                 obj->reset_update_time();
             }
-            // xyz fork: auto-start camera if printer has an active print job
-            if (obj && MachineObject::is_in_printing_status(obj->print_status)
-                && wxGetApp().app_config->get_bool("auto_start_camera")) {
-                try {
-                    m_status_info_panel->get_media_play_ctrl()->jump_to_play();
-                } catch (...) {
-                    // Suppress errors on automatic camera start — user can retry manually
-                }
-            }
+            // xyz fork: reset camera state on tab entry, then auto-start if appropriate
+            m_camera_user_stopped = false;
+            m_was_printing = obj ? MachineObject::is_in_printing_status(obj->print_status) : false;
+            check_camera_auto_start();
         }
     } else {
+        // xyz fork: reset camera state when leaving Device tab
+        m_camera_auto_state = CameraAutoState::OFF;
+        m_camera_user_stopped = false;
+        m_was_printing = false;
+
         stop_update();
         m_refresh_timer->Stop();
     }
@@ -559,6 +596,92 @@ void MonitorPanel::update_network_version_footer()
     }
 
     m_tabpanel->SetFooterText(footer_text);
+}
+
+// xyz fork: Smart camera lifecycle management implementation
+// See Monitor.hpp for the full behavior specification.
+
+void MonitorPanel::check_camera_auto_start()
+{
+    if (!this->IsShown()) return;
+    if (!wxGetApp().app_config->get_bool("auto_start_camera")) return;
+    if (m_camera_user_stopped) return;
+
+    DeviceManager *dev = wxGetApp().getDeviceManager();
+    if (!dev) return;
+    MachineObject *machine = dev->get_selected_machine();
+    if (!machine || !MachineObject::is_in_printing_status(machine->print_status))
+        return;
+
+    auto *ctrl = m_status_info_panel->get_media_play_ctrl();
+    if (!ctrl) return;
+
+    // Only start if camera is idle (not already streaming)
+    if (ctrl->is_idle()) {
+        try {
+            ctrl->jump_to_play();
+            m_camera_auto_state = CameraAutoState::ACTIVE;
+        } catch (...) {
+            // Suppress errors on automatic start
+        }
+    } else {
+        // Camera is already running — just track the state
+        m_camera_auto_state = CameraAutoState::ACTIVE;
+    }
+}
+
+void MonitorPanel::on_window_activate(bool active)
+{
+    if (!this->IsShown()) return;
+
+    if (active) {
+        // Window became visible — resume camera if it was paused
+        if (m_camera_auto_state == CameraAutoState::PAUSED) {
+            auto *ctrl = m_status_info_panel->get_media_play_ctrl();
+            if (ctrl && ctrl->is_idle()) {
+                try {
+                    ctrl->jump_to_play();
+                    m_camera_auto_state = CameraAutoState::ACTIVE;
+                } catch (...) {}
+            }
+        }
+    } else {
+        // Window lost focus / became obscured — pause camera if active
+        if (m_camera_auto_state == CameraAutoState::ACTIVE) {
+            auto *ctrl = m_status_info_panel->get_media_play_ctrl();
+            if (ctrl && !ctrl->is_idle()) {
+                ctrl->stop_stream();
+                m_camera_auto_state = CameraAutoState::PAUSED;
+            }
+        }
+    }
+}
+
+void MonitorPanel::on_window_iconize(bool iconized)
+{
+    if (!this->IsShown()) return;
+
+    if (iconized) {
+        // Minimized — pause camera if active
+        if (m_camera_auto_state == CameraAutoState::ACTIVE) {
+            auto *ctrl = m_status_info_panel->get_media_play_ctrl();
+            if (ctrl && !ctrl->is_idle()) {
+                ctrl->stop_stream();
+                m_camera_auto_state = CameraAutoState::PAUSED;
+            }
+        }
+    } else {
+        // Restored from minimized — resume if paused
+        if (m_camera_auto_state == CameraAutoState::PAUSED) {
+            auto *ctrl = m_status_info_panel->get_media_play_ctrl();
+            if (ctrl && ctrl->is_idle()) {
+                try {
+                    ctrl->jump_to_play();
+                    m_camera_auto_state = CameraAutoState::ACTIVE;
+                } catch (...) {}
+            }
+        }
+    }
 }
 
 } // GUI

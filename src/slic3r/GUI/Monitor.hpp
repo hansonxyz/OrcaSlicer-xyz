@@ -158,6 +158,36 @@ public:
     void jump_to_HMS();
     void jump_to_LiveView();
     void update_network_version_footer();
+
+    // xyz fork: Smart camera lifecycle management
+    //
+    // Camera auto-start/pause/resume behavior:
+    // - Auto-starts when Device tab is opened and printer is actively printing
+    //   (honors "Auto-start camera" preference; errors suppressed on auto-start)
+    // - Auto-starts when a print begins while Device tab is visible
+    // - Pauses (stops streaming) when the application window is minimized or
+    //   fully obscured; resumes when the window becomes visible again
+    // - If a print starts while the window is obscured, camera enters PAUSED
+    //   state so it immediately resumes when the window becomes visible
+    // - If the user manually stops the camera during a print, it stays off
+    //   until the next print starts or the user leaves and returns to the
+    //   Device tab (which triggers a fresh auto-start check)
+    // - All auto-start behavior is gated on the "auto_start_camera" preference
+    // - Auto-pause/resume always applies regardless of the preference (if the
+    //   camera is already running, we pause it to save bandwidth/resources)
+    //
+    // States:
+    //   OFF     — camera not streaming (default, or user manually stopped)
+    //   ACTIVE  — camera streaming
+    //   PAUSED  — was active, window obscured, will resume when visible
+    enum class CameraAutoState { OFF, ACTIVE, PAUSED };
+    CameraAutoState m_camera_auto_state = CameraAutoState::OFF;
+    bool m_camera_user_stopped = false; // true if user manually stopped camera
+    bool m_was_printing = false;        // tracks print state transitions
+
+    void on_window_activate(bool active);
+    void on_window_iconize(bool iconized);
+    void check_camera_auto_start();
 };
 
 

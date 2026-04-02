@@ -664,6 +664,10 @@ void MediaPlayCtrl::SetStatus(wxString const &msg2, bool hyperlink)
 
 bool MediaPlayCtrl::IsStreaming() const { return m_streaming; }
 
+// xyz fork: camera lifecycle helpers
+bool MediaPlayCtrl::is_idle() const { return m_last_state == MEDIASTATE_IDLE; }
+void MediaPlayCtrl::stop_stream() { Stop(); }
+
 void MediaPlayCtrl::load()
 {
     m_last_state = MEDIASTATE_LOADING;
