@@ -196,6 +196,30 @@ Wishlist item. Add a dialog accessible from the process settings tab (e.g., a ge
 
 Wishlist item. Differentiate the fork visually from stock OrcaSlicer with a modified logo or splash screen, so it's immediately obvious which version is running. TBD on the specific design - could be a subtle color shift, a small badge overlay, or a different splash image.
 
+## Future Goal: Live Print Progress 3D Visualization (not yet implementing)
+
+Wishlist item. Replace the home/XYZ/bed controls on the Device tab with a live 3D render of the model being printed, showing layers up to the current reported layer as opaque and remaining layers as semi-transparent. Uses the existing Preview renderer (GLCanvas3D + GCodeProcessorResult) embedded in the Device tab, locked to the printer's reported layer number via MQTT.
+
+**Requirements:**
+- Only works when the printed model matches the open project (match by filename)
+- Requires the model to be sliced (gcode result in memory)
+- Falls back to a placeholder message when conditions aren't met
+- Read-only 3D view (rotate/zoom only, no editing)
+- Updates only when layer changes (not continuously) to manage performance
+- Camera stream and 3D preview coexist side-by-side
+
+**Implementation approach (Option A — recommended):**
+1. Embed a GLCanvas3D in the Device tab status panel
+2. Feed it the current plate's GCodeProcessorResult
+3. Set layer slider to printer's reported layer
+4. Update on MQTT layer-change events
+
+**Alternatives considered:**
+- Option B: Thumbnail with progress line (simpler, no model dependency)
+- Option C: Static 3D model with Z-cutoff shading (simpler than full gcode render)
+
+**Challenges:** Window visibility pause/resume for camera (wxEVT_ACTIVATE/wxEVT_ICONIZE unreliable on Windows — needs further investigation for future implementation).
+
 ## Development Workflow
 1. Each feature gets its own branch off `main`
 2. Clean, atomic commits suitable for upstream PR submission

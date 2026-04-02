@@ -1210,7 +1210,10 @@ StringObjectException Print::validate(StringObjectException *warning, Polygons* 
         return { L("No extrusions under current settings.") };
 
     // Validate "Any (Type)" support filament selections: the matching type must exist in the project.
+    // Only validate if support is actually enabled for this object.
     for (const PrintObject *object : m_objects) {
+        if (!object->config().enable_support.value)
+            continue;
         for (int support_val : { object->config().support_filament.value,
                                   object->config().support_interface_filament.value }) {
             if (is_support_filament_any_type(support_val)) {
