@@ -123,17 +123,6 @@ MonitorPanel::MonitorPanel(wxWindow* parent, wxWindowID id, const wxPoint& pos, 
     Bind(wxEVT_SIZE, &MonitorPanel::on_size, this);
     Bind(wxEVT_COMMAND_CHOICE_SELECTED, &MonitorPanel::on_select_printer, this);
 
-    // xyz fork: bind window activate/iconize for camera auto-pause/resume
-    if (auto *frame = dynamic_cast<wxFrame*>(wxGetApp().mainframe)) {
-        frame->Bind(wxEVT_ACTIVATE, [this](wxActivateEvent &e) {
-            on_window_activate(e.GetActive());
-            e.Skip();
-        });
-        frame->Bind(wxEVT_ICONIZE, [this](wxIconizeEvent &e) {
-            on_window_iconize(e.IsIconized());
-            e.Skip();
-        });
-    }
 
     m_select_machine.Bind(EVT_FINISHED_UPDATE_MACHINE_LIST, [this](wxCommandEvent& e) {
         m_side_tools->start_interval();
@@ -416,13 +405,7 @@ void MonitorPanel::update_all()
     if (obj) {
         bool is_printing = MachineObject::is_in_printing_status(obj->print_status);
         if (is_printing && !m_was_printing && !m_camera_user_stopped) {
-            // Print just started
-            if (wxGetApp().mainframe && wxGetApp().mainframe->IsIconized()) {
-                // Window is minimized — set to PAUSED so it resumes when visible
-                m_camera_auto_state = CameraAutoState::PAUSED;
-            } else {
-                check_camera_auto_start();
-            }
+            check_camera_auto_start();
         }
         m_was_printing = is_printing;
     }
@@ -627,60 +610,6 @@ void MonitorPanel::check_camera_auto_start()
     } else {
         // Camera is already running — just track the state
         m_camera_auto_state = CameraAutoState::ACTIVE;
-    }
-}
-
-void MonitorPanel::on_window_activate(bool active)
-{
-    if (!this->IsShown()) return;
-
-    if (active) {
-        // Window became visible — resume camera if it was paused
-        if (m_camera_auto_state == CameraAutoState::PAUSED) {
-            auto *ctrl = m_status_info_panel->get_media_play_ctrl();
-            if (ctrl && ctrl->is_idle()) {
-                try {
-                    ctrl->jump_to_play();
-                    m_camera_auto_state = CameraAutoState::ACTIVE;
-                } catch (...) {}
-            }
-        }
-    } else {
-        // Window lost focus / became obscured — pause camera if active
-        if (m_camera_auto_state == CameraAutoState::ACTIVE) {
-            auto *ctrl = m_status_info_panel->get_media_play_ctrl();
-            if (ctrl && !ctrl->is_idle()) {
-                ctrl->stop_stream();
-                m_camera_auto_state = CameraAutoState::PAUSED;
-            }
-        }
-    }
-}
-
-void MonitorPanel::on_window_iconize(bool iconized)
-{
-    if (!this->IsShown()) return;
-
-    if (iconized) {
-        // Minimized — pause camera if active
-        if (m_camera_auto_state == CameraAutoState::ACTIVE) {
-            auto *ctrl = m_status_info_panel->get_media_play_ctrl();
-            if (ctrl && !ctrl->is_idle()) {
-                ctrl->stop_stream();
-                m_camera_auto_state = CameraAutoState::PAUSED;
-            }
-        }
-    } else {
-        // Restored from minimized — resume if paused
-        if (m_camera_auto_state == CameraAutoState::PAUSED) {
-            auto *ctrl = m_status_info_panel->get_media_play_ctrl();
-            if (ctrl && ctrl->is_idle()) {
-                try {
-                    ctrl->jump_to_play();
-                    m_camera_auto_state = CameraAutoState::ACTIVE;
-                } catch (...) {}
-            }
-        }
     }
 }
 
