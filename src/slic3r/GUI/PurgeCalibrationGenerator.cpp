@@ -441,6 +441,10 @@ bool PurgeCalibrationGenerator::generate(const Options &opts)
                 // Switch back to Prepare tab
                 wxGetApp().mainframe->select_tab(MainFrame::tp3DEditor);
 
+                // Clear selection before undo to prevent stale references
+                // (the Move gizmo render crashes if selection points to deleted objects)
+                plater->deselect_all();
+
                 // Undo to remove calibration plate and restore model
                 plater->undo();
 
@@ -457,7 +461,8 @@ bool PurgeCalibrationGenerator::generate(const Options &opts)
                 });
             });
         } else {
-            // Slicing failed — undo and report
+            // Slicing failed — clear selection and undo
+            plater->deselect_all();
             plater->undo();
             wxMessageBox(_L("Slicing did not produce gcode. Please try again."),
                 _L("Purge Calibration"), wxOK | wxICON_WARNING);
