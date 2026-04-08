@@ -102,18 +102,22 @@ Use OrcaSlicer's own slicer to generate gcode, then post-process it to inject cu
 - Key flush parameters: `flush_length_1` through `flush_length_4` control purge passes
 - The `M620.10 A1 F... L[flush_length]` command sets the total flush amount
 
-**Implementation approach:**
-1. Read the `change_filament_gcode` template from the printer profile
-2. Use OrcaSlicer's PlaceholderParser to evaluate the template with custom parameters
-3. For each `calib_X_Y` strip object marker in the gcode:
-   a. If filament A needs loading (first strip, or A differs from previous B):
-      - Insert evaluated change_filament_gcode: previous → A, default flush
-   b. Insert evaluated change_filament_gcode: A → B, 50mm³ flush (set flush_length_1=50, others=0)
-4. The strip's infill printing follows naturally after the change
+**Implementation (DONE — 2026-03-30):**
+Uses PlaceholderParser to evaluate the printer's `change_filament_gcode` template with custom parameters.
+Only modifies the TOP layer (the visible calibration surface). Leaves all lower layers unchanged.
 
-**Alternative simpler approach (V1):**
-For BBL printers, construct the filament change block directly using M620/T/M621 commands
-with hardcoded flush amounts, bypassing template evaluation. Less general but faster to implement.
+1. Read sliced gcode, find the LAST `CHANGE_LAYER` marker (topmost layer)
+2. Find all `; printing object calib_X_Y` markers on that layer
+3. Remove existing M620...M621 filament change blocks on that layer
+4. For each strip, determine filament A (from) and B (to) from the marker name
+5. If current filament != A: insert evaluated change_filament_gcode (current → A, standard purge from flush matrix)
+6. Insert evaluated change_filament_gcode (A → B, 50mm³ calibration purge)
+7. Track current filament state through the sequence
+8. Write modified gcode back to temp file, load into preview
+
+The `build_toolchange_config()` helper constructs a DynamicConfig with all ~40 placeholder values
+needed by the template (temperatures, feed rates, flush lengths, retraction, etc.) mirroring
+the config setup in GCode.cpp WipeTowerIntegration.
 
 **Find the label→strip filament change:**
 The slicer will emit a filament change from the label filament to the strip filament. Find this transition and **remove it**.
@@ -244,11 +248,11 @@ This is computed per-strip since strip dimensions may vary.
 - WebView setup dialog with NxN checkbox grid
 - Filament group filtering, base/label options
 
-### Phase 1: Gcode Generator — NEXT
+### Phase 1: Gcode Generator — DONE
 - `PurgeCalibrationGenerator` class
 - Temp plate creation, geometry generation
 - Slicing with overrides
-- Gcode post-processing (filament change injection)
+- Gcode post-processing (filament change injection via PlaceholderParser)
 - Preview loading
 - State save/restore
 

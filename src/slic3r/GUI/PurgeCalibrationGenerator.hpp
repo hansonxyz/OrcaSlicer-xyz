@@ -6,6 +6,7 @@
 
 namespace Slic3r {
 
+class DynamicPrintConfig;
 class Model;
 class ModelObject;
 class TriangleMesh;
@@ -53,12 +54,13 @@ private:
     static std::vector<TransitionPair> order_transitions(
         const std::vector<TransitionPair> &pairs);
 
-    // Post-process gcode: replace slicer's filament changes with our custom sequence
+    // Post-process gcode: insert calibration filament changes before each strip
+    // on the topmost layer. Uses PlaceholderParser to evaluate the printer's
+    // change_filament_gcode template with custom flush amounts.
     static std::string postprocess_gcode(const std::string &gcode,
                                           const std::vector<TransitionPair> &ordered_pairs,
-                                          int label_filament,
-                                          int strip_filament,
-                                          const std::string &change_filament_gcode_template);
+                                          const DynamicPrintConfig &full_config,
+                                          double calibration_purge_volume_mm3);
 };
 
 } // namespace GUI

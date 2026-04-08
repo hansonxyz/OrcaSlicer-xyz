@@ -15984,12 +15984,14 @@ void Plater::print_job_finished(wxCommandEvent &evt)
     MonitorPanel* curr_monitor = p->main_frame->m_monitor;
     if (curr_monitor) {
        curr_monitor->get_tabpanel()->ChangeSelection(MonitorPanel::PrinterTab::PT_STATUS);
-       // xyz fork: auto-start camera after sending a print job
+       // xyz fork: camera auto-start DISABLED for crash investigation (2026-04-07)
+#if 0
        if (wxGetApp().app_config->get_bool("auto_start_camera")) {
            try {
                curr_monitor->jump_to_LiveView();
            } catch (...) {}
        }
+#endif
     }
 }
 

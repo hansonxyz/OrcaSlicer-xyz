@@ -100,17 +100,30 @@ powershell.exe -Command "Stop-Process -Name orca-slicer -Force -ErrorAction Sile
 **Resource file changes (HTML, images, etc.):**
 The incremental build script syncs `resources/` to `build/OrcaSlicer/resources/` using `robocopy /E` after each build. This ensures HTML changes (like WebView dialogs) are deployed without a full reinstall. Do NOT use `robocopy /MIR` — the `/MIR` flag deletes destination files not in the source, which destroys cmake-installed generated files and causes startup crashes.
 
-**Intermittent startup crashes:**
-OrcaSlicer occasionally crashes on startup due to a race condition in the Bambu networking plugin (`bambu_networking_*.dll` in `%APPDATA%/OrcaSlicer/plugins/`). The crash manifests as `STATUS_STACK_BUFFER_OVERRUN (0xc0000409)` in `ucrtbase.dll` and happens before the crash handler is set up, so no crash log is written. Investigation findings:
-- The crash is in the Bambu closed-source networking DLL, not our code
-- It is intermittent — the app may start on the 1st or 5th attempt
-- Renaming the Bambu DLL does NOT prevent the crash (ruled out as sole cause)
-- The crash occurs identically on clean builds with no xyz fork changes (confirmed by stashing all changes and testing)
-- `procdump` cannot catch it because the process dies during CRT initialization
-- Windows Event Log shows the crash consistently at the same `ucrtbase.dll` offset
-- A full clean reinstall of the `build/OrcaSlicer/` directory sometimes helps
-- Restarting the computer sometimes helps
-- The crash resilience feature (retry on DLL load failure) is a future improvement
+**Bambu DLL Crash Investigation (CRITICAL — ACTIVE):**
+
+The xyz fork experiences frequent crashes from the Bambu networking DLL (`bambu_networking_*.dll`). **These crashes are OUR problem.** The fact that the crashing code is in a closed-source DLL is a constraint on HOW we debug it, not a reason to dismiss it. Stock OrcaSlicer uses the same DLL and does not crash this frequently, which means something in our fork is triggering it. We must find what and fix it.
+
+**NEVER say "not our code" or "not our fault" about these crashes.** If our software crashes, it is our responsibility to fix it regardless of which module the fault address is in. Treat this exactly like any other bug: reproduce, bisect, fix.
+
+Two crash patterns (both from the Bambu DLL):
+1. `0xc0000005` ACCESS_VIOLATION in `bambu_networking_*.dll` — background thread null deref. Generates crash log. **BambuCrashGuard VEH catches these** (terminates thread, not process).
+2. `0xc0000409` STATUS_STACK_BUFFER_OVERRUN in `ucrtbase.dll` — DLL corrupts its stack, CRT security cookie check kills process. No crash log. VEH **cannot** catch these (`__fastfail` bypasses all handlers). Check Windows Event Log: `Get-WinEvent -FilterHashtable @{LogName="Application"; Level=2}`.
+
+Investigation status (2026-04-07):
+- Camera auto-start code (`#if 0`'d) is first suspect — disabled for testing
+- Need to systematically bisect xyz fork changes vs stock OrcaSlicer to find the trigger
+- BambuCrashGuard (VEH) installed in `BBLNetworkPlugin::initialize()` — catches type 1 crashes
+- Type 2 crashes require either process isolation or finding/fixing the root cause
+- The DLL is loaded via `LoadLibrary` and called through function pointers (`BBLNetworkPlugin`)
+- The DLL creates its own background threads (MQTT, SSDP) — we don't control them
+
+Investigation strategy:
+1. Disable xyz features one at a time to find the trigger
+2. Compare our `BBLNetworkPlugin`/`NetworkAgent` usage to stock OrcaSlicer
+3. Log all function calls to the Bambu DLL to find correlation with crashes
+4. Binary search: stash changes, test stock, re-apply changes incrementally
+5. If all else fails: replace the DLL with open LAN-only implementation (~2000 lines)
 
 **Current test files:**
 - `C:\Users\brian\Desktop\Crystal Dragon Statue - Spryo.3mf` — multi-material Spyro statue, good for testing paint tools, boundary painter, flushing volumes, tree supports

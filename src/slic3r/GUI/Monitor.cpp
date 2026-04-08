@@ -391,11 +391,13 @@ void MonitorPanel::update_all()
 
     update_hms_tag();
 
+    // xyz fork: camera auto-start DISABLED for crash investigation (2026-04-07)
+    // See CLAUDE.md "Bambu DLL Crash Investigation" section.
+#if 0
     // xyz fork: detect if user manually stopped camera
     if (m_camera_auto_state == CameraAutoState::ACTIVE) {
         auto *ctrl = m_status_info_panel->get_media_play_ctrl();
         if (ctrl && ctrl->is_idle()) {
-            // Camera was ACTIVE but is now IDLE — user stopped it manually
             m_camera_auto_state = CameraAutoState::OFF;
             m_camera_user_stopped = true;
         }
@@ -409,6 +411,7 @@ void MonitorPanel::update_all()
         }
         m_was_printing = is_printing;
     }
+#endif
 }
 
 void MonitorPanel::update_hms_tag()
@@ -456,16 +459,20 @@ bool MonitorPanel::Show(bool show)
             } else {
                 obj->reset_update_time();
             }
-            // xyz fork: reset camera state on tab entry, then auto-start if appropriate
+            // xyz fork: camera auto-start DISABLED for crash investigation (2026-04-07)
+#if 0
             m_camera_user_stopped = false;
             m_was_printing = obj ? MachineObject::is_in_printing_status(obj->print_status) : false;
             check_camera_auto_start();
+#endif
         }
     } else {
-        // xyz fork: reset camera state when leaving Device tab
+        // xyz fork: camera auto-start DISABLED for crash investigation (2026-04-07)
+#if 0
         m_camera_auto_state = CameraAutoState::OFF;
         m_camera_user_stopped = false;
         m_was_printing = false;
+#endif
 
         stop_update();
         m_refresh_timer->Stop();

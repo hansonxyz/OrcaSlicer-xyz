@@ -10,14 +10,21 @@
 #include "libslic3r/TriangleMesh.hpp"
 #include "libslic3r/PresetBundle.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/PlaceholderParser.hpp"
 #include "libslic3r/FlushVolCalc.hpp"
 
 #include <boost/log/trivial.hpp>
 #include <boost/filesystem.hpp>
+#include <boost/algorithm/string/predicate.hpp>
 #include <wx/timer.h>
 #include <wx/msgdlg.h>
 #include <algorithm>
 #include <cmath>
+#include <sstream>
+#include <fstream>
+#include <regex>
+#include <set>
+#include <map>
 
 namespace Slic3r {
 namespace GUI {
@@ -370,50 +377,74 @@ bool PurgeCalibrationGenerator::generate(const Options &opts)
     BOOST_LOG_TRIVIAL(info) << "PurgeCalibration: triggering reslice...";
     plater->reslice();
 
-    // Poll for slice completion, then copy gcode, cleanup, and show result
+    // Capture ordered_pairs by value for the async callback
+    auto calib_pairs = ordered_pairs;
+
+    // Poll for slice completion, then post-process gcode, cleanup, and show result
     auto *timer = new wxTimer();
-    timer->Bind(wxEVT_TIMER, [plater, gcode_path_str, temp_plate_idx, obj_start_idx, original_prime_tower, timer](wxTimerEvent &) {
+    timer->Bind(wxEVT_TIMER, [plater, gcode_path_str, temp_plate_idx, obj_start_idx, original_prime_tower, calib_pairs, timer](wxTimerEvent &) {
         int original_plate = s_cleanup_state.original_plate_idx;
 
         if (plater->is_background_process_slicing())
             return; // still slicing
 
         timer->Stop();
-        BOOST_LOG_TRIVIAL(info) << "PurgeCalibration: slicing complete, starting cleanup";
+        BOOST_LOG_TRIVIAL(info) << "PurgeCalibration: slicing complete, starting post-processing";
 
         // Get the sliced gcode from the plate's temp path
-        BOOST_LOG_TRIVIAL(info) << "PurgeCalibration: getting gcode path from plate " << temp_plate_idx;
         auto *plate = plater->get_partplate_list().get_plate(temp_plate_idx);
-        std::string sliced_gcode;
+        std::string sliced_gcode_path;
         if (plate)
-            sliced_gcode = plate->get_tmp_gcode_path();
-        BOOST_LOG_TRIVIAL(info) << "PurgeCalibration: sliced_gcode=" << sliced_gcode;
+            sliced_gcode_path = plate->get_tmp_gcode_path();
 
-        if (!sliced_gcode.empty() && boost::filesystem::exists(sliced_gcode)) {
-            try {
-                boost::filesystem::copy_file(sliced_gcode, gcode_path_str,
-                    boost::filesystem::copy_options::overwrite_existing);
-                BOOST_LOG_TRIVIAL(info) << "PurgeCalibration: gcode copied to " << gcode_path_str;
-            } catch (const std::exception &e) {
-                BOOST_LOG_TRIVIAL(error) << "PurgeCalibration: copy failed: " << e.what();
-            }
-        } else {
+        if (sliced_gcode_path.empty() || !boost::filesystem::exists(sliced_gcode_path)) {
             BOOST_LOG_TRIVIAL(warning) << "PurgeCalibration: no gcode file found";
+            plater->deselect_all();
+            plater->undo();
+            wxMessageBox(_L("Slicing did not produce gcode. Please try again."),
+                _L("Purge Calibration"), wxOK | wxICON_WARNING);
+            delete timer;
+            return;
         }
 
-        // Don't restore prime tower yet — keep it disabled while the calibration
-        // plate is active. The undo (Ctrl+Z) will restore all settings including
-        // prime tower when the user is done with the calibration print.
+        // Read the sliced gcode
+        std::string raw_gcode;
+        {
+            std::ifstream ifs(sliced_gcode_path, std::ios::binary);
+            if (ifs) {
+                std::ostringstream oss;
+                oss << ifs.rdbuf();
+                raw_gcode = oss.str();
+            }
+        }
 
-        // NOTE: We do NOT delete the calibration objects/plate here.
-        // Deleting model objects while the Print still references them causes
-        // an access violation in Print::support_material_extruders.
-        // The user can delete the calibration plate manually, or we add
-        // a cleanup step later that properly invalidates the Print first.
+        if (raw_gcode.empty()) {
+            BOOST_LOG_TRIVIAL(error) << "PurgeCalibration: failed to read gcode file";
+            plater->deselect_all();
+            plater->undo();
+            wxMessageBox(_L("Failed to read sliced gcode."),
+                _L("Purge Calibration"), wxOK | wxICON_WARNING);
+            delete timer;
+            return;
+        }
+
+        // Post-process: inject calibration filament changes on the top layer
+        auto full_config = wxGetApp().preset_bundle->full_config();
+        static constexpr double CALIBRATION_PURGE_MM3 = 50.0;
+        std::string processed_gcode = postprocess_gcode(raw_gcode, calib_pairs, full_config, CALIBRATION_PURGE_MM3);
+
+        // Write post-processed gcode to our temp file
+        {
+            std::ofstream ofs(gcode_path_str, std::ios::binary);
+            if (ofs) {
+                ofs << processed_gcode;
+                BOOST_LOG_TRIVIAL(info) << "PurgeCalibration: post-processed gcode written to " << gcode_path_str;
+            } else {
+                BOOST_LOG_TRIVIAL(error) << "PurgeCalibration: failed to write gcode to " << gcode_path_str;
+            }
+        }
 
         // --- Keep calibration plate, switch to Preview ---
-        // Don't undo yet — the plate must remain for the Print button to work.
-        // The gcode is on the plate from slicing. Switch to Preview tab.
         BOOST_LOG_TRIVIAL(info) << "PurgeCalibration: switching to preview";
 
         if (boost::filesystem::exists(gcode_path_str)) {
@@ -476,15 +507,380 @@ bool PurgeCalibrationGenerator::generate(const Options &opts)
     return true;
 }
 
+// Build a DynamicConfig override for PlaceholderParser to evaluate change_filament_gcode.
+// Mirrors the config setup in GCode.cpp WipeTowerIntegration (lines 828-946).
+static DynamicConfig build_toolchange_config(
+    const DynamicPrintConfig &full_config,
+    int prev_filament_id,
+    int next_filament_id,
+    double layer_z,
+    double max_layer_z,
+    double purge_volume_mm3,
+    int toolchange_count)
+{
+    DynamicConfig config;
+
+    config.set_key_value("previous_extruder", new ConfigOptionInt(prev_filament_id));
+    config.set_key_value("next_extruder", new ConfigOptionInt(next_filament_id));
+    config.set_key_value("layer_num", new ConfigOptionInt(0));
+    config.set_key_value("layer_z", new ConfigOptionFloat(layer_z));
+    config.set_key_value("toolchange_z", new ConfigOptionFloat(max_layer_z + 0.4));
+    config.set_key_value("max_layer_z", new ConfigOptionFloat(max_layer_z));
+    config.set_key_value("toolchange_count", new ConfigOptionInt(toolchange_count));
+    config.set_key_value("relative_e_axis", new ConfigOptionBool(full_config.opt_bool("use_relative_e_distances")));
+    config.set_key_value("fan_speed", new ConfigOptionInt(0));
+
+    // Retraction
+    float old_retract_length = (prev_filament_id >= 0) ? full_config.opt_float("retraction_length", prev_filament_id) : 0;
+    float new_retract_length = full_config.opt_float("retraction_length", next_filament_id);
+    float old_retract_tc = (prev_filament_id >= 0) ? full_config.opt_float("retract_length_toolchange", prev_filament_id) : 0;
+    float new_retract_tc = full_config.opt_float("retract_length_toolchange", next_filament_id);
+    config.set_key_value("old_retract_length", new ConfigOptionFloat(old_retract_length));
+    config.set_key_value("new_retract_length", new ConfigOptionFloat(new_retract_length));
+    config.set_key_value("old_retract_length_toolchange", new ConfigOptionFloat(old_retract_tc));
+    config.set_key_value("new_retract_length_toolchange", new ConfigOptionFloat(new_retract_tc));
+
+    // Temperatures
+    int old_filament_temp = (prev_filament_id >= 0) ? full_config.opt_int("nozzle_temperature", prev_filament_id) : 210;
+    int new_filament_temp = full_config.opt_int("nozzle_temperature", next_filament_id);
+    config.set_key_value("old_filament_temp", new ConfigOptionInt(old_filament_temp));
+    config.set_key_value("new_filament_temp", new ConfigOptionInt(new_filament_temp));
+
+    // Feed rates
+    float filament_diameter = full_config.opt_float("filament_diameter", next_filament_id);
+    float filament_area = float((M_PI / 4.f) * filament_diameter * filament_diameter);
+    int old_e_feedrate = (prev_filament_id >= 0) ?
+        (int)(60.0 * full_config.opt_float("filament_max_volumetric_speed", prev_filament_id) / filament_area) : 200;
+    if (old_e_feedrate == 0) old_e_feedrate = 100;
+    int new_e_feedrate = (int)(60.0 * full_config.opt_float("filament_max_volumetric_speed", next_filament_id) / filament_area);
+    if (new_e_feedrate == 0) new_e_feedrate = 100;
+    config.set_key_value("old_filament_e_feedrate", new ConfigOptionInt(old_e_feedrate));
+    config.set_key_value("new_filament_e_feedrate", new ConfigOptionInt(new_e_feedrate));
+
+    // Flush length and per-pass distribution
+    float purge_length = (float)(purge_volume_mm3 / filament_area);
+    config.set_key_value("flush_length", new ConfigOptionFloat(purge_length));
+    config.set_key_value("first_flush_volume", new ConfigOptionFloat(purge_length / 2.f));
+    config.set_key_value("second_flush_volume", new ConfigOptionFloat(purge_length / 2.f));
+
+    // Distribute flush across passes (same logic as GCode.cpp)
+    static constexpr int    g_max_flush_count     = 4;
+    static constexpr double g_purge_volume_one_time = 135.0;
+    int flush_count = std::min(g_max_flush_count, std::max(1, (int)std::round(purge_volume_mm3 / g_purge_volume_one_time)));
+    float flush_unit = purge_length / flush_count;
+    for (int i = 0; i < g_max_flush_count; ++i) {
+        char key[64];
+        snprintf(key, sizeof(key), "flush_length_%d", i + 1);
+        config.set_key_value(key, new ConfigOptionFloat(i < flush_count ? flush_unit : 0.f));
+    }
+
+    // Position after toolchange (not critical — printer travels to next extrusion anyway)
+    config.set_key_value("x_after_toolchange", new ConfigOptionFloat(0.f));
+    config.set_key_value("y_after_toolchange", new ConfigOptionFloat(0.f));
+    config.set_key_value("z_after_toolchange", new ConfigOptionFloat((float)layer_z));
+
+    // Travel points (BBL uses these for wipe avoidance — set to safe defaults)
+    config.set_key_value("travel_point_1_x", new ConfigOptionFloat(0.f));
+    config.set_key_value("travel_point_1_y", new ConfigOptionFloat(0.f));
+    config.set_key_value("travel_point_2_x", new ConfigOptionFloat(0.f));
+    config.set_key_value("travel_point_2_y", new ConfigOptionFloat(0.f));
+    config.set_key_value("travel_point_3_x", new ConfigOptionFloat(0.f));
+    config.set_key_value("travel_point_3_y", new ConfigOptionFloat(0.f));
+
+    // Flush volumetric speeds and temperatures
+    auto flush_v_speeds = full_config.option<ConfigOptionFloats>("filament_flush_volumetric_speed");
+    auto flush_temps = full_config.option<ConfigOptionInts>("filament_flush_temp");
+    if (flush_v_speeds) {
+        auto vals = flush_v_speeds->values;
+        for (size_t i = 0; i < vals.size(); ++i) {
+            if (vals[i] == 0)
+                vals[i] = full_config.opt_float("filament_max_volumetric_speed", i);
+        }
+        config.set_key_value("flush_volumetric_speeds", new ConfigOptionFloats(vals));
+    }
+    if (flush_temps) {
+        auto vals = flush_temps->values;
+        for (size_t i = 0; i < vals.size(); ++i) {
+            if (vals[i] == 0)
+                vals[i] = full_config.opt_int("nozzle_temperature_range_high", i);
+        }
+        config.set_key_value("flush_temperatures", new ConfigOptionInts(vals));
+    }
+
+    // Outer wall volumetric speed (used for dynamic extrusion calibration)
+    float nozzle_diameter = full_config.opt_float("nozzle_diameter", 0);
+    float outer_wall_speed = full_config.opt_float("outer_wall_speed", 0);
+    float outer_wall_line_width = full_config.opt_float("outer_wall_line_width", 0);
+    if (outer_wall_line_width <= 0) outer_wall_line_width = nozzle_diameter;
+    float layer_height = full_config.opt_float("layer_height", 0);
+    if (layer_height <= 0) layer_height = 0.2f;
+    float outer_wall_vol_speed = outer_wall_speed * outer_wall_line_width * layer_height;
+    config.set_key_value("outer_wall_volumetric_speed", new ConfigOptionFloat(outer_wall_vol_speed));
+
+    // Acceleration
+    config.set_key_value("initial_layer_acceleration", new ConfigOptionFloat(full_config.opt_float("initial_layer_acceleration")));
+    config.set_key_value("default_acceleration", new ConfigOptionFloat(full_config.opt_float("default_acceleration")));
+
+    // Wipe avoidance
+    config.set_key_value("wipe_avoid_perimeter", new ConfigOptionBool(false));
+    config.set_key_value("wipe_avoid_pos_x", new ConfigOptionFloat(0.f));
+
+    // Prime tower interface (not applicable for calibration)
+    config.set_key_value("is_prime_tower_interface", new ConfigOptionBool(false));
+    config.set_key_value("filament_tower_interface_purge_volume", new ConfigOptionFloat(0.f));
+    config.set_key_value("filament_tower_interface_print_temp", new ConfigOptionInt(0));
+
+    return config;
+}
+
+// Parse filament indices from a "calib_A_B" object name.
+// Returns true if parsed successfully.
+static bool parse_calib_name(const std::string &name, int &from_filament, int &to_filament)
+{
+    // Match "calib_X_Y" where X and Y are integers
+    std::regex re("calib_(\\d+)_(\\d+)");
+    std::smatch m;
+    if (std::regex_search(name, m, re) && m.size() == 3) {
+        from_filament = std::stoi(m[1].str());
+        to_filament = std::stoi(m[2].str());
+        return true;
+    }
+    return false;
+}
+
 std::string PurgeCalibrationGenerator::postprocess_gcode(
     const std::string &gcode,
     const std::vector<TransitionPair> &ordered_pairs,
-    int label_filament,
-    int strip_filament,
-    const std::string &change_filament_gcode_template)
+    const DynamicPrintConfig &full_config,
+    double calibration_purge_volume_mm3)
 {
-    // TODO: implement gcode post-processing
-    return gcode;
+    if (ordered_pairs.empty()) return gcode;
+
+    // Get the change_filament_gcode template from the config
+    std::string change_template = full_config.opt_string("change_filament_gcode");
+    if (change_template.empty()) {
+        BOOST_LOG_TRIVIAL(warning) << "PurgeCalibration postprocess: no change_filament_gcode template";
+        return gcode;
+    }
+
+    // Split gcode into lines
+    std::vector<std::string> lines;
+    {
+        std::istringstream iss(gcode);
+        std::string line;
+        while (std::getline(iss, line))
+            lines.push_back(line);
+    }
+
+    // Find the LAST CHANGE_LAYER marker (topmost layer)
+    int last_change_layer_line = -1;
+    double last_layer_z = 0;
+    for (int i = (int)lines.size() - 1; i >= 0; --i) {
+        if (lines[i] == "; CHANGE_LAYER") {
+            last_change_layer_line = i;
+            // Parse Z from the next line: "; Z_HEIGHT: X.XX"
+            if (i + 1 < (int)lines.size() && boost::starts_with(lines[i + 1], "; Z_HEIGHT:")) {
+                try {
+                    last_layer_z = std::stod(lines[i + 1].substr(12));
+                } catch (...) {}
+            }
+            break;
+        }
+    }
+
+    if (last_change_layer_line < 0) {
+        BOOST_LOG_TRIVIAL(warning) << "PurgeCalibration postprocess: no CHANGE_LAYER found";
+        return gcode;
+    }
+
+    BOOST_LOG_TRIVIAL(info) << "PurgeCalibration postprocess: top layer at line "
+        << last_change_layer_line << " Z=" << last_layer_z;
+
+    // Find all calib_X_Y markers on the top layer (from CHANGE_LAYER to end or next CHANGE_LAYER)
+    struct StripMarker {
+        int line_idx;
+        int from_filament;
+        int to_filament;
+    };
+    std::vector<StripMarker> strip_markers;
+    for (int i = last_change_layer_line; i < (int)lines.size(); ++i) {
+        if (boost::starts_with(lines[i], "; printing object calib_")) {
+            int a, b;
+            if (parse_calib_name(lines[i], a, b)) {
+                strip_markers.push_back({i, a, b});
+            }
+        }
+    }
+
+    if (strip_markers.empty()) {
+        BOOST_LOG_TRIVIAL(warning) << "PurgeCalibration postprocess: no calib_ markers on top layer";
+        return gcode;
+    }
+
+    BOOST_LOG_TRIVIAL(info) << "PurgeCalibration postprocess: found " << strip_markers.size()
+        << " strip markers on top layer";
+
+    // Also find and collect existing M620...M621 filament change blocks on the top layer
+    // so we can remove them. A block starts with "M620 S[0-9]A" and ends with "M621 S[0-9]A".
+    struct ChangeBlock {
+        int start_line; // line of the ";===== machine:" comment (or M620 line)
+        int end_line;   // line of M621 + a few trailing lines
+    };
+    std::vector<ChangeBlock> existing_changes;
+    {
+        std::regex m620_re("^M620 S\\dA");
+        std::regex m621_re("^M621 S\\dA");
+        for (int i = last_change_layer_line; i < (int)lines.size(); ++i) {
+            if (std::regex_search(lines[i], m620_re)) {
+                // Find the start of this block — look backwards for ";===== machine:" comment
+                int block_start = i;
+                for (int j = i - 1; j >= last_change_layer_line && j >= i - 5; --j) {
+                    if (boost::starts_with(lines[j], ";===== machine:") ||
+                        boost::starts_with(lines[j], "G392 S0") ||
+                        boost::starts_with(lines[j], "M1007 S0")) {
+                        block_start = j;
+                    }
+                }
+                // Find M621 end
+                int block_end = i;
+                for (int j = i + 1; j < (int)lines.size(); ++j) {
+                    if (std::regex_search(lines[j], m621_re)) {
+                        block_end = j;
+                        // Include a few trailing lines (G392, M1007, M106, M104, etc.)
+                        for (int k = j + 1; k < (int)lines.size() && k <= j + 5; ++k) {
+                            if (boost::starts_with(lines[k], "G392") ||
+                                boost::starts_with(lines[k], "M1007") ||
+                                boost::starts_with(lines[k], "M106 S") ||
+                                boost::starts_with(lines[k], "M104 S") ||
+                                lines[k].empty()) {
+                                block_end = k;
+                            } else {
+                                break;
+                            }
+                        }
+                        break;
+                    }
+                }
+                existing_changes.push_back({block_start, block_end});
+            }
+        }
+    }
+
+    BOOST_LOG_TRIVIAL(info) << "PurgeCalibration postprocess: found " << existing_changes.size()
+        << " existing filament change blocks to remove on top layer";
+
+    // Build set of lines to remove (existing filament change blocks on the top layer)
+    std::set<int> lines_to_remove;
+    for (const auto &block : existing_changes) {
+        for (int i = block.start_line; i <= block.end_line; ++i)
+            lines_to_remove.insert(i);
+    }
+
+    // Set up PlaceholderParser with the full config
+    PlaceholderParser pp(&full_config);
+    pp.apply_config(DynamicPrintConfig(full_config));
+
+    // Determine what filament was loaded at the start of the top layer.
+    // Scan backwards from the top layer to find the last M620 S[x]A command.
+    int current_filament = 0;
+    {
+        std::regex t_re("^M620 S(\\d)A");
+        for (int i = last_change_layer_line - 1; i >= 0; --i) {
+            std::smatch m;
+            if (std::regex_search(lines[i], m, t_re)) {
+                current_filament = std::stoi(m[1].str());
+                break;
+            }
+        }
+    }
+
+    BOOST_LOG_TRIVIAL(info) << "PurgeCalibration postprocess: filament at top layer start = " << current_filament;
+
+    // Generate filament change gcode for each strip
+    // Map: strip marker line index -> gcode to insert before it
+    std::map<int, std::string> insertions;
+    int toolchange_count = 10; // arbitrary starting count (must be > 1 for spiral lift)
+
+    // Get the standard purge volume for "loading" changes (from the flush matrix)
+    auto recommended = WipingDialog::CalcFlushingVolumes(0);
+
+    for (const auto &marker : strip_markers) {
+        std::string insert_gcode;
+        int filament_a = marker.from_filament;
+        int filament_b = marker.to_filament;
+
+        // Step 1: If current filament != A, change to A with standard purge
+        if (current_filament != filament_a) {
+            double load_purge = 200.0; // default
+            if (current_filament < (int)recommended.size() &&
+                filament_a < (int)recommended[current_filament].size())
+                load_purge = recommended[current_filament][filament_a];
+            load_purge = std::max(50.0, load_purge);
+
+            BOOST_LOG_TRIVIAL(info) << "PurgeCalibration: inserting change " << current_filament
+                << " -> " << filament_a << " (load, " << load_purge << "mm3)";
+
+            auto load_config = build_toolchange_config(full_config,
+                current_filament, filament_a, last_layer_z, last_layer_z,
+                load_purge, toolchange_count++);
+
+            try {
+                insert_gcode += "; --- PURGE CALIBRATION: load filament " + std::to_string(filament_a + 1) + " ---\n";
+                insert_gcode += pp.process(change_template, filament_a, &load_config);
+                insert_gcode += "\n;_FORCE_RESUME_FAN_SPEED\n";
+            } catch (const std::exception &e) {
+                BOOST_LOG_TRIVIAL(error) << "PurgeCalibration: template eval failed (load): " << e.what();
+                return gcode; // bail out on template error
+            }
+            current_filament = filament_a;
+        }
+
+        // Step 2: Change A -> B with calibration purge amount
+        {
+            BOOST_LOG_TRIVIAL(info) << "PurgeCalibration: inserting change " << filament_a
+                << " -> " << filament_b << " (calib, " << calibration_purge_volume_mm3 << "mm3)";
+
+            auto calib_config = build_toolchange_config(full_config,
+                filament_a, filament_b, last_layer_z, last_layer_z,
+                calibration_purge_volume_mm3, toolchange_count++);
+
+            try {
+                insert_gcode += "; --- PURGE CALIBRATION: test " + std::to_string(filament_a + 1)
+                    + " -> " + std::to_string(filament_b + 1) + " ("
+                    + std::to_string((int)calibration_purge_volume_mm3) + "mm3) ---\n";
+                insert_gcode += pp.process(change_template, filament_b, &calib_config);
+                insert_gcode += "\n;_FORCE_RESUME_FAN_SPEED\n";
+            } catch (const std::exception &e) {
+                BOOST_LOG_TRIVIAL(error) << "PurgeCalibration: template eval failed (calib): " << e.what();
+                return gcode;
+            }
+            current_filament = filament_b;
+        }
+
+        insertions[marker.line_idx] = insert_gcode;
+    }
+
+    // Reassemble gcode: skip removed lines, insert new changes before strip markers
+    std::ostringstream out;
+    for (int i = 0; i < (int)lines.size(); ++i) {
+        // Insert filament change before this line if it's a strip marker
+        auto it = insertions.find(i);
+        if (it != insertions.end()) {
+            out << it->second;
+        }
+
+        // Skip lines that are part of removed filament change blocks
+        if (lines_to_remove.count(i))
+            continue;
+
+        out << lines[i] << "\n";
+    }
+
+    std::string result = out.str();
+    BOOST_LOG_TRIVIAL(info) << "PurgeCalibration postprocess: done, "
+        << insertions.size() << " changes inserted, "
+        << lines_to_remove.size() << " lines removed";
+    return result;
 }
 
 } // namespace GUI

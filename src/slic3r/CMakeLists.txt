@@ -626,6 +626,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/BBLCloudServiceAgent.hpp
     Utils/BBLPrinterAgent.cpp
     Utils/BBLPrinterAgent.hpp
+    Utils/BambuCrashGuard.cpp
+    Utils/BambuCrashGuard.hpp
     Utils/BBLNetworkPlugin.cpp
     Utils/BBLNetworkPlugin.hpp
     Utils/Obico.cpp
