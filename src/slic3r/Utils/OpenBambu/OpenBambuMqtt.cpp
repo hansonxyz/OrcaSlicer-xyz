@@ -1,4 +1,5 @@
 #include "OpenBambuMqtt.hpp"
+#include <boost/log/trivial.hpp>
 
 #ifdef _WIN32
 #  include <winsock2.h>
@@ -162,15 +163,35 @@ std::vector<uint8_t> MqttClient::build_disconnect_packet()
     return {MQTT_DISCONNECT, 0x00};
 }
 
-bool MqttClient::tls_read(void *buf, int n)
+// Returns: 1 = success, 0 = timeout, -1 = error/disconnect
+int MqttClient::tls_read(void *buf, int n)
 {
     int total = 0;
     while (total < n) {
         int r = SSL_read((SSL *)m_ssl, (char *)buf + total, n - total);
-        if (r <= 0) return false;
-        total += r;
+        if (r > 0) {
+            total += r;
+            continue;
+        }
+        int ssl_err = SSL_get_error((SSL *)m_ssl, r);
+        if (ssl_err == SSL_ERROR_WANT_READ || ssl_err == SSL_ERROR_WANT_WRITE) {
+            continue; // non-blocking retry
+        }
+        if (ssl_err == SSL_ERROR_SYSCALL) {
+#ifdef _WIN32
+            int wsa_err = WSAGetLastError();
+            if (wsa_err == WSAETIMEDOUT || wsa_err == 0) {
+                return 0; // timeout — not an error
+            }
+#else
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                return 0; // timeout
+            }
+#endif
+        }
+        return -1; // real error or disconnect
     }
-    return true;
+    return 1; // success
 }
 
 bool MqttClient::tls_write(const void *buf, int n)
@@ -391,13 +412,13 @@ bool MqttClient::reconnect()
         return false;
 
     if (m_reconnect_attempts >= MAX_RECONNECT_ATTEMPTS) {
-        fprintf(stderr, "MQTT: max reconnect attempts (%d) reached, giving up\n", MAX_RECONNECT_ATTEMPTS);
+        BOOST_LOG_TRIVIAL(error) << "OpenBambu MQTT: max reconnect attempts (" << MAX_RECONNECT_ATTEMPTS << ") reached, giving up";
         return false;
     }
 
     ++m_reconnect_attempts;
-    fprintf(stderr, "MQTT: reconnecting (attempt %d/%d) in %ds...\n",
-            m_reconnect_attempts, MAX_RECONNECT_ATTEMPTS, RECONNECT_DELAY_SEC);
+    BOOST_LOG_TRIVIAL(info) << "OpenBambu MQTT: reconnecting (attempt " << m_reconnect_attempts
+        << "/" << MAX_RECONNECT_ATTEMPTS << ") in " << RECONNECT_DELAY_SEC << "s...";
 
     // Wait before reconnecting (check stop_requested periodically)
     for (int i = 0; i < RECONNECT_DELAY_SEC && !m_stop_requested.load(); ++i)
@@ -472,7 +493,7 @@ bool MqttClient::reconnect()
 
     m_connected.store(true);
     m_reconnect_attempts = 0; // reset on success
-    fprintf(stderr, "MQTT: reconnected successfully\n");
+    BOOST_LOG_TRIVIAL(info) << "OpenBambu MQTT: reconnected successfully";
 
     // Fire connect callback
     {
@@ -549,15 +570,17 @@ void MqttClient::reader_thread_func()
         // Inner loop: read packets while connected
         while (!m_stop_requested.load() && m_connected.load()) {
             uint8_t first_byte;
-            if (!tls_read(&first_byte, 1)) {
-                // Read timeout or disconnect — check if socket is still alive
+            int rc = tls_read(&first_byte, 1);
+
+            if (rc == 0) {
+                // Timeout — no data available, connection still alive.
+                // Send keepalive ping periodically.
                 auto now = std::chrono::steady_clock::now();
                 auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - last_ping).count();
-
-                if (elapsed >= 15) {
+                if (elapsed >= 20) {
                     auto ping = build_pingreq_packet();
                     if (!tls_write(ping.data(), (int)ping.size())) {
-                        fprintf(stderr, "MQTT: ping failed, connection lost\n");
+                        BOOST_LOG_TRIVIAL(error) << "OpenBambu MQTT: ping write failed, connection lost";
                         m_connected.store(false);
                         break;
                     }
@@ -566,29 +589,41 @@ void MqttClient::reader_thread_func()
                 continue;
             }
 
-            // Read remaining length
+            if (rc < 0) {
+                // Real error or disconnect
+                BOOST_LOG_TRIVIAL(error) << "OpenBambu MQTT: connection lost (read error)";
+                m_connected.store(false);
+                break;
+            }
+
+            // rc == 1: got first byte, read remaining length
             uint32_t remaining = 0;
             uint32_t multiplier = 1;
             bool read_ok = true;
             for (int i = 0; i < 4; ++i) {
                 uint8_t byte;
-                if (!tls_read(&byte, 1)) { read_ok = false; break; }
+                if (tls_read(&byte, 1) != 1) { read_ok = false; break; }
                 remaining += (byte & 0x7F) * multiplier;
                 multiplier *= 128;
                 if ((byte & 0x80) == 0) break;
             }
-            if (!read_ok) { m_connected.store(false); break; }
+            if (!read_ok) {
+                BOOST_LOG_TRIVIAL(error) << "OpenBambu MQTT: failed reading packet length";
+                m_connected.store(false);
+                break;
+            }
 
             // Read payload
             std::vector<uint8_t> data(remaining);
-            if (remaining > 0 && !tls_read(data.data(), (int)remaining)) {
+            if (remaining > 0 && tls_read(data.data(), (int)remaining) != 1) {
+                BOOST_LOG_TRIVIAL(error) << "OpenBambu MQTT: failed reading packet payload (" << remaining << " bytes)";
                 m_connected.store(false);
                 break;
             }
 
             handle_packet(first_byte, data);
             last_ping = std::chrono::steady_clock::now();
-            m_reconnect_attempts = 0; // successful data resets reconnect counter
+            m_reconnect_attempts = 0;
         }
 
         // Connection lost — try to reconnect if auto_reconnect is enabled

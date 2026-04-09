@@ -68,8 +68,9 @@ private:
     // Background thread: reads incoming MQTT packets
     void reader_thread_func();
 
-    // Read exactly n bytes from TLS, returns false on error/disconnect
-    bool tls_read(void *buf, int n);
+    // Read exactly n bytes from TLS.
+    // Returns: 1 = success, 0 = timeout (no data), -1 = error/disconnect
+    int tls_read(void *buf, int n);
     bool tls_write(const void *buf, int n);
 
     // Parse a received MQTT packet
