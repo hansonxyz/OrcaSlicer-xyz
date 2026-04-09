@@ -604,6 +604,9 @@ DPIFrame(NULL, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, BORDERLESS_FRAME_
         //}
     #endif
 
+        // xyz fork: log user-initiated shutdown (distinguishes from crash)
+        BOOST_LOG_TRIVIAL(info) << "Application closing: user-initiated shutdown";
+
         MarkdownTip::ExitTip();
 
         m_plater->reset();

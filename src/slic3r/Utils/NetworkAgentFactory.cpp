@@ -6,6 +6,7 @@
 #include "QidiPrinterAgent.hpp"
 #include "SnapmakerPrinterAgent.hpp"
 #include "MoonrakerPrinterAgent.hpp"
+#include "OpenBambu/OpenBambuPrinterAgent.hpp"
 #include <boost/log/trivial.hpp>
 #include <map>
 #include <mutex>
@@ -131,6 +132,7 @@ void NetworkAgentFactory::clear_printer_agent_cache()
 void NetworkAgentFactory::register_all_agents()
 {
     register_agent<OrcaPrinterAgent>();
+    register_agent<OpenBambuPrinterAgent>();
     register_agent<QidiPrinterAgent>();
     register_agent<SnapmakerPrinterAgent>();
     register_agent<MoonrakerPrinterAgent>();
@@ -157,9 +159,10 @@ std::unique_ptr<NetworkAgent> create_agent_from_config(const std::string& log_di
     // Determine cloud provider from config
     bool use_orca_cloud = app_config->get_bool("use_orca_cloud");
 
-    // Create cloud agent
+    // Create cloud agent (skip in OpenBambu mode — no cloud features)
     std::shared_ptr<ICloudServiceAgent> cloud_agent;
-    if (use_orca_cloud || app_config->get_bool("installed_networking")) {
+    bool use_bambu_plugin = app_config->get_bool("use_bambu_network_plugin");
+    if (use_bambu_plugin && (use_orca_cloud || app_config->get_bool("installed_networking"))) {
         CloudAgentProvider provider = use_orca_cloud ? CloudAgentProvider::Orca : CloudAgentProvider::BBL;
         cloud_agent                 = NetworkAgentFactory::create_cloud_agent(provider, log_dir);
         if (!cloud_agent) {

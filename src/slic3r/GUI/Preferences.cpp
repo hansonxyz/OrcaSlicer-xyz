@@ -66,6 +66,7 @@ std::tuple<wxBoxSizer*, ComboBox*> PreferencesDialog::create_item_combobox_base(
     combo_title->Wrap(DESIGN_TITLE_SIZE.x);
     m_sizer_combox->Add(combo_title, 0, wxALIGN_CENTER);
 
+    // xyz fork: use proportion=1 + wxEXPAND so comboboxes fill remaining width
     auto combobox = new ::ComboBox(m_parent, wxID_ANY, wxEmptyString, wxDefaultPosition, DESIGN_LARGE_COMBOBOX_SIZE, 0, nullptr, wxCB_READONLY);
     combobox->SetFont(::Label::Body_14);
     combobox->GetDropDown().SetFont(::Label::Body_14);
@@ -77,7 +78,7 @@ std::tuple<wxBoxSizer*, ComboBox*> PreferencesDialog::create_item_combobox_base(
 
     combobox->SetSelection(current_index);
 
-    m_sizer_combox->Add(combobox, 0, wxALIGN_CENTER | wxLEFT, FromDIP(5));
+    m_sizer_combox->Add(combobox, 1, wxALIGN_CENTER | wxEXPAND | wxLEFT, FromDIP(5));
 
     return {m_sizer_combox, combobox};
 }
@@ -273,7 +274,7 @@ wxBoxSizer *PreferencesDialog::create_item_language_combobox(wxString title, wxS
     }
     combobox->SetSelection(m_current_language_selected);
 
-    m_sizer_combox->Add(combobox, 0, wxALIGN_CENTER | wxLEFT, FromDIP(5));
+    m_sizer_combox->Add(combobox, 1, wxALIGN_CENTER | wxEXPAND | wxLEFT, FromDIP(5));
 
     combobox->Bind(wxEVT_LEFT_DOWN, [this, combobox](wxMouseEvent &e) {
         m_current_language_selected = combobox->GetSelection();
@@ -354,7 +355,7 @@ wxBoxSizer *PreferencesDialog::create_item_region_combobox(wxString title, wxStr
     auto combobox = new ::ComboBox(m_parent, wxID_ANY, wxEmptyString, wxDefaultPosition, DESIGN_LARGE_COMBOBOX_SIZE, 0, nullptr, wxCB_READONLY);
     combobox->SetFont(::Label::Body_14);
     combobox->GetDropDown().SetFont(::Label::Body_14);
-    m_sizer_combox->Add(combobox, 0, wxALIGN_CENTER | wxLEFT, FromDIP(5));
+    m_sizer_combox->Add(combobox, 1, wxALIGN_CENTER | wxEXPAND | wxLEFT, FromDIP(5));
 
     std::vector<wxString>::iterator iter;
     for (iter = vlist.begin(); iter != vlist.end(); iter++) { combobox->Append(*iter); }
@@ -440,7 +441,7 @@ wxBoxSizer *PreferencesDialog::create_item_loglevel_combobox(wxString title, wxS
     auto severity_level = app_config->get("log_severity_level");
     if (!severity_level.empty()) { combobox->SetValue(severity_level); }
 
-    m_sizer_combox->Add(combobox, 0, wxALIGN_CENTER | wxLEFT, FromDIP(5));
+    m_sizer_combox->Add(combobox, 1, wxALIGN_CENTER | wxEXPAND | wxLEFT, FromDIP(5));
 
     //// save config
     combobox->GetDropDown().Bind(wxEVT_COMBOBOX, [this](wxCommandEvent &e) {
@@ -532,9 +533,10 @@ wxBoxSizer *PreferencesDialog::create_item_input(wxString title, wxString title2
     second_title->SetToolTip(tooltip);
     second_title->Wrap(-1);
 
+    // xyz fork: proportion=1 + wxEXPAND so text inputs fill remaining width
     sizer_input->AddSpacer(FromDIP(DESIGN_LEFT_MARGIN));
     sizer_input->Add(input_title , 0, wxALIGN_CENTER_VERTICAL);
-    sizer_input->Add(input       , 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(5));
+    sizer_input->Add(input       , 1, wxALIGN_CENTER_VERTICAL | wxEXPAND | wxLEFT, FromDIP(5));
     sizer_input->Add(second_title, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(2));
 
     input->GetTextCtrl()->Bind(wxEVT_TEXT_ENTER, [this, param, input, onchange](wxCommandEvent &e) {
@@ -1360,11 +1362,8 @@ void PreferencesDialog::create_items()
     auto item_show_splash_scr  = create_item_checkbox(_L("Show splash screen"), _L("Show the splash screen during startup."), "show_splash_screen");
     g_sizer->Add(item_show_splash_scr);
 
-    // xyz fork: auto-start camera preference
-    auto item_auto_camera = create_item_checkbox(_L("Auto-start camera"),
-        _L("Automatically start the camera stream when viewing a printer with an active print job, or after sending a print."),
-        "auto_start_camera");
-    g_sizer->Add(item_auto_camera);
+    // xyz fork: auto-start camera moved to Online > Interface section
+    // xyz fork: OpenBambu dropdown moved to Online > Connection section
 
     //auto item_hints            = create_item_checkbox(_L("Show \"Daily Tips\" after start"), page, _L("If enabled, useful hints are displayed at startup."), "show_daily_tips");
     //g_sizer->Add(item_hints);
@@ -1527,11 +1526,32 @@ void PreferencesDialog::create_items()
     //// ONLINE > Connection
     g_sizer->Add(create_item_title(_L("Connection")), 1, wxEXPAND);
 
-    auto item_region           = create_item_region_combobox(_L("Login region"), "");
-    g_sizer->Add(item_region);
- 
-    auto item_stealth_mode     = create_item_checkbox(_L("Stealth mode"), _L("This stops the transmission of data to Bambu's cloud services. Users who don't use BBL machines or use LAN mode only can safely turn on this function."), "stealth_mode");
-    g_sizer->Add(item_stealth_mode);
+    // xyz fork: Bambu Labs Integration dropdown — replaces separate stealth_mode
+    // and use_bambu_network_plugin checkboxes. Requires restart to take effect.
+    {
+        auto item_bbl_mode = create_item_combobox(
+            _L("Bambu Labs integration (requires restart)"),
+            _L("Choose how to connect to Bambu Lab printers.\n\n"
+               "OpenBambu (LAN Only) — Open-source protocol. No Bambu account needed. No data sent to Bambu cloud.\n\n"
+               "Bambu Lab Official (Stealth Mode) — Uses Bambu networking plugin with cloud transmission disabled.\n\n"
+               "Bambu Lab Official (Online Mode) — Full Bambu cloud integration with account login."),
+            "bambu_connection_mode",
+            {_L("OpenBambu (LAN Only)"),
+             _L("Bambu Lab Official (Stealth Mode)"),
+             _L("Bambu Lab Official (Online Mode)")},
+            {"openbambu", "bambu_stealth", "bambu_online"});
+        g_sizer->Add(item_bbl_mode);
+    }
+
+    // Show login region, stealth mode, and network test only when using Bambu official plugin
+    bool using_bambu_plugin = app_config->get_bool("use_bambu_network_plugin");
+    if (using_bambu_plugin) {
+        auto item_region           = create_item_region_combobox(_L("Login region"), "");
+        g_sizer->Add(item_region);
+
+        auto item_stealth_mode     = create_item_checkbox(_L("Stealth mode"), _L("This stops the transmission of data to Bambu's cloud services. Users who don't use BBL machines or use LAN mode only can safely turn on this function."), "stealth_mode");
+        g_sizer->Add(item_stealth_mode);
+    }
 
     auto item_network_test     = create_item_button(_L("Network test"), _L("Test") + " " + dots, "", _L("Open Network Test"), []() {
         NetworkTestDialog dlg(wxGetApp().mainframe);
@@ -1566,7 +1586,25 @@ void PreferencesDialog::create_items()
         {_L("Filament & Color"), _L("Color only")});
     g_sizer->Add(item_filament_sync_mode);
 
-    //// ONLINE > Network plugin
+    // xyz fork: Interface section — items visible only in specific connection modes
+    {
+        bool is_openbambu = !app_config->get_bool("use_bambu_network_plugin");
+        bool has_interface_items = is_openbambu; // expand this condition as more items are added
+        if (has_interface_items) {
+            g_sizer->Add(create_item_title(_L("Interface")), 1, wxEXPAND);
+
+            if (is_openbambu) {
+                auto item_auto_camera = create_item_checkbox(_L("Auto-start camera"),
+                    _L("Automatically start the camera stream when viewing a printer with an active print job, or after sending a print."),
+                    "auto_start_camera");
+                g_sizer->Add(item_auto_camera);
+            }
+        }
+    }
+
+    //// ONLINE > Network plugin (hidden in OpenBambu mode)
+    if (app_config->get_bool("use_bambu_network_plugin")) {
+
     g_sizer->Add(create_item_title(_L("Network plug-in")), 1, wxEXPAND);
 
     auto item_enable_plugin    = create_item_checkbox(_L("Enable network plug-in"), "", "installed_networking");
@@ -1614,7 +1652,7 @@ void PreferencesDialog::create_items()
     }
 
     m_network_version_combo->SetSelection(current_selection);
-    m_network_version_sizer->Add(m_network_version_combo, 0, wxALIGN_CENTER | wxLEFT, FromDIP(5));
+    m_network_version_sizer->Add(m_network_version_combo, 1, wxALIGN_CENTER | wxEXPAND | wxLEFT, FromDIP(5));
 
     m_network_version_combo->GetDropDown().Bind(wxEVT_COMBOBOX, [this](wxCommandEvent& e) {
         int selection = e.GetSelection();
@@ -1678,6 +1716,8 @@ void PreferencesDialog::create_items()
     });
 
     g_sizer->Add(m_network_version_sizer);
+
+    } // end of "if (using_bambu_plugin)" block for Network plug-in section
 
     g_sizer->AddSpacer(FromDIP(10));
     sizer_page->Add(g_sizer, 0, wxEXPAND);

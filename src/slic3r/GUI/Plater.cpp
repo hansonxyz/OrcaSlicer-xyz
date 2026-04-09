@@ -9964,7 +9964,10 @@ void Plater::priv::on_tab_selection_changing(wxBookCtrlEvent& e)
     update_sidebar();
     int old_sel = e.GetOldSelection();
     if (wxGetApp().preset_bundle && wxGetApp().preset_bundle->use_bbl_device_tab() && new_sel == MainFrame::tpMonitor) {
-        if (!Slic3r::NetworkAgent::is_network_module_loaded()) {
+        // xyz fork: OpenBambu mode doesn't load the DLL but still has a working printer agent
+        bool has_networking = Slic3r::NetworkAgent::is_network_module_loaded()
+                              || !wxGetApp().app_config->get_bool("use_bambu_network_plugin");
+        if (!has_networking) {
             e.Veto();
             BOOST_LOG_TRIVIAL(info) << boost::format("skipped tab switch from %1% to %2%, lack of network plugins") % old_sel % new_sel;
             if (q) {

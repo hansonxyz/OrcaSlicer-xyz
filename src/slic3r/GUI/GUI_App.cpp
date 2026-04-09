@@ -2013,6 +2013,9 @@ bool GUI_App::check_networking_version()
 
 bool GUI_App::is_compatibility_version()
 {
+    // xyz fork: OpenBambu mode doesn't use the DLL, so "compatible" is always true
+    if (app_config && !app_config->get_bool("use_bambu_network_plugin"))
+        return true;
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< boost::format(": m_networking_compatible=%1%")%m_networking_compatible;
     return m_networking_compatible;
 }
@@ -3395,7 +3398,13 @@ void GUI_App::copy_network_if_available()
 
 bool GUI_App::on_init_network(bool try_backup)
 {
-    auto should_load_networking_plugin = app_config->get_bool("installed_networking");
+    // xyz fork: OpenBambu — skip proprietary DLL entirely when not opted in
+    bool use_bambu_plugin = app_config->get_bool("use_bambu_network_plugin");
+    if (!use_bambu_plugin) {
+        BOOST_LOG_TRIVIAL(info) << "OpenBambu: using open-source LAN protocol (proprietary DLL disabled)";
+    }
+
+    auto should_load_networking_plugin = use_bambu_plugin && app_config->get_bool("installed_networking");
 
     std::string config_version = app_config->get_network_plugin_version();
 
@@ -3513,6 +3522,20 @@ bool GUI_App::on_init_network(bool try_backup)
         std::string country_code = app_config->get_country_code();
         m_agent->set_country_code(country_code);
         m_agent->start();
+
+        // xyz fork: OpenBambu — set the printer agent and start SSDP discovery
+        // immediately when the DLL isn't loaded. Normally the printer agent is
+        // set later by update_printer_agent() on preset change, but we need
+        // discovery running from startup for the Device tab to find printers.
+        if (!use_bambu_plugin) {
+            auto openbambu_agent = Slic3r::NetworkAgentFactory::create_printer_agent_by_id(
+                "openbambu", m_agent->get_cloud_agent(), data_directory);
+            if (openbambu_agent) {
+                m_agent->set_printer_agent(openbambu_agent);
+                openbambu_agent->start_discovery(true, true);
+                BOOST_LOG_TRIVIAL(info) << "OpenBambu: printer agent set and discovery started";
+            }
+        }
     }
 
     if (!should_load_networking_plugin) {
@@ -3570,7 +3593,12 @@ void GUI_App::switch_printer_agent()
     // Read printer_agent from config, falling back to default
     std::string effective_agent_id = ORCA_PRINTER_AGENT_ID;
     if (preset_bundle->is_bbl_vendor()) {
-        effective_agent_id = BBL_PRINTER_AGENT_ID;
+        // xyz fork: OpenBambu — use open LAN agent for BBL printers unless DLL is opted in
+        if (app_config && !app_config->get_bool("use_bambu_network_plugin")) {
+            effective_agent_id = "openbambu";
+        } else {
+            effective_agent_id = BBL_PRINTER_AGENT_ID;
+        }
     } else {
         const DynamicPrintConfig& config = preset_bundle->printers.get_edited_preset().config;
         if (config.has("printer_agent")) {
@@ -4525,11 +4553,10 @@ void GUI_App::get_login_info()
                 GUI::wxGetApp().run_script(strJS);
             }
         }
-        if(app_config->get_bool("installed_networking")) {
-            mainframe->m_webview->SetLoginPanelVisibility(true);
-        } else {
-            mainframe->m_webview->SetLoginPanelVisibility(false);
-        }
+        // xyz fork: hide login panel in OpenBambu mode (no Bambu account needed)
+        bool show_login = app_config->get_bool("installed_networking")
+                          && app_config->get_bool("use_bambu_network_plugin");
+        mainframe->m_webview->SetLoginPanelVisibility(show_login);
     }
 }
 

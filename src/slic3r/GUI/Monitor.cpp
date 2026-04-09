@@ -435,6 +435,7 @@ void MonitorPanel::update_hms_tag()
 
 bool MonitorPanel::Show(bool show)
 {
+    BOOST_LOG_TRIVIAL(info) << "MonitorPanel::Show(" << show << ") called";
 #ifdef __APPLE__
     wxGetApp().mainframe->SetMinSize(wxGetApp().plater()->GetMinSize());
 #endif

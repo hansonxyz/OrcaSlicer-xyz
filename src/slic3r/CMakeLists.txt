@@ -630,6 +630,17 @@ set(SLIC3R_GUI_SOURCES
     Utils/BambuCrashGuard.hpp
     Utils/BBLNetworkPlugin.cpp
     Utils/BBLNetworkPlugin.hpp
+    Utils/OpenBambu/OpenBambuAgent.cpp
+    Utils/OpenBambu/OpenBambuAgent.hpp
+    Utils/OpenBambu/OpenBambuCommands.hpp
+    Utils/OpenBambu/OpenBambuDiscovery.cpp
+    Utils/OpenBambu/OpenBambuDiscovery.hpp
+    Utils/OpenBambu/OpenBambuFtp.cpp
+    Utils/OpenBambu/OpenBambuFtp.hpp
+    Utils/OpenBambu/OpenBambuMqtt.cpp
+    Utils/OpenBambu/OpenBambuMqtt.hpp
+    Utils/OpenBambu/OpenBambuPrinterAgent.cpp
+    Utils/OpenBambu/OpenBambuPrinterAgent.hpp
     Utils/Obico.cpp
     Utils/Obico.hpp
     Utils/OctoPrint.cpp

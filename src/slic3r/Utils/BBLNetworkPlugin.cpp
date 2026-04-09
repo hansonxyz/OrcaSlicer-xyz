@@ -246,7 +246,7 @@ std::string BBLNetworkPlugin::get_version() const
     if (m_get_version) {
         return m_get_version();
     }
-    BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(", get_version not supported, return 00.00.00.00!");
+    // No warning — this is expected when the DLL isn't loaded (OpenBambu mode)
     return "00.00.00.00";
 }
 

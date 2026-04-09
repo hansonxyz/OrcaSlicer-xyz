@@ -118,12 +118,13 @@ Investigation status (2026-04-07):
 - The DLL is loaded via `LoadLibrary` and called through function pointers (`BBLNetworkPlugin`)
 - The DLL creates its own background threads (MQTT, SSDP) — we don't control them
 
-Investigation strategy:
-1. Disable xyz features one at a time to find the trigger
-2. Compare our `BBLNetworkPlugin`/`NetworkAgent` usage to stock OrcaSlicer
-3. Log all function calls to the Bambu DLL to find correlation with crashes
-4. Binary search: stash changes, test stock, re-apply changes incrementally
-5. If all else fails: replace the DLL with open LAN-only implementation (~2000 lines)
+Resolution: **OpenBambu** — open-source LAN protocol replacement.
+- Source: `src/slic3r/Utils/OpenBambu/` (~1,700 lines, zero new dependencies)
+- Implements SSDP discovery, MQTT over TLS, FTPS upload, camera URL construction
+- Preference: `use_bambu_network_plugin` (default false = OpenBambu active, DLL not loaded)
+- When true, falls back to proprietary DLL (requires restart)
+- See `C:\Users\brian\bin\openbambu\PLAN.md` for full protocol documentation
+- All protocols tested against X1 Carbon on LAN
 
 **Current test files:**
 - `C:\Users\brian\Desktop\Crystal Dragon Statue - Spryo.3mf` — multi-material Spyro statue, good for testing paint tools, boundary painter, flushing volumes, tree supports
@@ -428,6 +429,12 @@ Output binary: `build/src/orca-slicer.exe` (raw build output, missing DLLs)
 - First-time setup (deps + initial slicer build)
 
 Never wipe the build directory just to rebuild after code changes. Ninja's incremental builds are fast and reliable.
+
+**Build discipline (lessons learned):**
+- **Never kill a running build to "check on it" or "restart it."** Builds run at idle priority and take time. Killing mid-build wastes all the work done so far and forces recompilation of partially-built objects. Let the build finish, check the result, then act.
+- **Never say "clean build" when you mean incremental.** `build_incremental.ps1` is ALWAYS the right script for development. It handles CMake reconfiguration (for new files in CMakeLists.txt) and incremental compilation automatically. There is no reason to do a clean/full build during normal development.
+- **When a build is running in the background, wait for the notification.** Do not poll, do not sleep-and-check, do not kill it to restart. Do other useful work or tell the user the build is running. The notification system exists for exactly this purpose.
+- **Adding new source files to CMakeLists.txt is an incremental build operation.** CMake detects the CMakeLists.txt change, reconfigures, and Ninja builds only the new/changed files. This is not a reason for a full rebuild.
 
 ### Build Artifacts Directory
 
