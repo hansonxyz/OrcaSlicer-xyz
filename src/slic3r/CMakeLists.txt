@@ -322,6 +322,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Monitor.cpp
     GUI/Monitor.hpp
     GUI/MonitorPage.cpp
+    GUI/OpenBambuMonitor/OpenBambuStatus.cpp
+    GUI/OpenBambuMonitor/OpenBambuStatus.hpp
     GUI/MonitorPage.hpp
     GUI/Mouse3DController.cpp
     GUI/Mouse3DController.hpp

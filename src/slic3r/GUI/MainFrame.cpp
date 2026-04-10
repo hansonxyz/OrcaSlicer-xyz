@@ -1361,7 +1361,8 @@ void MainFrame::show_device(bool bBBLPrinter) {
             m_tabpanel->RemovePage(idx);
         }
 
-        // Create/insert monitor page
+        // Create/insert monitor page (same panel for both OpenBambu and BBL DLL modes —
+        // targeted edits to MonitorPanel will customize it for OpenBambu)
         if (!m_monitor) {
             m_monitor = new MonitorPanel(m_tabpanel, wxID_ANY, wxDefaultPosition, wxDefaultSize);
             m_monitor->SetBackgroundColour(*wxWHITE);
