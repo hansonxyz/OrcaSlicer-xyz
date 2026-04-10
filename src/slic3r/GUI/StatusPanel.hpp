@@ -618,6 +618,7 @@ class StatusPanel : public StatusBasePanel
 {
 private:
     friend class MonitorPanel;
+    friend class OpenBambuMonitorPanel;
 
 protected:
     std::shared_ptr<SliceInfoPopup> m_slice_info_popup;
@@ -827,6 +828,9 @@ public:
     void set_default();
     void show_status(int status);
     void set_hold_count(int& count);
+
+    // OpenBambu mode: hides axis/extruder/bed movement controls
+    void set_openbambu_mode(bool enabled);
 
     void rescale_camera_icons();
     void on_sys_color_changed();

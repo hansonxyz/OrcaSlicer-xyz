@@ -1304,10 +1304,16 @@ void MainFrame::init_tabpanel() {
 
     create_preset_tabs();
 
-        //BBS add pages
-    m_monitor = new MonitorPanel(m_tabpanel, wxID_ANY, wxDefaultPosition, wxDefaultSize);
-    m_monitor->SetBackgroundColour(*wxWHITE);
-    m_tabpanel->AddPage(m_monitor, _L("Device"), std::string("tab_monitor_active"), std::string("tab_monitor_active"), false);
+        //BBS add pages — use OpenBambuMonitorPanel when BBL DLL is disabled
+    if (!wxGetApp().app_config->get_bool("use_bambu_network_plugin")) {
+        m_openbambu_monitor = new OpenBambuMonitorPanel(m_tabpanel, wxID_ANY, wxDefaultPosition, wxDefaultSize);
+        m_openbambu_monitor->SetBackgroundColour(*wxWHITE);
+        m_tabpanel->AddPage(m_openbambu_monitor, _L("Device"), std::string("tab_monitor_active"), std::string("tab_monitor_active"), false);
+    } else {
+        m_monitor = new MonitorPanel(m_tabpanel, wxID_ANY, wxDefaultPosition, wxDefaultSize);
+        m_monitor->SetBackgroundColour(*wxWHITE);
+        m_tabpanel->AddPage(m_monitor, _L("Device"), std::string("tab_monitor_active"), std::string("tab_monitor_active"), false);
+    }
 
     m_printer_view = new PrinterWebView(m_tabpanel);
     Bind(EVT_LOAD_PRINTER_URL, [this](LoadPrinterViewEvent &evt) {
@@ -1350,32 +1356,59 @@ void MainFrame::init_tabpanel() {
 // SoftFever
 void MainFrame::show_device(bool bBBLPrinter) {
     auto idx = -1;
+    bool use_openbambu = !wxGetApp().app_config->get_bool("use_bambu_network_plugin");
+
     if (bBBLPrinter) {
-        if (m_tabpanel->FindPage(m_monitor) != wxNOT_FOUND) {
-            fit_tab_labels(); // ORCA on printer change - same button layout
-            return;
+        // Check if the correct panel is already showing
+        if (use_openbambu) {
+            if (m_tabpanel->FindPage(m_openbambu_monitor) != wxNOT_FOUND) {
+                fit_tab_labels();
+                return;
+            }
+        } else {
+            if (m_tabpanel->FindPage(m_monitor) != wxNOT_FOUND) {
+                fit_tab_labels();
+                return;
+            }
         }
-        // Remove printer view
+
+        // Remove any existing device panels
         if ((idx = m_tabpanel->FindPage(m_printer_view)) != wxNOT_FOUND) {
             m_printer_view->Show(false);
             m_tabpanel->RemovePage(idx);
         }
-
-        // Create/insert monitor page (same panel for both OpenBambu and BBL DLL modes —
-        // targeted edits to MonitorPanel will customize it for OpenBambu)
-        if (!m_monitor) {
-            m_monitor = new MonitorPanel(m_tabpanel, wxID_ANY, wxDefaultPosition, wxDefaultSize);
-            m_monitor->SetBackgroundColour(*wxWHITE);
+        if ((idx = m_tabpanel->FindPage(m_monitor)) != wxNOT_FOUND) {
+            m_monitor->Show(false);
+            m_tabpanel->RemovePage(idx);
         }
-        m_monitor->Show(false);
-        m_tabpanel->InsertPage(tpMonitor, m_monitor, _L("Device"), std::string("tab_monitor_active"), std::string("tab_monitor_active"));
+        if ((idx = m_tabpanel->FindPage(m_openbambu_monitor)) != wxNOT_FOUND) {
+            m_openbambu_monitor->Show(false);
+            m_tabpanel->RemovePage(idx);
+        }
+
+        if (use_openbambu) {
+            // OpenBambu mode: use our custom Device tab (no Update/HMS, no axis controls)
+            if (!m_openbambu_monitor) {
+                m_openbambu_monitor = new OpenBambuMonitorPanel(m_tabpanel, wxID_ANY, wxDefaultPosition, wxDefaultSize);
+                m_openbambu_monitor->SetBackgroundColour(*wxWHITE);
+            }
+            m_openbambu_monitor->Show(false);
+            m_tabpanel->InsertPage(tpMonitor, m_openbambu_monitor, _L("Device"), std::string("tab_monitor_active"), std::string("tab_monitor_active"));
+        } else {
+            // BBL DLL mode: use stock MonitorPanel
+            if (!m_monitor) {
+                m_monitor = new MonitorPanel(m_tabpanel, wxID_ANY, wxDefaultPosition, wxDefaultSize);
+                m_monitor->SetBackgroundColour(*wxWHITE);
+            }
+            m_monitor->Show(false);
+            m_tabpanel->InsertPage(tpMonitor, m_monitor, _L("Device"), std::string("tab_monitor_active"), std::string("tab_monitor_active"));
+        }
 
         if (wxGetApp().is_enable_multi_machine()) {
             if (!m_multi_machine) {
                 m_multi_machine = new MultiMachinePage(m_tabpanel, wxID_ANY, wxDefaultPosition, wxDefaultSize);
                 m_multi_machine->SetBackgroundColour(*wxWHITE);
             }
-            // TODO: change the bitmap
             m_multi_machine->Show(false);
             m_tabpanel->InsertPage(tpMultiDevice, m_multi_machine, _L("Multi-device"), std::string("tab_multi_active"),
                                    std::string("tab_multi_active"), false);
@@ -1385,8 +1418,6 @@ void MainFrame::show_device(bool bBBLPrinter) {
             m_calibration->SetBackgroundColour(*wxWHITE);
         }
         m_calibration->Show(false);
-        // Calibration is always the last page, so don't use InsertPage here. Otherwise, if multi_machine page is not enabled,
-        // the calibration tab won't be properly added as well, due to the TabPosition::tpCalibration no longer matches the real tab position.
         m_tabpanel->AddPage(m_calibration, _L("Calibration"), std::string("tab_calibration_active"),
                                std::string("tab_calibration_active"), false);
 
@@ -1396,7 +1427,7 @@ void MainFrame::show_device(bool bBBLPrinter) {
 
     } else {
         if (m_tabpanel->FindPage(m_printer_view) != wxNOT_FOUND) {
-            fit_tab_labels(); // ORCA on printer change - same button layout
+            fit_tab_labels();
             return;
         }
         if ((idx = m_tabpanel->FindPage(m_calibration)) != wxNOT_FOUND) {
@@ -1411,12 +1442,15 @@ void MainFrame::show_device(bool bBBLPrinter) {
             m_monitor->Show(false);
             m_tabpanel->RemovePage(idx);
         }
+        if ((idx = m_tabpanel->FindPage(m_openbambu_monitor)) != wxNOT_FOUND) {
+            m_openbambu_monitor->Show(false);
+            m_tabpanel->RemovePage(idx);
+        }
         if (m_printer_view == nullptr) {
             m_printer_view = new PrinterWebView(m_tabpanel);
             Bind(EVT_LOAD_PRINTER_URL, [this](LoadPrinterViewEvent& evt) {
                 wxString url = evt.GetString();
                 wxString key = evt.GetAPIkey();
-                // select_tab(MainFrame::tpMonitor);
                 m_printer_view->load_url(url, key);
             });
         }
@@ -1424,7 +1458,7 @@ void MainFrame::show_device(bool bBBLPrinter) {
         m_tabpanel->InsertPage(tpMonitor, m_printer_view, _L("Device"), std::string("tab_monitor_active"),
                                std::string("tab_monitor_active"));
     }
-    fit_tab_labels(); // ORCA on printer change
+    fit_tab_labels();
 }
 
 void MainFrame::fit_tab_labels()
@@ -2418,6 +2452,8 @@ void MainFrame::on_dpi_changed(const wxRect& suggested_rect)
     m_project->msw_rescale();
     if(m_monitor)
         m_monitor->msw_rescale();
+    if(m_openbambu_monitor)
+        m_openbambu_monitor->msw_rescale();
     if(m_multi_machine)
         m_multi_machine->msw_rescale();
     if(m_calibration)
@@ -2485,6 +2521,8 @@ void MainFrame::on_sys_color_changed()
     wxGetApp().plater()->sys_color_changed();
     if(m_monitor)
         m_monitor->on_sys_color_changed();
+    if(m_openbambu_monitor)
+        m_openbambu_monitor->on_sys_color_changed();
     if(m_calibration)
         m_calibration->on_sys_color_changed();
     // update Tabs

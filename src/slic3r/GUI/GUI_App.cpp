@@ -1876,9 +1876,14 @@ bool GUI_App::hot_reload_network_plugin()
         m_device_manager->add_user_subscribe();
     }
 
-    if (mainframe && mainframe->m_monitor) {
-        mainframe->m_monitor->update_network_version_footer();
-        mainframe->m_monitor->set_default();
+    if (mainframe) {
+        if (mainframe->m_monitor) {
+            mainframe->m_monitor->update_network_version_footer();
+            mainframe->m_monitor->set_default();
+        }
+        if (mainframe->m_openbambu_monitor) {
+            mainframe->m_openbambu_monitor->set_default();
+        }
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": reset monitor panel";
     }
 
@@ -3709,9 +3714,11 @@ void GUI_App::select_machine(const std::string& agent_id)
     }
     existing->local_use_ssl = boost::istarts_with(print_host, "https://");
 
-    // Use MonitorPanel::select_machine() to trigger full selection flow
-    // This reuses existing logic for machine switching (UI updates, callbacks, etc.)
-    if (mainframe && mainframe->m_monitor) {
+    // Use the active monitor panel's select_machine() to trigger full selection flow
+    if (mainframe && mainframe->m_openbambu_monitor) {
+        mainframe->m_openbambu_monitor->select_machine(dev_id);
+        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": triggered select_machine (OpenBambu) for dev_id=" << dev_id;
+    } else if (mainframe && mainframe->m_monitor) {
         mainframe->m_monitor->select_machine(dev_id);
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": triggered select_machine for dev_id=" << dev_id;
     } else {

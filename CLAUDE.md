@@ -126,6 +126,28 @@ Resolution: **OpenBambu** — open-source LAN protocol replacement.
 - See `C:\Users\brian\bin\openbambu\PLAN.md` for full protocol documentation
 - All protocols tested against X1 Carbon on LAN
 
+**OpenBambu Code Structure:**
+- `src/slic3r/Utils/OpenBambu/OpenBambuAgent.hpp/cpp` — Unified API (SSDP + MQTT + FTP + camera URLs)
+- `src/slic3r/Utils/OpenBambu/OpenBambuPrinterAgent.hpp/cpp` — IPrinterAgent implementation for OrcaSlicer integration
+- `src/slic3r/Utils/OpenBambu/OpenBambuDiscovery.hpp/cpp` — SSDP printer discovery
+- `src/slic3r/Utils/OpenBambu/OpenBambuMqtt.hpp/cpp` — Raw MQTT 3.1.1 over TLS
+- `src/slic3r/Utils/OpenBambu/OpenBambuFtp.hpp/cpp` — FTPS upload (implicit TLS, port 990)
+- `src/slic3r/Utils/OpenBambu/OpenBambuCommands.hpp` — JSON command builders (header-only)
+- `src/slic3r/Utils/NetworkAgentFactory.cpp` — Registers OpenBambuPrinterAgent
+
+**OpenBambu Device Tab (alternative Device tab for OpenBambu mode):**
+- `src/slic3r/GUI/OpenBambuMonitor/OpenBambuMonitorPanel.hpp/cpp` — Clone of MonitorPanel for OpenBambu mode. Differences: no Update tab, no HMS tab, StatusPanel in OpenBambu mode (no axis/extruder/bed controls).
+- `src/slic3r/GUI/OpenBambuMonitor/OpenBambuStatus.hpp/cpp` — MQTT data model and parser (TempHistory ring buffer, PrinterStatus struct)
+- `src/slic3r/GUI/OpenBambuMonitor/archive_v1/` — Rejected from-scratch panel (archived for reference, DO NOT use)
+- `MainFrame::m_openbambu_monitor` — Created instead of `m_monitor` when `use_bambu_network_plugin` is false
+- `StatusPanel::set_openbambu_mode(true)` — Hides axis/extruder/bed controls, called by OpenBambuMonitorPanel
+- When adding new `m_monitor->` references elsewhere, always guard with null check and add parallel `m_openbambu_monitor` handling
+
+**OpenBambu Preferences:**
+- Preferences > Online > Connection: dropdown with "OpenBambu (LAN Only)", "Bambu Lab Official (Stealth Mode)", "Bambu Lab Official (Online Mode)"
+- `bambu_connection_mode` config key (default "openbambu"), derives `use_bambu_network_plugin` and `stealth_mode`
+- Changing connection mode requires app restart
+
 **Current test files:**
 - `C:\Users\brian\Desktop\Crystal Dragon Statue - Spryo.3mf` — multi-material Spyro statue, good for testing paint tools, boundary painter, flushing volumes, tree supports
 - `Z:\cabinets\Things\Projects\drg_buff_beer_mugs_coloration_2.3mf` (plate 2) — multi-material model with spatially isolated regions

@@ -178,22 +178,28 @@ int OpenBambuPrinterAgent::start_local_print(PrintParams params, OnUpdateStatusF
     if (sep != std::string::npos) remote_name = remote_name.substr(sep + 1);
 
     // Step 1: Upload file via FTPS
-    if (update_fn) update_fn(0, 0, "Uploading...");
+    // update_fn(stage, code, msg): stage = SendingPrintJobStage enum, code = progress 0-100 or error
+    BOOST_LOG_TRIVIAL(info) << "OpenBambuPrinterAgent: start_local_print starting"
+        << " ip=" << ip << " file=" << params.filename << " remote=" << remote_name;
+    if (update_fn) update_fn(SendingPrintJobStage::PrintingStageCreate, 0, "");
 
     bool uploaded = OpenBambu::FtpUpload::upload(ip, code, params.filename, remote_name,
         [&update_fn, &cancel_fn](size_t uploaded, size_t total) -> bool {
             if (cancel_fn && cancel_fn()) return false;
             if (update_fn && total > 0) {
                 int pct = (int)(100.0 * uploaded / total);
-                update_fn(pct, 0, "Uploading...");
+                update_fn(SendingPrintJobStage::PrintingStageUpload, pct, std::to_string(pct) + "%");
             }
             return true;
         });
 
     if (!uploaded) {
-        if (update_fn) update_fn(-1, 0, "Upload failed");
-        return BAMBU_NETWORK_ERR_SEND_MSG_FAILED;
+        BOOST_LOG_TRIVIAL(error) << "OpenBambuPrinterAgent: FTPS upload failed for " << remote_name;
+        if (update_fn) update_fn(SendingPrintJobStage::PrintingStageERROR, BAMBU_NETWORK_ERR_PRINT_LP_UPLOAD_FTP_FAILED, "Upload failed");
+        return BAMBU_NETWORK_ERR_PRINT_LP_UPLOAD_FTP_FAILED;
     }
+
+    BOOST_LOG_TRIVIAL(info) << "OpenBambuPrinterAgent: upload complete, sending print command";
 
     // Step 2: Parse AMS mapping from PrintParams
     std::vector<int> ams_mapping = parse_int_array(params.ams_mapping);
@@ -209,6 +215,8 @@ int OpenBambuPrinterAgent::start_local_print(PrintParams params, OnUpdateStatusF
         << " layer_inspect=" << params.task_layer_inspect;
 
     // Step 3: Send project_file command with all print options
+    if (update_fn) update_fn(SendingPrintJobStage::PrintingStageSending, 0, "");
+
     std::string cmd = OpenBambu::Commands::project_file(
         remote_name, params.task_name.empty() ? remote_name : params.task_name,
         params.plate_index, params.task_use_ams, ams_mapping,
@@ -216,14 +224,14 @@ int OpenBambuPrinterAgent::start_local_print(PrintParams params, OnUpdateStatusF
         params.task_vibration_cali, params.task_record_timelapse,
         params.task_layer_inspect);
 
-    if (update_fn) update_fn(100, 0, "Starting print...");
-
     if (!m_agent.send_message_to_printer(m_connected_dev_id, cmd)) {
-        if (update_fn) update_fn(-1, 0, "Failed to send print command");
+        BOOST_LOG_TRIVIAL(error) << "OpenBambuPrinterAgent: failed to send project_file MQTT command";
+        if (update_fn) update_fn(SendingPrintJobStage::PrintingStageERROR, BAMBU_NETWORK_ERR_SEND_MSG_FAILED, "Failed to send print command");
         return BAMBU_NETWORK_ERR_SEND_MSG_FAILED;
     }
 
-    if (update_fn) update_fn(100, 100, "Print started");
+    BOOST_LOG_TRIVIAL(info) << "OpenBambuPrinterAgent: print command sent successfully";
+    if (update_fn) update_fn(SendingPrintJobStage::PrintingStageFinished, 0, "3");
     return BAMBU_NETWORK_SUCCESS;
 }
 

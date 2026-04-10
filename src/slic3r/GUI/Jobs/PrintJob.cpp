@@ -640,10 +640,13 @@ void PrintJob::process(Ctl &ctl)
         }
 
         if (result != BAMBU_NETWORK_ERR_CANCELED) {
-            ctl.show_error_info(msg_text, 0, "", "");
+            ctl.show_error_info(msg_text, result, "", "");
         }
 
-        BOOST_LOG_TRIVIAL(error) << "print_job: failed, result = " << result;
+        BOOST_LOG_TRIVIAL(error) << "print_job: failed, result = " << result
+            << " connection_type=" << this->connection_type
+            << " has_sdcard=" << this->has_sdcard
+            << " cloud_print_only=" << this->cloud_print_only;
     } else {
         // wait for printer mqtt ready the same job id
 

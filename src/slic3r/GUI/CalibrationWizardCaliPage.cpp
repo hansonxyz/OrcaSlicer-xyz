@@ -193,9 +193,15 @@ void CalibrationCaliPage::update(MachineObject* obj)
         }
 
         if (obj->print_error > 0) {
-            StatusPanel* status_panel = Slic3r::GUI::wxGetApp().mainframe->m_monitor->get_status_panel();
-            status_panel->obj = obj;
-            status_panel->update_error_message();
+            StatusPanel* status_panel = nullptr;
+            if (Slic3r::GUI::wxGetApp().mainframe->m_openbambu_monitor)
+                status_panel = Slic3r::GUI::wxGetApp().mainframe->m_openbambu_monitor->get_status_panel();
+            else if (Slic3r::GUI::wxGetApp().mainframe->m_monitor)
+                status_panel = Slic3r::GUI::wxGetApp().mainframe->m_monitor->get_status_panel();
+            if (status_panel) {
+                status_panel->obj = obj;
+                status_panel->update_error_message();
+            }
         }
 
         if (obj->print_status == "RUNNING")

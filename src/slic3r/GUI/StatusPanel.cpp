@@ -2187,8 +2187,8 @@ void StatusBasePanel::expand_filament_loading(wxMouseEvent& e)
     m_filament_step->Show(tag_show);
     Layout();
     Fit();
-    wxGetApp().mainframe->m_monitor->get_status_panel()->Layout();
-    wxGetApp().mainframe->m_monitor->Layout();
+    Layout();
+    if (auto *parent = GetParent()) parent->Layout();
 }
 
 void StatusBasePanel::show_ams_group(bool show)
@@ -2199,7 +2199,7 @@ void StatusBasePanel::show_ams_group(bool show)
         m_ams_control->Fit();
         Layout();
         Fit();
-        wxGetApp().mainframe->m_monitor->Layout();
+        if (auto *parent = GetParent()) parent->Layout();
     }
 
     if (m_ams_control_box->IsShown() != show) {
@@ -2208,7 +2208,7 @@ void StatusBasePanel::show_ams_group(bool show)
         m_ams_control->Fit();
         Layout();
         Fit();
-        wxGetApp().mainframe->m_monitor->Layout();
+        if (auto *parent = GetParent()) parent->Layout();
     }
 }
 
@@ -2232,8 +2232,8 @@ void StatusBasePanel::show_filament_load_group(bool show)
         Layout();
         Fit();
 
-        wxGetApp().mainframe->m_monitor->get_status_panel()->Layout();
-        wxGetApp().mainframe->m_monitor->Layout();
+        Layout();
+        if (auto *parent = GetParent()) parent->Layout();
     }
 }
 
@@ -6040,6 +6040,33 @@ void ScoreDialog::set_cloud_bitmap(std::vector<std::string> cloud_bitmaps)
     }
     Layout();
     Fit();
+}
+
+void StatusPanel::set_openbambu_mode(bool enabled)
+{
+    if (!enabled) return;
+
+    // Hide axis (XY) control, bed (Z) controls, extruder controls, and separators.
+    // Temperature controls and AMS/filament controls remain visible.
+    if (m_bpButton_xy)          m_bpButton_xy->Hide();
+    if (m_bpButton_z_10)        m_bpButton_z_10->Hide();
+    if (m_bpButton_z_1)         m_bpButton_z_1->Hide();
+    if (m_bpButton_z_down_1)    m_bpButton_z_down_1->Hide();
+    if (m_bpButton_z_down_10)   m_bpButton_z_down_10->Hide();
+    if (m_staticText_z_tip)     m_staticText_z_tip->Hide();
+    if (m_bpButton_e_10)        m_bpButton_e_10->Hide();
+    if (m_bpButton_e_down_10)   m_bpButton_e_down_10->Hide();
+    if (m_extruder_book)        m_extruder_book->Hide();
+    if (m_extruder_label)       m_extruder_label->Hide();
+    if (m_nozzle_btn_panel)     m_nozzle_btn_panel->Hide();
+    if (m_extruder_switching_status) m_extruder_switching_status->Hide();
+    if (m_temp_temp_line)       m_temp_temp_line->Hide();
+    if (m_temp_extruder_line)   m_temp_extruder_line->Hide();
+
+    // Re-layout the parent to reclaim the space
+    if (m_machine_ctrl_panel) {
+        m_machine_ctrl_panel->Layout();
+    }
 }
 
 } // namespace GUI

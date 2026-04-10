@@ -19,6 +19,7 @@
 //BBS: GUI refactor
 #include "ParamsPanel.hpp"
 #include "Monitor.hpp"
+#include "OpenBambuMonitor/OpenBambuMonitorPanel.hpp"
 #include "Auxiliary.hpp"
 #include "Project.hpp"
 #include "CalibrationPanel.hpp"
@@ -376,6 +377,7 @@ public:
     Plater*               m_plater { nullptr };
     //BBS: GUI refactor
     MonitorPanel*         m_monitor{ nullptr };
+    OpenBambuMonitorPanel* m_openbambu_monitor{ nullptr };
 
     //AuxiliaryPanel*       m_auxiliary{ nullptr };
     MultiMachinePage*     m_multi_machine{ nullptr };

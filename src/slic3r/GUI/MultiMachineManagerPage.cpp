@@ -21,9 +21,13 @@ MultiMachineItem::MultiMachineItem(wxWindow* parent, MachineObject* obj)
     Bind(wxEVT_MOTION, &MultiMachineItem::OnMove, this);
     Bind(EVT_MULTI_DEVICE_VIEW, [this, obj](auto& e) {
         wxGetApp().mainframe->jump_to_monitor(obj->get_dev_id());
-        if (wxGetApp().mainframe->m_monitor->get_status_panel()->get_media_play_ctrl()) {
-            wxGetApp().mainframe->m_monitor->get_status_panel()->get_media_play_ctrl()->jump_to_play();
-        }
+        StatusPanel* sp = nullptr;
+        if (wxGetApp().mainframe->m_openbambu_monitor)
+            sp = wxGetApp().mainframe->m_openbambu_monitor->get_status_panel();
+        else if (wxGetApp().mainframe->m_monitor)
+            sp = wxGetApp().mainframe->m_monitor->get_status_panel();
+        if (sp && sp->get_media_play_ctrl())
+            sp->get_media_play_ctrl()->jump_to_play();
     });
     wxGetApp().UpdateDarkUIWin(this);
 }

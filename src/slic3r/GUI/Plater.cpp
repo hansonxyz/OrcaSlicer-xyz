@@ -15984,17 +15984,10 @@ void Plater::print_job_finished(wxCommandEvent &evt)
     dev->set_selected_machine(evt.GetString().ToStdString());
     p->main_frame->request_select_tab(MainFrame::TabPosition::tpMonitor);
     //jump to monitor and select device status panel
-    MonitorPanel* curr_monitor = p->main_frame->m_monitor;
-    if (curr_monitor) {
-       curr_monitor->get_tabpanel()->ChangeSelection(MonitorPanel::PrinterTab::PT_STATUS);
-       // xyz fork: camera auto-start DISABLED for crash investigation (2026-04-07)
-#if 0
-       if (wxGetApp().app_config->get_bool("auto_start_camera")) {
-           try {
-               curr_monitor->jump_to_LiveView();
-           } catch (...) {}
-       }
-#endif
+    if (p->main_frame->m_openbambu_monitor) {
+        p->main_frame->m_openbambu_monitor->get_tabpanel()->ChangeSelection(OpenBambuMonitorPanel::PrinterTab::PT_STATUS);
+    } else if (p->main_frame->m_monitor) {
+        p->main_frame->m_monitor->get_tabpanel()->ChangeSelection(MonitorPanel::PrinterTab::PT_STATUS);
     }
 }
 
@@ -16868,7 +16861,9 @@ void Plater::pop_warning_and_go_to_device_page(wxString printer_name, PrinterWar
 {
     printer_name.Replace("Bambu Lab", "", false);
     wxString content;
-    bool device_page = (wxGetApp().mainframe == nullptr) && (wxGetApp().mainframe->m_monitor->IsShown());
+    bool device_page = (wxGetApp().mainframe != nullptr) &&
+        ((wxGetApp().mainframe->m_monitor && wxGetApp().mainframe->m_monitor->IsShown()) ||
+         (wxGetApp().mainframe->m_openbambu_monitor && wxGetApp().mainframe->m_openbambu_monitor->IsShown()));
     if (type == PrinterWarningType::NOT_CONNECTED) {
         if (device_page) {
             content = wxString::Format(_L("Printer not connected. Please go to the device page to connect %s before syncing."),

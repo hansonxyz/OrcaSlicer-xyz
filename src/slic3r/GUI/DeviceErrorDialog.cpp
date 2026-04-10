@@ -381,7 +381,8 @@ void DeviceErrorDialog::on_button_click(ActionButton btn_id)
         break;
     }
     case DeviceErrorDialog::CHECK_ASSISTANT: {
-        wxGetApp().mainframe->m_monitor->jump_to_HMS(); // go to assistant page
+        if (wxGetApp().mainframe->m_monitor)
+            wxGetApp().mainframe->m_monitor->jump_to_HMS(); // go to assistant page (stock mode only)
         break;
     }
     case DeviceErrorDialog::FILAMENT_EXTRUDED: {
@@ -411,7 +412,10 @@ void DeviceErrorDialog::on_button_click(ActionButton btn_id)
     }
     case DeviceErrorDialog::JUMP_TO_LIVEVIEW: {
         Slic3r::GUI::wxGetApp().mainframe->jump_to_monitor();
-        Slic3r::GUI::wxGetApp().mainframe->m_monitor->jump_to_LiveView();
+        if (Slic3r::GUI::wxGetApp().mainframe->m_openbambu_monitor)
+            Slic3r::GUI::wxGetApp().mainframe->m_openbambu_monitor->jump_to_LiveView();
+        else if (Slic3r::GUI::wxGetApp().mainframe->m_monitor)
+            Slic3r::GUI::wxGetApp().mainframe->m_monitor->jump_to_LiveView();
         break;
     }
     case DeviceErrorDialog::NO_REMINDER_NEXT_TIME: {
