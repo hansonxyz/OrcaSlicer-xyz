@@ -3716,6 +3716,9 @@ void StatusPanel::update_subtask(MachineObject *obj)
 
             if (obj->is_printing_finished()) {
                 obj->update_model_task();
+                // Show completed state instead of "in progress" appearance
+                m_project_task_panel->update_stage_value_with_machine(_L("Completed"), 100, obj);
+                m_project_task_panel->update_left_time("00:00");
                 m_project_task_panel->enable_abort_button(false);
                 m_project_task_panel->enable_partskip_button(nullptr, false);
                 m_project_task_panel->enable_pause_resume_button(false, "resume_disable");

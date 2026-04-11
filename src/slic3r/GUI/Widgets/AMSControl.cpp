@@ -732,9 +732,12 @@ void AMSControl::CreateAmsSingleNozzle(const std::string &series_name, const std
         return;
     }
 
-    single_info.push_back(m_ext_info[0]);
-    m_item_ids[MAIN_EXTRUDER_ID].push_back(single_info[0].ams_id);
-    AddAms(single_info, series_name, printer_type, AMSPanelPos::RIGHT_PANEL);
+    // Only add external spool to display when no AMS units are present
+    if (m_ams_info.empty()) {
+        single_info.push_back(m_ext_info[0]);
+        m_item_ids[MAIN_EXTRUDER_ID].push_back(single_info[0].ams_id);
+        AddAms(single_info, series_name, printer_type, AMSPanelPos::RIGHT_PANEL);
+    }
     auto left_init_mode = findFirstMode(AMSPanelPos::LEFT_PANEL);
     auto right_init_mode = findFirstMode(AMSPanelPos::RIGHT_PANEL);
 
@@ -742,9 +745,8 @@ void AMSControl::CreateAmsSingleNozzle(const std::string &series_name, const std
     m_panel_prv_left->Hide();
     if (m_ams_info.size() > 0){
         m_simplebook_ams_left->Show();
-        m_simplebook_ams_right->Show();
+        m_simplebook_ams_right->Hide(); // Hide external spool when AMS is present
         m_simplebook_ams_left->SetSelection(0);
-        m_simplebook_ams_right->SetSelection(0);
 
         if (m_ams_info.size() > 1){
             m_sizer_prv_right->Layout();
