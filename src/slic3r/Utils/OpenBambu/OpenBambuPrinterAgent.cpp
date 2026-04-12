@@ -172,10 +172,32 @@ int OpenBambuPrinterAgent::start_local_print(PrintParams params, OnUpdateStatusF
         return -1;
     }
 
-    // Determine remote filename
-    std::string remote_name = params.ftp_file.empty() ? params.filename : params.ftp_file;
-    auto sep = remote_name.find_last_of("/\\");
-    if (sep != std::string::npos) remote_name = remote_name.substr(sep + 1);
+    // Determine remote filename: prefer project_name (clean model name from UI),
+    // fall back to ftp_file, then filename basename. Sanitize for FAT32/SD card.
+    std::string remote_name;
+    if (!params.project_name.empty()) {
+        remote_name = params.project_name;
+        // Sanitize: remove characters unsafe for FAT32 filenames
+        const std::string unsafe = "<>:\"/\\|?*";
+        for (char &c : remote_name) {
+            if (unsafe.find(c) != std::string::npos || c < 32) c = '_';
+        }
+        // Strip leading dots (hidden files on printer/Linux)
+        size_t start = remote_name.find_first_not_of('.');
+        if (start == std::string::npos) remote_name = "print";
+        else if (start > 0) remote_name = remote_name.substr(start);
+        // Ensure .3mf extension
+        if (remote_name.size() < 4 || remote_name.substr(remote_name.size() - 4) != ".3mf")
+            remote_name += ".3mf";
+    } else if (!params.ftp_file.empty()) {
+        remote_name = params.ftp_file;
+        auto sep = remote_name.find_last_of("/\\");
+        if (sep != std::string::npos) remote_name = remote_name.substr(sep + 1);
+    } else {
+        remote_name = params.filename;
+        auto sep = remote_name.find_last_of("/\\");
+        if (sep != std::string::npos) remote_name = remote_name.substr(sep + 1);
+    }
 
     // Step 1: Upload file via FTPS
     // update_fn(stage, code, msg): stage = SendingPrintJobStage enum, code = progress 0-100 or error
@@ -224,8 +246,9 @@ int OpenBambuPrinterAgent::start_local_print(PrintParams params, OnUpdateStatusF
         params.task_vibration_cali, params.task_record_timelapse,
         params.task_layer_inspect);
 
-    if (!m_agent.send_message_to_printer(m_connected_dev_id, cmd)) {
-        BOOST_LOG_TRIVIAL(error) << "OpenBambuPrinterAgent: failed to send project_file MQTT command";
+    int send_rc = m_agent.send_message_to_printer(m_connected_dev_id, cmd);
+    if (send_rc != BAMBU_NETWORK_SUCCESS) {
+        BOOST_LOG_TRIVIAL(error) << "OpenBambuPrinterAgent: failed to send project_file MQTT command, rc=" << send_rc;
         if (update_fn) update_fn(SendingPrintJobStage::PrintingStageERROR, BAMBU_NETWORK_ERR_SEND_MSG_FAILED, "Failed to send print command");
         return BAMBU_NETWORK_ERR_SEND_MSG_FAILED;
     }

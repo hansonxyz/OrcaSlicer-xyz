@@ -2186,7 +2186,7 @@ void StatusBasePanel::expand_filament_loading(wxMouseEvent& e)
     ///m_button_retry->Show(tag_show);
     m_filament_step->Show(tag_show);
     Layout();
-    Fit();
+    if (m_openbambu_mode) { FitInside(); } else { Fit(); }
     Layout();
     if (auto *parent = GetParent()) parent->Layout();
 }
@@ -2198,7 +2198,14 @@ void StatusBasePanel::show_ams_group(bool show)
         m_ams_control->Layout();
         m_ams_control->Fit();
         Layout();
-        Fit();
+        if (m_openbambu_mode) {
+            // In OpenBambu mode, Fit() would shrink the panel (hidden controls reduce
+            // min size). Instead, just do FitInside() to update scroll extents without
+            // changing the panel's actual size.
+            FitInside();
+        } else {
+            Fit();
+        }
         if (auto *parent = GetParent()) parent->Layout();
     }
 
@@ -2207,7 +2214,11 @@ void StatusBasePanel::show_ams_group(bool show)
         m_ams_control->Layout();
         m_ams_control->Fit();
         Layout();
-        Fit();
+        if (m_openbambu_mode) {
+            FitInside();
+        } else {
+            Fit();
+        }
         if (auto *parent = GetParent()) parent->Layout();
     }
 }
@@ -2230,7 +2241,7 @@ void StatusBasePanel::show_filament_load_group(bool show)
         m_filament_step->SetupSteps(cur_ext ? cur_ext->HasFilamentInExt() : false);
 
         Layout();
-        Fit();
+        if (m_openbambu_mode) { FitInside(); } else { Fit(); }
 
         Layout();
         if (auto *parent = GetParent()) parent->Layout();
@@ -6047,6 +6058,7 @@ void ScoreDialog::set_cloud_bitmap(std::vector<std::string> cloud_bitmaps)
 
 void StatusPanel::set_openbambu_mode(bool enabled)
 {
+    m_openbambu_mode = enabled;
     if (!enabled) return;
 
     // Hide axis (XY) control, bed (Z) controls, extruder controls, and separators.

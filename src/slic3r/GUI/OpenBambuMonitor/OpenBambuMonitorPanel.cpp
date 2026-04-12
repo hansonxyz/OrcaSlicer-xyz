@@ -59,7 +59,7 @@ OpenBambuMonitorPanel::OpenBambuMonitorPanel(wxWindow* parent, wxWindowID id, co
 
     m_main_sizer = new wxBoxSizer(wxHORIZONTAL);
     m_main_sizer->Add(m_tabpanel, 1, wxEXPAND | wxLEFT, 0);
-    SetSizerAndFit(m_main_sizer);
+    SetSizer(m_main_sizer);
 
     init_timer();
 
@@ -236,6 +236,7 @@ void OpenBambuMonitorPanel::on_printer_clicked(wxMouseEvent &event)
 void OpenBambuMonitorPanel::on_size(wxSizeEvent &event)
 {
     Layout();
+    event.Skip();
 }
 
 void OpenBambuMonitorPanel::update_all()
@@ -309,6 +310,17 @@ bool OpenBambuMonitorPanel::Show(bool show)
                 obj->reset_update_time();
             }
         }
+
+        // Deferred layout kick — initial show often has stale sizes from
+        // construction. CallAfter runs after the current event loop iteration,
+        // by which time the page has its real size from the Tabbook.
+        CallAfter([this]() {
+            if (auto *parent = GetParent()) {
+                SetSize(parent->GetClientSize());
+            }
+            Layout();
+            Refresh();
+        });
     } else {
         stop_update();
         m_refresh_timer->Stop();

@@ -52,6 +52,11 @@ if ((Test-Path $vsPath) -and -not $env:VSINSTALLDIR) {
 $env:PATH = "C:\ProgramData\chocolatey\bin;" + $env:PATH
 $depsDir = "$WP\deps\build"
 
+# Re-run cmake configure to pick up current git commit hash for version string.
+# Ninja's configure step is fast (~2s) and ensures the build ID stays current.
+Write-Host "=== Updating build ID ==="
+Invoke-IdlePriority -Exe "cmake" -ArgString "-S `"$WP`" -B `"$buildDir`" -G Ninja -DCMAKE_BUILD_TYPE=Release -DORCA_TOOLS=ON -DDEP_BUILD_DIR=`"$depsDir`"" -WorkDir $buildDir
+
 Write-Host "=== Building slicer (incremental) ==="
 Invoke-IdlePriority -Exe "cmake" -ArgString '--build . --config Release' -WorkDir $buildDir
 

@@ -2321,22 +2321,36 @@ void AMSRoadDownPart::render(wxDC& dc)
 
 void AMSRoadDownPart::doRender(wxDC& dc)
 {
+    if (m_grid_mode) { doRenderGrid(dc); return; }
+
     wxSize size = GetSize();
     wxPoint left_nozzle_pos = wxPoint(std::ceil((float)size.x / 2 - FromDIP(8)), FromDIP(258));
     wxPoint right_nozzle_pos = wxPoint(std::ceil((float)size.x / 2 + FromDIP(6)), FromDIP(258));
-    /*if (m_road_color.Alpha() == 0) { dc.SetPen(wxPen(*wxWHITE, m_passroad_width, wxPENSTYLE_SOLID)); }
-    else { dc.SetPen(wxPen(m_road_color, m_passroad_width, wxPENSTYLE_SOLID)); }*/
+
+    // When only one side has content (the other is NONE), the AMS card is centered
+    // above this widget — all roads should be a straight vertical line through center.
+    bool single_side_centered = (m_left_rode_mode != AMSRoadShowMode::AMS_ROAD_MODE_NONE)
+                             != (m_right_rode_mode != AMSRoadShowMode::AMS_ROAD_MODE_NONE);
+
+    // === Section 1: Gray baseline road ===
     dc.SetPen(wxPen(AMS_CONTROL_GRAY500, 2, wxPENSTYLE_SOLID));
     auto xpos = left_nozzle_pos.x;
-    if (m_left_rode_mode == AMSRoadShowMode::AMS_ROAD_MODE_NONE || m_right_rode_mode == AMSRoadShowMode::AMS_ROAD_MODE_NONE){
-        auto length = 50;
-        if (m_left_rode_mode == AMSRoadShowMode::AMS_ROAD_MODE_AMS_LITE || m_right_rode_mode == AMSRoadShowMode::AMS_ROAD_MODE_AMS_LITE)
-            length = -13;
-        dc.DrawLine(left_nozzle_pos.x - FromDIP(length), (size.y / 2), (left_nozzle_pos.x), (size.y / 2));
-        dc.DrawLine(left_nozzle_pos.x - FromDIP(length), (0), left_nozzle_pos.x - FromDIP(length), (size.y / 2));
-        dc.DrawLine(left_nozzle_pos.x, size.y / 2, left_nozzle_pos.x, size.y);
+
+    if (single_side_centered) {
+        // Single AMS centered — card exit may not be directly above extruder.
+        // Draw: vertical down from card exit, horizontal to extruder X, vertical down.
+        int card_x = (m_card_exit_x >= 0) ? m_card_exit_x : left_nozzle_pos.x;
+        int ext_x = left_nozzle_pos.x;
+        dc.DrawLine(card_x, 0, card_x, size.y / 2);           // vertical from card
+        dc.DrawLine(card_x, size.y / 2, ext_x, size.y / 2);   // horizontal join
+        dc.DrawLine(ext_x, size.y / 2, ext_x, size.y);         // vertical to extruder
+    }
+    else if (m_left_rode_mode == AMSRoadShowMode::AMS_ROAD_MODE_NONE && m_right_rode_mode == AMSRoadShowMode::AMS_ROAD_MODE_NONE){
+        // Both sides empty — straight vertical line
+        dc.DrawLine(left_nozzle_pos.x, 0, left_nozzle_pos.x, size.y);
     }
     else {
+        // Both sides have content — draw left and right branch roads
         switch (m_left_rode_mode)
         {
         case AMSRoadShowMode::AMS_ROAD_MODE_FOUR:
@@ -2391,10 +2405,9 @@ void AMSRoadDownPart::doRender(wxDC& dc)
         }
     }
 
+    // === Section 2: Gray nozzle connector (vertical line down to extruder) ===
     if (m_right_rode_mode != AMSRoadShowMode::AMS_ROAD_MODE_AMS_LITE){
         if (m_nozzle_num == 2) {
-            /*dc.DrawLine(FromDIP(left_nozzle_pos.x), FromDIP(size.y / 2), FromDIP(left_nozzle_pos.x), FromDIP(size.y));
-            dc.DrawLine(FromDIP(right_nozzle_pos.x), FromDIP(size.y / 2), FromDIP(right_nozzle_pos.x), FromDIP(size.y));*/
             dc.DrawLine((left_nozzle_pos.x), (size.y / 2), (left_nozzle_pos.x), (size.y));
             dc.DrawLine((right_nozzle_pos.x), (size.y / 2), (right_nozzle_pos.x), (size.y));
         }
@@ -2406,25 +2419,19 @@ void AMSRoadDownPart::doRender(wxDC& dc)
         }
     }
 
-
-    /*if (m_nozzle_mode == AMSRoadDownPartMode::AMS_ROAD_MODE_SINGLE)
-    {
-        dc.DrawLine(left_nozzle_pos.x, left_nozzle_pos.y, FromDIP(left_nozzle_pos.x + 30), left_nozzle_pos.y);
-    }*/
-    //dc.SetBrush(wxBrush(*wxBLUE));
-
+    // === Section 3: Colored pass road (thick filament line when loaded) ===
     if (m_pass_road_right_step == AMSPassRoadSTEP::AMS_ROAD_STEP_2 || m_pass_road_right_step == AMSPassRoadSTEP::AMS_ROAD_STEP_3) {
         dc.SetPen(wxPen(_get_diff_clr(this, m_road_color[0]), 4, wxPENSTYLE_SOLID));
         if (m_right_road_length > 0) {
-            if (m_right_rode_mode == AMSRoadShowMode::AMS_ROAD_MODE_AMS_LITE){
-                /* dc.SetPen(wxPen(*wxRED));
-                 dc.DrawLine(right_nozzle_pos.x, 0, right_nozzle_pos.x + , size.y / 2);
-                 xpos = left_nozzle_pos.x;
-                 if (m_nozzle_num >= 2) xpos = right_nozzle_pos.x;
-                 dc.SetPen(wxPen(*wxGREEN));
-                 dc.DrawLine(xpos, size.y / 2, right_nozzle_pos.x, size.y / 2);
-                 dc.SetPen(wxPen(*wxYELLOW));
-                 dc.DrawLine(xpos, size.y / 2, xpos, size.y);*/
+            if (single_side_centered) {
+                // Single AMS centered — colored road from card exit to extruder
+                int card_x = (m_card_exit_x >= 0) ? m_card_exit_x : left_nozzle_pos.x;
+                int ext_x = left_nozzle_pos.x;
+                dc.DrawLine(card_x, 0, card_x, size.y / 2);
+                dc.DrawLine(card_x, size.y / 2, ext_x, size.y / 2);
+                dc.DrawLine(ext_x, size.y / 2, ext_x, size.y);
+            }
+            else if (m_right_rode_mode == AMSRoadShowMode::AMS_ROAD_MODE_AMS_LITE){
                 int x   = left_nozzle_pos.x;
                 int len = m_right_road_length;
                 if (m_nozzle_num == 2) {
@@ -2452,7 +2459,15 @@ void AMSRoadDownPart::doRender(wxDC& dc)
     if (m_pass_road_left_step == AMSPassRoadSTEP::AMS_ROAD_STEP_2 || m_pass_road_left_step == AMSPassRoadSTEP::AMS_ROAD_STEP_3) {
         dc.SetPen(wxPen(_get_diff_clr(this, m_road_color[1]), 4, wxPENSTYLE_SOLID));
         if (m_left_road_length > 0) {
-            if (m_left_rode_mode == AMSRoadShowMode::AMS_ROAD_MODE_AMS_LITE){
+            if (single_side_centered) {
+                // Single AMS centered — colored road from card exit to extruder
+                int card_x = (m_card_exit_x >= 0) ? m_card_exit_x : left_nozzle_pos.x;
+                int ext_x = left_nozzle_pos.x;
+                dc.DrawLine(card_x, 0, card_x, size.y / 2);
+                dc.DrawLine(card_x, size.y / 2, ext_x, size.y / 2);
+                dc.DrawLine(ext_x, size.y / 2, ext_x, size.y);
+            }
+            else if (m_left_rode_mode == AMSRoadShowMode::AMS_ROAD_MODE_AMS_LITE){
                 dc.DrawLine(left_nozzle_pos.x, 0, left_nozzle_pos.x, size.y);
             }
             else{
@@ -2492,6 +2507,74 @@ void AMSRoadDownPart::UpdatePassRoad(AMSPanelPos pos, int len, AMSPassRoadSTEP s
         }
     }
     Refresh();
+}
+
+void AMSRoadDownPart::SetGridMode(bool grid, int merge_x)
+{
+    m_grid_mode = grid;
+    m_grid_merge_x = merge_x;
+    Refresh();
+}
+
+void AMSRoadDownPart::SetGridExits(const std::vector<GridCardExit>& exits)
+{
+    m_grid_exits = exits;
+    Refresh();
+}
+
+void AMSRoadDownPart::SetGridActiveCard(const std::string& ams_id, wxColour color)
+{
+    m_grid_active_ams_id = ams_id;
+    m_grid_active_color = color;
+    Refresh();
+}
+
+void AMSRoadDownPart::ClearGridActiveCard()
+{
+    m_grid_active_ams_id.clear();
+    Refresh();
+}
+
+void AMSRoadDownPart::doRenderGrid(wxDC& dc)
+{
+    wxSize size = GetSize();
+    int ext_x = std::ceil((float)size.x / 2 - FromDIP(8)); // extruder X (same as left_nozzle_pos.x)
+    int merge_x = (m_grid_merge_x >= 0) ? m_grid_merge_x : ext_x;
+    int y_bend = size.y / 3;      // where card lines turn horizontal
+    int y_merge = size.y * 2 / 3; // where merge column turns toward extruder
+
+    // Gray baseline (2px) — draw all card exit roads
+    dc.SetPen(wxPen(AMS_CONTROL_GRAY500, 2, wxPENSTYLE_SOLID));
+
+    for (auto &exit : m_grid_exits) {
+        // Vertical from card bottom down to bend point
+        dc.DrawLine(exit.x, 0, exit.x, y_bend);
+        // Horizontal from card exit to merge column
+        dc.DrawLine(exit.x, y_bend, merge_x, y_bend);
+    }
+
+    // Vertical merge column
+    dc.DrawLine(merge_x, y_bend, merge_x, y_merge);
+    // Horizontal from merge to extruder X
+    dc.DrawLine(merge_x, y_merge, ext_x, y_merge);
+    // Vertical from extruder X down to bottom
+    dc.DrawLine(ext_x, y_merge, ext_x, size.y);
+
+    // Colored active road (4px) — overdraw the active card's path
+    if (!m_grid_active_ams_id.empty()) {
+        dc.SetPen(wxPen(m_grid_active_color, 4, wxPENSTYLE_SOLID));
+
+        for (auto &exit : m_grid_exits) {
+            if (exit.ams_id == m_grid_active_ams_id) {
+                dc.DrawLine(exit.x, 0, exit.x, y_bend);
+                dc.DrawLine(exit.x, y_bend, merge_x, y_bend);
+                break;
+            }
+        }
+        dc.DrawLine(merge_x, y_bend, merge_x, y_merge);
+        dc.DrawLine(merge_x, y_merge, ext_x, y_merge);
+        dc.DrawLine(ext_x, y_merge, ext_x, size.y);
+    }
 }
 
 void AMSRoadDownPart::msw_rescale() {

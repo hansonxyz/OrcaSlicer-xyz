@@ -40,7 +40,7 @@ using namespace nlohmann;
 namespace Slic3r {
 
 // xyz fork: check our fork's releases for updates instead of upstream OrcaSlicer
-static const std::string VERSION_CHECK_URL = "https://api.github.com/repos/hansonxyz/OrcaSlicer-xyz/releases/latest";
+static const std::string VERSION_CHECK_URL = "https://api.github.com/repos/hansonxyz/fosslink-desktop/releases/latest";
 static const std::string PROFILE_UPDATE_URL = "https://api.github.com/repos/OrcaSlicer/orcaslicer-profiles/releases/tags";
 static const std::string MODELS_STR = "models";
 

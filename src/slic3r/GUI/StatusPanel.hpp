@@ -378,6 +378,7 @@ public:
 class StatusBasePanel : public wxScrolledWindow
 {
 protected:
+    bool m_openbambu_mode{false};  // When true, skip Fit() calls that shrink the panel
     wxBitmap m_item_placeholder;
     ScalableBitmap m_thumbnail_placeholder;
     ScalableBitmap m_thumbnail_brokenimg;
