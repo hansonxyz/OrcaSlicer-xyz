@@ -639,6 +639,8 @@ set(SLIC3R_GUI_SOURCES
     Utils/OpenBambu/OpenBambuCommands.hpp
     Utils/OpenBambu/OpenBambuDiscovery.cpp
     Utils/OpenBambu/OpenBambuDiscovery.hpp
+    Utils/OpenBambu/OpenBambuFileSystem.cpp
+    Utils/OpenBambu/OpenBambuFileSystem.hpp
     Utils/OpenBambu/OpenBambuFtp.cpp
     Utils/OpenBambu/OpenBambuFtp.hpp
     Utils/OpenBambu/OpenBambuMqtt.cpp

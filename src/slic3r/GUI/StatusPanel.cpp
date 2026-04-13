@@ -1687,6 +1687,7 @@ wxBoxSizer *StatusBasePanel::create_temp_axis_group(wxWindow *parent)
 wxBoxSizer *StatusBasePanel::create_temp_control(wxWindow *parent)
 {
     auto sizer = new wxBoxSizer(wxVERTICAL);
+    m_temp_ctrl_sizer = sizer;
 
     wxWindowID nozzle_id = wxWindow::NewControlId();
     m_tempCtrl_nozzle    = new TempInput(parent, nozzle_id, TEMP_BLANK_STR, TempInputType::TEMP_OF_NORMAL_TYPE, TEMP_BLANK_STR, wxString("monitor_nozzle_temp"),
@@ -3206,7 +3207,8 @@ void StatusPanel::update_misc_ctrl(MachineObject *obj)
 
     /*switch extder*/
     m_extruder_switching_status->updateBy(obj);
-    m_extruder_label->Show(!m_extruder_switching_status->has_content_shown());/*hide the label if there are shown infos from m_extruder_switching_status*/
+    if (!m_openbambu_mode)
+        m_extruder_label->Show(!m_extruder_switching_status->has_content_shown());/*hide the label if there are shown infos from m_extruder_switching_status*/
 
     /*other*/
     if (obj->is_core_xy()) {
@@ -3219,12 +3221,27 @@ void StatusPanel::update_misc_ctrl(MachineObject *obj)
     update_extruder_status(obj);
 
     if (obj->is_fdm_type()) {
-        if (!m_fan_panel->IsShown())
+        if (!m_openbambu_mode && !m_fan_panel->IsShown())
             m_fan_panel->Show();
         bool is_suppt_part_fun = true;
         bool is_suppt_aux_fun  = obj->GetFan()->GetSupportAuxFanData();
         bool is_suppt_cham_fun = obj->GetFan()->GetSupportChamberFan();
         if (m_fan_control_popup) { m_fan_control_popup->update_fan_data(obj); }
+
+        // Update inline fan speed labels in OpenBambu mode
+        // Fan speeds are 0-255, convert to percentage
+        if (m_openbambu_mode) {
+            auto *fan = obj->GetFan();
+            int parts_pct = (fan->GetCoolingFanSpeed() * 100 + 127) / 255;
+            int aux_pct   = (fan->GetBigFan1Speed() * 100 + 127) / 255;
+            int cham_pct  = (fan->GetBigFan2Speed() * 100 + 127) / 255;
+            if (m_ob_fan_parts_label)
+                m_ob_fan_parts_label->SetLabel(wxString::Format("%d%%", parts_pct));
+            if (m_ob_fan_aux_label)
+                m_ob_fan_aux_label->SetLabel(is_suppt_aux_fun ? wxString::Format("%d%%", aux_pct) : "--");
+            if (m_ob_fan_chamber_label)
+                m_ob_fan_chamber_label->SetLabel(is_suppt_cham_fun ? wxString::Format("%d%%", cham_pct) : "--");
+        }
     } else {
         if (m_fan_panel->IsShown()) {
             m_fan_panel->Hide();
@@ -6062,7 +6079,6 @@ void StatusPanel::set_openbambu_mode(bool enabled)
     if (!enabled) return;
 
     // Hide axis (XY) control, bed (Z) controls, extruder controls, and separators.
-    // Temperature controls and AMS/filament controls remain visible.
     if (m_bpButton_xy)          m_bpButton_xy->Hide();
     if (m_bpButton_z_10)        m_bpButton_z_10->Hide();
     if (m_bpButton_z_1)         m_bpButton_z_1->Hide();
@@ -6077,6 +6093,101 @@ void StatusPanel::set_openbambu_mode(bool enabled)
     if (m_extruder_switching_status) m_extruder_switching_status->Hide();
     if (m_temp_temp_line)       m_temp_temp_line->Hide();
     if (m_temp_extruder_line)   m_temp_extruder_line->Hide();
+
+    // Change lamp labels from "Lamp"/"Lamp" to "On"/"Off"
+    if (m_switch_lamp) {
+        m_switch_lamp->SetLabels(_L("On"), _L("Off"));
+    }
+
+    // Rearrange: put temperature controls in a horizontal row
+    if (m_temp_ctrl_sizer && m_tempCtrl_nozzle && m_tempCtrl_bed && m_tempCtrl_chamber) {
+        // Detach all items from the vertical temp sizer
+        m_temp_ctrl_sizer->Clear(false); // false = don't delete windows
+
+        // Hide separator lines between temps
+        if (m_line_nozzle) m_line_nozzle->Hide();
+
+        // Create horizontal sizer for temps
+        auto *temp_row = new wxBoxSizer(wxHORIZONTAL);
+        temp_row->Add(m_tempCtrl_nozzle, 1, wxEXPAND | wxALL, 1);
+        temp_row->Add(m_tempCtrl_bed, 1, wxEXPAND | wxALL, 1);
+        temp_row->Add(m_tempCtrl_chamber, 1, wxEXPAND | wxALL, 1);
+
+        // Create labeled indicator row: Parts / Aux / Ext / Speed / Lamp
+        // Each gets a vertical sizer with label above, control/value below
+        wxWindow *ctrl_parent = m_tempCtrl_nozzle->GetParent();
+
+        auto make_labeled_ctrl = [this, ctrl_parent](const wxString &label, wxWindow *ctrl) {
+            auto *col = new wxBoxSizer(wxVERTICAL);
+            auto *lbl = new wxStaticText(ctrl_parent, wxID_ANY, label, wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER_HORIZONTAL);
+            lbl->SetFont(::Label::Body_10);
+            lbl->SetForegroundColour(wxColour(150, 150, 150));
+            col->Add(lbl, 0, wxALIGN_CENTER_HORIZONTAL | wxBOTTOM, FromDIP(2));
+            col->Add(ctrl, 0, wxALIGN_CENTER_HORIZONTAL, 0);
+            return col;
+        };
+
+        auto make_labeled_text = [this, ctrl_parent](const wxString &label, wxStaticText **out_value) {
+            auto *col = new wxBoxSizer(wxVERTICAL);
+            auto *lbl = new wxStaticText(ctrl_parent, wxID_ANY, label, wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER_HORIZONTAL);
+            lbl->SetFont(::Label::Body_10);
+            lbl->SetForegroundColour(wxColour(150, 150, 150));
+            // Fan icon + value in a horizontal row
+            auto *icon_row = new wxBoxSizer(wxHORIZONTAL);
+            auto *icon = new wxStaticBitmap(ctrl_parent, wxID_ANY, create_scaled_bitmap("monitor_fan_on", nullptr, 16));
+            auto *val = new wxStaticText(ctrl_parent, wxID_ANY, "--", wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER_HORIZONTAL);
+            val->SetFont(::Label::Head_13);
+            val->SetCursor(wxCursor(wxCURSOR_HAND));
+            icon->SetCursor(wxCursor(wxCURSOR_HAND));
+            // Clicking opens the fan control popup (same as the fan button)
+            auto open_fan = [this](wxMouseEvent&) {
+                wxCommandEvent evt(wxEVT_COMMAND_BUTTON_CLICKED);
+                on_nozzle_fan_switch(evt);
+            };
+            val->Bind(wxEVT_LEFT_DOWN, open_fan);
+            icon->Bind(wxEVT_LEFT_DOWN, open_fan);
+            icon_row->Add(icon, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(3));
+            icon_row->Add(val, 0, wxALIGN_CENTER_VERTICAL, 0);
+            *out_value = val;
+            col->Add(lbl, 0, wxALIGN_CENTER_HORIZONTAL | wxBOTTOM, FromDIP(2));
+            col->Add(icon_row, 0, wxALIGN_CENTER_HORIZONTAL, 0);
+            return col;
+        };
+
+        auto *indicator_row = new wxBoxSizer(wxHORIZONTAL);
+        indicator_row->AddStretchSpacer(1);
+
+        // 3 fan speed indicators as text labels
+        indicator_row->Add(make_labeled_text(_L("Parts"), &m_ob_fan_parts_label), 0, wxALIGN_BOTTOM | wxLEFT | wxRIGHT, FromDIP(8));
+        indicator_row->Add(make_labeled_text(_L("Aux"), &m_ob_fan_aux_label), 0, wxALIGN_BOTTOM | wxLEFT | wxRIGHT, FromDIP(8));
+        indicator_row->Add(make_labeled_text(_L("Exhaust"), &m_ob_fan_chamber_label), 0, wxALIGN_BOTTOM | wxLEFT | wxRIGHT, FromDIP(8));
+
+        // Speed control
+        if (m_switch_speed) {
+            indicator_row->Add(make_labeled_ctrl(_L("Speed"), m_switch_speed), 0, wxALIGN_BOTTOM | wxLEFT | wxRIGHT, FromDIP(8));
+        }
+
+        // Lamp control
+        if (m_switch_lamp) {
+            indicator_row->Add(make_labeled_ctrl(_L("Lamp"), m_switch_lamp), 0, wxALIGN_BOTTOM | wxLEFT | wxRIGHT, FromDIP(8));
+        }
+        indicator_row->AddStretchSpacer(1);
+
+        // Hide the old fan panel (moved to inline labels)
+        if (m_fan_panel) m_fan_panel->Hide();
+
+        // Re-add to temp sizer: horizontal temp row, then misc row
+        m_temp_ctrl_sizer->Add(temp_row, 0, wxEXPAND, 0);
+
+        auto *sep = new StaticLine(m_tempCtrl_nozzle->GetParent());
+        sep->SetLineColour(STATIC_BOX_LINE_COL);
+        m_temp_ctrl_sizer->Add(sep, 0, wxEXPAND | wxLEFT | wxRIGHT, 12);
+
+        m_temp_ctrl_sizer->Add(indicator_row, 0, wxEXPAND | wxTOP | wxBOTTOM, FromDIP(5));
+
+        // Hide the old misc sizer content (separators, fan panel in old position)
+        // The fan panel and speed/lamp have been moved to indicator_row
+    }
 
     // Re-layout the parent to reclaim the space
     if (m_machine_ctrl_panel) {

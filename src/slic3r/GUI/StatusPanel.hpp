@@ -378,7 +378,11 @@ public:
 class StatusBasePanel : public wxScrolledWindow
 {
 protected:
-    bool m_openbambu_mode{false};  // When true, skip Fit() calls that shrink the panel
+    bool m_openbambu_mode{false};  // When true, use FitInside() and OpenBambu layout
+    // OpenBambu mode: inline fan speed labels (updated from update_misc_ctrl)
+    wxStaticText *m_ob_fan_parts_label{nullptr};
+    wxStaticText *m_ob_fan_aux_label{nullptr};
+    wxStaticText *m_ob_fan_chamber_label{nullptr};
     wxBitmap m_item_placeholder;
     ScalableBitmap m_thumbnail_placeholder;
     ScalableBitmap m_thumbnail_brokenimg;
@@ -475,6 +479,7 @@ protected:
     ImageSwitchButton *m_switch_speed;
 
     /* TempInput */
+    wxBoxSizer *    m_temp_ctrl_sizer{nullptr};   // vertical sizer holding temp controls
     wxBoxSizer *    m_misc_ctrl_sizer;
     StaticBox*      m_fan_panel;
     StaticLine *    m_line_nozzle;
