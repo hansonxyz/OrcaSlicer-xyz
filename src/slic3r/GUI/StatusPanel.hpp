@@ -617,6 +617,7 @@ public:
     void           show_ams_group(bool show = true);
     void show_filament_load_group(bool show = true);
     MediaPlayCtrl* get_media_play_ctrl() {return m_media_play_ctrl;};
+    wxWindow* get_media_ctrl() {return m_media_ctrl;};
 };
 
 

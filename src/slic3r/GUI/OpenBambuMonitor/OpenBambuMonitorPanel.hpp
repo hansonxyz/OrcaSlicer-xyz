@@ -76,6 +76,20 @@ private:
     wxBoxSizer*     m_side_tools_sizer;
     SelectMachinePopup m_select_machine;
 
+    /* printer list */
+    wxScrolledWindow* m_printer_list_panel{nullptr};
+    wxBoxSizer*       m_printer_list_sizer{nullptr};
+    wxTimer*          m_printer_list_timer{nullptr};
+    std::vector<wxWindow*> m_printer_buttons;
+    void            update_printer_list();
+    void            select_printer_by_id(const std::string &dev_id);
+
+    /* camera loading spinner */
+    wxPanel*        m_camera_spinner{nullptr};
+    wxTimer*        m_spinner_timer{nullptr};
+    int             m_spinner_angle{0};
+    void            update_camera_spinner();
+
     /* images */
     wxBitmap m_signal_strong_img;
     wxBitmap m_signal_middle_img;
@@ -88,6 +102,7 @@ private:
     int last_status;
     bool m_initialized { false };
     bool update_flag{false};
+    bool m_needs_layout_kick{false}; // set true on printer change, cleared after first data arrives
     wxTimer* m_refresh_timer = nullptr;
 
 public:

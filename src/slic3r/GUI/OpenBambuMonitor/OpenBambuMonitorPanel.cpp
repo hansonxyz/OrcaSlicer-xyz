@@ -5,6 +5,7 @@
 // - StatusPanel configured in OpenBambu mode (no axis/extruder/bed controls)
 
 #include "../Tab.hpp"
+#include "../TabButton.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/Model.hpp"
 #include "libslic3r/AppConfig.hpp"
@@ -65,7 +66,16 @@ OpenBambuMonitorPanel::OpenBambuMonitorPanel(wxWindow* parent, wxWindowID id, co
 
     m_side_tools->get_panel()->Connect(wxEVT_LEFT_DOWN, wxMouseEventHandler(OpenBambuMonitorPanel::on_printer_clicked), NULL, this);
 
-    Bind(wxEVT_TIMER, &OpenBambuMonitorPanel::on_timer, this);
+    Bind(wxEVT_TIMER, [this](wxTimerEvent& e) {
+        if (m_printer_list_timer && e.GetTimer().GetId() == m_printer_list_timer->GetId())
+            update_printer_list();
+        else if (m_spinner_timer && e.GetTimer().GetId() == m_spinner_timer->GetId()) {
+            m_spinner_angle = (m_spinner_angle + 30) % 360;
+            if (m_camera_spinner) m_camera_spinner->Refresh();
+        }
+        else
+            on_timer(e);
+    });
     Bind(wxEVT_SIZE, &OpenBambuMonitorPanel::on_size, this);
     Bind(wxEVT_COMMAND_CHOICE_SELECTED, &OpenBambuMonitorPanel::on_select_printer, this);
 
@@ -83,6 +93,14 @@ OpenBambuMonitorPanel::~OpenBambuMonitorPanel()
     if (m_refresh_timer)
         m_refresh_timer->Stop();
     delete m_refresh_timer;
+
+    if (m_printer_list_timer)
+        m_printer_list_timer->Stop();
+    delete m_printer_list_timer;
+
+    if (m_spinner_timer)
+        m_spinner_timer->Stop();
+    delete m_spinner_timer;
 }
 
 void OpenBambuMonitorPanel::init_bitmap()
@@ -105,10 +123,11 @@ void OpenBambuMonitorPanel::init_timer()
 
 void OpenBambuMonitorPanel::init_tabpanel()
 {
+    // Create a sidebar sizer with the printer list (no SideTools dropdown)
     m_side_tools = new SideTools(this, wxID_ANY);
-    wxBoxSizer* sizer_side_tools = new wxBoxSizer(wxVERTICAL);
-    sizer_side_tools->Add(m_side_tools, 1, wxEXPAND, 0);
-    m_tabpanel = new Tabbook(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, sizer_side_tools, wxNB_LEFT | wxTAB_TRAVERSAL | wxNB_NOPAGETHEME);
+    m_side_tools->Hide(); // Hide the old printer selector
+
+    m_tabpanel = new Tabbook(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, nullptr, wxNB_LEFT | wxTAB_TRAVERSAL | wxNB_NOPAGETHEME);
     m_side_tools->set_table_panel(m_tabpanel);
     m_tabpanel->SetBackgroundColour(wxColour("#FEFFFF"));
     m_tabpanel->Bind(wxEVT_BOOKCTRL_PAGE_CHANGED, [this](wxBookCtrlEvent& e) {
@@ -130,9 +149,58 @@ void OpenBambuMonitorPanel::init_tabpanel()
     m_media_file_panel = new MediaFilePanel(m_tabpanel);
     m_tabpanel->AddPage(m_media_file_panel, _L("Storage"), "", false);
 
-    // No Update or HMS tabs in OpenBambu mode
-
     m_tabpanel->SetFooterText(_L("OpenBambu (LAN Only)"));
+
+    // Add printer list below the tab buttons in the sidebar
+    auto *btns_ctrl = m_tabpanel->GetBtnsListCtrl();
+    auto *sidebar_sizer = btns_ctrl->GetSizer();
+    if (sidebar_sizer) {
+        // Separator line
+        auto *sep = new wxPanel(btns_ctrl, wxID_ANY, wxDefaultPosition, wxSize(-1, 1));
+        sep->SetBackgroundColour(wxColour(200, 200, 200));
+        sidebar_sizer->Insert(sidebar_sizer->GetItemCount() - 1, sep, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP | wxBOTTOM, FromDIP(8));
+
+        // Printer list panel (plain panel, auto-sizes to content)
+        m_printer_list_panel = new wxScrolledWindow(btns_ctrl, wxID_ANY);
+        m_printer_list_panel->SetScrollRate(0, 0); // no scrolling, just auto-size
+        m_printer_list_panel->SetBackgroundColour(wxColour("#FEFFFF"));
+        m_printer_list_sizer = new wxBoxSizer(wxVERTICAL);
+        m_printer_list_panel->SetSizer(m_printer_list_sizer);
+
+        // Insert before footer text (last item in sizer), takes remaining space
+        sidebar_sizer->Insert(sidebar_sizer->GetItemCount() - 1, m_printer_list_panel, 0, wxEXPAND, 0);
+    }
+
+    // Printer list refresh timer — every 20 seconds
+    m_printer_list_timer = new wxTimer(this, wxNewId());
+
+    // Camera loading spinner — 3 bouncing gray dots
+    m_camera_spinner = new wxPanel(m_status_info_panel, wxID_ANY, wxDefaultPosition, wxSize(100, 40));
+    m_camera_spinner->SetBackgroundStyle(wxBG_STYLE_PAINT);
+    m_camera_spinner->Hide();
+    m_camera_spinner->Bind(wxEVT_PAINT, [this](wxPaintEvent&) {
+        wxAutoBufferedPaintDC dc(m_camera_spinner);
+        dc.SetBackground(wxBrush(*wxBLACK));
+        dc.Clear();
+        int w = m_camera_spinner->GetSize().x;
+        int h = m_camera_spinner->GetSize().y;
+        int dot_r = 8;
+        int spacing = 30;
+        int base_y = h / 2;
+        // 3 dots with phase-offset bounce
+        for (int i = 0; i < 3; i++) {
+            double phase = (m_spinner_angle + i * 120) % 360;
+            double bounce = sin(phase * M_PI / 180.0);
+            int y = base_y - (int)(10.0 * std::max(0.0, bounce));
+            int x = w / 2 + (i - 1) * spacing;
+            // Fade based on bounce height
+            int alpha = 120 + (int)(135 * std::max(0.0, bounce));
+            dc.SetPen(*wxTRANSPARENT_PEN);
+            dc.SetBrush(wxBrush(wxColour(160, 160, 160, alpha)));
+            dc.DrawCircle(x, y, dot_r);
+        }
+    });
+    m_spinner_timer = new wxTimer(this, wxNewId());
 
     m_initialized = true;
     show_status((int)MonitorStatus::MONITOR_NO_PRINTER);
@@ -282,7 +350,33 @@ void OpenBambuMonitorPanel::update_all()
         m_media_file_panel->UpdateByObj(obj);
     }
 
-    // No HMS update in OpenBambu mode
+    // Update camera loading spinner and printer list highlight
+    update_camera_spinner();
+    update_printer_list();
+
+    // After first data arrives for a new printer, trigger a layout refresh
+    // so AMS cards and other dynamic content render correctly.
+    // Also auto-start the camera feed if the preference is set.
+    if (m_needs_layout_kick && obj->is_info_ready()) {
+        m_needs_layout_kick = false;
+        CallAfter([this]() {
+            wxWindow *w = this;
+            for (int i = 0; i < 4 && w; i++) {
+                wxSizeEvent evt(w->GetSize());
+                evt.SetEventObject(w);
+                w->GetEventHandler()->ProcessEvent(evt);
+                w = w->GetParent();
+            }
+
+            // Auto-start camera if preference is set
+            if (wxGetApp().app_config->get_bool("auto_start_camera")) {
+                auto *ctrl = m_status_info_panel->get_media_play_ctrl();
+                if (ctrl && ctrl->is_idle()) {
+                    try { ctrl->jump_to_play(); } catch (...) {}
+                }
+            }
+        });
+    }
 }
 
 bool OpenBambuMonitorPanel::Show(bool show)
@@ -300,6 +394,15 @@ bool OpenBambuMonitorPanel::Show(bool show)
         m_refresh_timer->SetOwner(this);
         m_refresh_timer->Start(REFRESH_INTERVAL);
         if (update_flag) { update_all(); }
+
+        // Trigger layout kick when data arrives
+        m_needs_layout_kick = true;
+
+        // Start printer list refresh
+        update_printer_list();
+        if (m_printer_list_timer) {
+            m_printer_list_timer->Start(20000); // refresh every 20 seconds
+        }
 
         if (dev) {
             obj = dev->get_selected_machine();
@@ -324,8 +427,160 @@ bool OpenBambuMonitorPanel::Show(bool show)
     } else {
         stop_update();
         m_refresh_timer->Stop();
+        if (m_printer_list_timer) m_printer_list_timer->Stop();
+
+        // Stop camera feed when leaving the Device tab
+        if (m_status_info_panel) {
+            auto *ctrl = m_status_info_panel->get_media_play_ctrl();
+            if (ctrl) {
+                try {
+                    ctrl->SetMachineObject(nullptr);
+                    ctrl->stop_stream();
+                } catch (...) {}
+            }
+        }
     }
     return wxPanel::Show(show);
+}
+
+void OpenBambuMonitorPanel::update_printer_list()
+{
+    if (!m_printer_list_panel) return;
+
+    Slic3r::DeviceManager* dev = Slic3r::GUI::wxGetApp().getDeviceManager();
+    if (!dev) return;
+
+    auto machines = dev->get_local_machinelist();
+    std::string selected_id;
+    if (auto *sel = dev->get_selected_machine())
+        selected_id = sel->get_dev_id();
+
+    // Check if list actually changed
+    if (m_printer_buttons.size() == machines.size()) {
+        bool same = true;
+        size_t i = 0;
+        for (auto &pair : machines) {
+            if (i >= m_printer_buttons.size() || m_printer_buttons[i]->GetName() != pair.first) {
+                same = false;
+                break;
+            }
+            i++;
+        }
+        if (same) {
+            // Just update selection highlight
+            for (auto *w : m_printer_buttons) {
+                auto *btn = dynamic_cast<TabButton*>(w);
+                if (!btn) continue;
+                bool is_sel = (btn->GetName() == selected_id);
+                btn->SetBackgroundColor(is_sel ? wxColour("#BFE1DE") : wxColour("#FEFFFF"));
+                btn->Refresh();
+            }
+            return;
+        }
+    }
+
+    // Rebuild the list
+    m_printer_list_sizer->Clear(true);
+    m_printer_buttons.clear();
+
+    // Use TabButton — the exact same widget as Status/Storage buttons
+    static const wxColour BG_NORMAL("#FEFFFF");
+    static const wxColour BG_SELECTED("#BFE1DE");
+    ScalableBitmap arrow_img(m_printer_list_panel, "monitor_arrow", 14);
+    int em = em_unit(m_printer_list_panel);
+
+    for (auto &pair : machines) {
+        auto *machine = pair.second;
+        if (!machine) continue;
+
+        std::string dev_id = machine->get_dev_id();
+        bool is_sel = (dev_id == selected_id);
+
+        auto *btn = new TabButton(m_printer_list_panel, wxString::FromUTF8(dev_id), arrow_img, wxNO_BORDER);
+        btn->SetCornerRadius(0);
+        btn->SetMinSize({220 * em / 10, 46 * em / 10});
+        btn->SetBackgroundColor(is_sel ? BG_SELECTED : BG_NORMAL);
+        btn->SetTextColor(*wxBLACK);
+        btn->SetName(dev_id);
+
+        btn->Bind(wxEVT_BUTTON, [this, dev_id](wxCommandEvent&) {
+            select_printer_by_id(dev_id);
+        });
+
+        m_printer_list_sizer->Add(btn, 0, wxEXPAND | wxLEFT, 0);
+        m_printer_buttons.push_back(btn);
+    }
+
+    m_printer_list_panel->Layout();
+    m_printer_list_panel->Fit();
+    // Re-layout the sidebar to accommodate the new button heights
+    if (auto *parent = m_printer_list_panel->GetParent())
+        parent->Layout();
+}
+
+void OpenBambuMonitorPanel::select_printer_by_id(const std::string &dev_id)
+{
+    Slic3r::DeviceManager* dev = Slic3r::GUI::wxGetApp().getDeviceManager();
+    if (!dev) return;
+
+    // Stop current camera feed BEFORE switching machines
+    auto *ctrl = m_status_info_panel->get_media_play_ctrl();
+    if (ctrl) {
+        try {
+            ctrl->SetMachineObject(nullptr);
+            ctrl->stop_stream();
+        } catch (...) {}
+    }
+
+    if (!dev->set_selected_machine(dev_id))
+        return;
+
+    set_default();
+    m_needs_layout_kick = true;
+    update_all();
+    update_printer_list(); // refresh highlights
+
+    MachineObject *obj_ = dev->get_selected_machine();
+    if (obj_) {
+        obj_->last_cali_version = -1;
+        obj_->reset_pa_cali_history_result();
+        obj_->reset_pa_cali_result();
+        Sidebar &sidebar = GUI::wxGetApp().sidebar();
+        sidebar.update_sync_status(obj_);
+        sidebar.set_need_auto_sync_after_connect_printer(sidebar.need_auto_sync_extruder_list_after_connect_priner(obj_));
+    }
+
+    Layout();
+}
+
+void OpenBambuMonitorPanel::update_camera_spinner()
+{
+    if (!m_camera_spinner || !m_status_info_panel) return;
+
+    auto *ctrl = m_status_info_panel->get_media_play_ctrl();
+    bool loading = ctrl && !ctrl->is_idle() && !ctrl->IsStreaming();
+
+    if (loading) {
+        // Position spinner centered on the camera widget
+        auto *cam = m_status_info_panel->get_media_ctrl();
+        if (cam && cam->IsShown()) {
+            wxPoint cam_pos = cam->GetScreenPosition();
+            wxPoint panel_pos = m_status_info_panel->GetScreenPosition();
+            wxSize cam_size = cam->GetSize();
+            wxSize spin_size = m_camera_spinner->GetSize();
+            int x = (cam_pos.x - panel_pos.x) + (cam_size.x - spin_size.x) / 2;
+            int y = (cam_pos.y - panel_pos.y) + (cam_size.y - spin_size.y) / 2;
+            m_camera_spinner->SetPosition(wxPoint(x, y));
+        }
+        if (!m_camera_spinner->IsShown()) {
+            m_camera_spinner->Show();
+            m_camera_spinner->Raise();
+            m_spinner_timer->Start(50);
+        }
+    } else if (m_camera_spinner->IsShown()) {
+        m_camera_spinner->Hide();
+        m_spinner_timer->Stop();
+    }
 }
 
 void OpenBambuMonitorPanel::show_status(int status)

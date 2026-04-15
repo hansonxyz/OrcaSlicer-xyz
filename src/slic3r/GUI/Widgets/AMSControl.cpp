@@ -842,6 +842,19 @@ void AMSControl::CreateAmsSingleNozzle(const std::string &series_name, const std
     m_single_ams_centered = (m_ams_info.size() > 0 && m_simplebook_ams_left->IsShown() && !m_simplebook_ams_right->IsShown());
     m_down_road->SetCardExitX(-1);
     UpdateCardExitX();
+
+    // Deferred layout kick — same as the grid path. Forces the parent chain
+    // to recalculate sizes so the road/extruder widgets render correctly.
+    CallAfter([this]() {
+        wxWindow *w = GetParent();
+        for (int i = 0; i < 4 && w; i++) {
+            wxSizeEvent evt(w->GetSize());
+            evt.SetEventObject(w);
+            w->GetEventHandler()->ProcessEvent(evt);
+            w = w->GetParent();
+        }
+        if (m_single_ams_centered) UpdateCardExitX();
+    });
 }
 
 void AMSControl::Reset()

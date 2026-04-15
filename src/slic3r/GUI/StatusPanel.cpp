@@ -6099,8 +6099,27 @@ void StatusPanel::set_openbambu_mode(bool enabled)
         m_switch_lamp->SetLabels(_L("On"), _L("Off"));
     }
 
-    // Rearrange: put temperature controls in a horizontal row
+    // Rearrange: put temperature controls in a horizontal row, centered in the box
     if (m_temp_ctrl_sizer && m_tempCtrl_nozzle && m_tempCtrl_bed && m_tempCtrl_chamber) {
+        // Center temp controls in the box: give m_temp_ctrl_sizer the full width
+        // by changing its proportion in content_sizer, and add internal centering.
+        wxWindow *box_parent = m_tempCtrl_nozzle->GetParent();
+        if (box_parent && box_parent->GetSizer()) {
+            auto *content_sizer = box_parent->GetSizer();
+            // Zero out all other items' proportions so they don't absorb space,
+            // then give m_temp_ctrl_sizer proportion=1 to fill the box.
+            for (size_t i = 0; i < content_sizer->GetItemCount(); i++) {
+                auto *item = content_sizer->GetItem(i);
+                if (item && item->GetSizer() == m_temp_ctrl_sizer) {
+                    item->SetProportion(1);
+                    item->SetFlag(wxEXPAND | wxALL);
+                    item->SetBorder(FromDIP(5));
+                } else if (item) {
+                    item->SetProportion(0);
+                }
+            }
+        }
+
         // Detach all items from the vertical temp sizer
         m_temp_ctrl_sizer->Clear(false); // false = don't delete windows
 
@@ -6129,28 +6148,28 @@ void StatusPanel::set_openbambu_mode(bool enabled)
 
         auto make_labeled_text = [this, ctrl_parent](const wxString &label, wxStaticText **out_value) {
             auto *col = new wxBoxSizer(wxVERTICAL);
+            // Label on top
             auto *lbl = new wxStaticText(ctrl_parent, wxID_ANY, label, wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER_HORIZONTAL);
             lbl->SetFont(::Label::Body_10);
             lbl->SetForegroundColour(wxColour(150, 150, 150));
-            // Fan icon + value in a horizontal row
-            auto *icon_row = new wxBoxSizer(wxHORIZONTAL);
-            auto *icon = new wxStaticBitmap(ctrl_parent, wxID_ANY, create_scaled_bitmap("monitor_fan_on", nullptr, 16));
+            // Fan icon centered (same size as speed/lamp icons)
+            auto *icon = new wxStaticBitmap(ctrl_parent, wxID_ANY, create_scaled_bitmap("monitor_fan_on", nullptr, 22));
+            // Value below icon
             auto *val = new wxStaticText(ctrl_parent, wxID_ANY, "--", wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER_HORIZONTAL);
             val->SetFont(::Label::Head_13);
-            val->SetCursor(wxCursor(wxCURSOR_HAND));
-            icon->SetCursor(wxCursor(wxCURSOR_HAND));
-            // Clicking opens the fan control popup (same as the fan button)
+            // Clicking opens the fan control popup
             auto open_fan = [this](wxMouseEvent&) {
                 wxCommandEvent evt(wxEVT_COMMAND_BUTTON_CLICKED);
                 on_nozzle_fan_switch(evt);
             };
-            val->Bind(wxEVT_LEFT_DOWN, open_fan);
-            icon->Bind(wxEVT_LEFT_DOWN, open_fan);
-            icon_row->Add(icon, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(3));
-            icon_row->Add(val, 0, wxALIGN_CENTER_VERTICAL, 0);
+            for (auto *w : {(wxWindow*)lbl, (wxWindow*)icon, (wxWindow*)val}) {
+                w->SetCursor(wxCursor(wxCURSOR_HAND));
+                w->Bind(wxEVT_LEFT_DOWN, open_fan);
+            }
             *out_value = val;
             col->Add(lbl, 0, wxALIGN_CENTER_HORIZONTAL | wxBOTTOM, FromDIP(2));
-            col->Add(icon_row, 0, wxALIGN_CENTER_HORIZONTAL, 0);
+            col->Add(icon, 0, wxALIGN_CENTER_HORIZONTAL | wxBOTTOM, FromDIP(2));
+            col->Add(val, 0, wxALIGN_CENTER_HORIZONTAL, 0);
             return col;
         };
 
@@ -6176,8 +6195,8 @@ void StatusPanel::set_openbambu_mode(bool enabled)
         // Hide the old fan panel (moved to inline labels)
         if (m_fan_panel) m_fan_panel->Hide();
 
-        // Re-add to temp sizer: horizontal temp row, then misc row
-        m_temp_ctrl_sizer->Add(temp_row, 0, wxEXPAND, 0);
+        // Re-add to temp sizer: horizontal temp row, then indicator row, all centered
+        m_temp_ctrl_sizer->Add(temp_row, 0, wxALIGN_CENTER_HORIZONTAL | wxLEFT | wxRIGHT, FromDIP(5));
 
         auto *sep = new StaticLine(m_tempCtrl_nozzle->GetParent());
         sep->SetLineColour(STATIC_BOX_LINE_COL);
