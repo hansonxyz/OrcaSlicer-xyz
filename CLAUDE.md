@@ -441,6 +441,8 @@ cmake --build build --config Release
 
 Output binary: `build/src/orca-slicer.exe` (raw build output, missing DLLs)
 
+**Build output structure:** `orca-slicer.exe` is a thin stub — virtually all compiled code lives in `OrcaSlicer.dll`. When checking whether a build actually recompiled, check the DLL timestamp (`build/src/OrcaSlicer.dll` or `build/OrcaSlicer/OrcaSlicer.dll` post-install), not the exe.
+
 **Runnable installation:** `build/OrcaSlicer/orca-slicer.exe` (after install step - has all DLLs, resources, and WebView2). Always run from this location, not from `build/src/`.
 
 ### Build Policy
@@ -455,7 +457,12 @@ Never wipe the build directory just to rebuild after code changes. Ninja's incre
 **Build discipline (lessons learned):**
 - **Never kill a running build to "check on it" or "restart it."** Builds run at idle priority and take time. Killing mid-build wastes all the work done so far and forces recompilation of partially-built objects. Let the build finish, check the result, then act.
 - **Never say "clean build" when you mean incremental.** `build_incremental.ps1` is ALWAYS the right script for development. It handles CMake reconfiguration (for new files in CMakeLists.txt) and incremental compilation automatically. There is no reason to do a clean/full build during normal development.
-- **NEVER monitor a running build. Period.** After launching a build with `run_in_background`, do NOT: check the output file with `tail`/`cat`/`Read`, check process status with `Get-Process`, poll CPU time, or do anything else to "see how it's going." You will be automatically notified when the background task completes — that is the ONLY time you should read the build output. Every poll wastes tokens and money for zero information. Launch the build, tell the user it's building, then either do other useful work or wait silently. No exceptions.
+- **NEVER monitor a running build. The procedure is exactly 3 steps:**
+  1. Launch the build with `run_in_background: true`
+  2. Tell the user the build is running
+  3. You will receive a background task completion notification — ONLY THEN read the output file
+
+  **That is IT. There is no step 2.5.** Do NOT: check the output file (`tail`, `cat`, `Read`), check process status (`Get-Process`), poll CPU time, count compiler processes, check DLL timestamps, spawn a PowerShell wait loop, or do ANYTHING AT ALL to monitor progress. Ask yourself: "what will I do with this information?" The answer is always "nothing, because there is nothing to do but wait." So don't gather it. Every check wastes tokens and money for literally zero value. No exceptions, no edge cases, no "just a quick check."
 - **Adding new source files to CMakeLists.txt is an incremental build operation.** CMake detects the CMakeLists.txt change, reconfigures, and Ninja builds only the new/changed files. This is not a reason for a full rebuild.
 
 ### Build Artifacts Directory

@@ -1017,16 +1017,9 @@ bool GLGizmosManager::on_key(wxKeyEvent& evt)
                         wxGetApp().imgui()->set_requires_extra_frame();
                     }
                 }
-                // xyz fork: Ctrl+Z undo for boundary painter (only when boundary tool is active)
-                else if (keyCode == 'Z' && evt.CmdDown() && mmu_seg->is_boundary_painter_active()) {
-                    bool had_something = false;
-                    for (auto &bp : mmu_seg->m_boundary_painters)
-                        if (bp.is_initialized() && (bp.has_pending() || bp.boundary_count() > 0)) {
-                            bp.undo_last_segment();
-                            had_something = true;
-                        }
-                    processed = had_something; // fall through to normal undo if nothing to undo
-                }
+                // xyz fork: Ctrl+Z for boundary painter uses standard undo system.
+                // Each boundary click takes a snapshot, so Ctrl+Z restores the
+                // previous state one segment at a time.
             }
         }
         else if (m_current == FdmSupports) {

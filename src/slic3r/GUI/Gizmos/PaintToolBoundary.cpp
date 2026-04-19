@@ -261,12 +261,12 @@ static bool segments_cross_3d(const Vec3f &a1, const Vec3f &a2, const Vec3f &b1,
 
 void PaintToolBoundary::sync_to_selector(TriangleSelector &selector) const
 {
-    selector.clear_boundary_triangles();
+    selector.clear_boundary_edges();
 
     if (m_completed_paths.empty())
         return;
 
-    // Collect all boundary edges (vertex index pairs in mesh.its space)
+    // Collect all boundary edges (sorted vertex index pairs in mesh.its space)
     std::set<std::pair<int,int>> boundary_edge_set;
     for (const auto &path : m_completed_paths) {
         auto edges = MeshPathFinder::path_to_edges(path);
@@ -274,28 +274,8 @@ void PaintToolBoundary::sync_to_selector(TriangleSelector &selector) const
             boundary_edge_set.insert(e);
     }
 
-    if (boundary_edge_set.empty())
-        return;
-
-    // Find all original mesh triangles that contain a boundary edge.
-    // These triangles form the "boundary wall" that fill won't cross into.
-    std::set<int> boundary_tris;
-    const auto &indices = selector.get_mesh_indices();
-    for (size_t ti = 0; ti < indices.size(); ++ti) {
-        const Vec3i32 &tri = indices[ti];
-        for (int ei = 0; ei < 3; ++ei) {
-            int v0 = tri[ei];
-            int v1 = tri[(ei + 1) % 3];
-            int lo = std::min(v0, v1);
-            int hi = std::max(v0, v1);
-            if (boundary_edge_set.count({lo, hi}) > 0) {
-                boundary_tris.insert((int)ti);
-                break; // this triangle is on the boundary, no need to check more edges
-            }
-        }
-    }
-
-    selector.set_boundary_triangles(boundary_tris);
+    if (!boundary_edge_set.empty())
+        selector.set_boundary_edges(boundary_edge_set);
 }
 
 void PaintToolBoundary::add_path_edges(const std::vector<int> &path)
@@ -314,8 +294,10 @@ void PaintToolBoundary::rebuild_edge_set()
 
 std::string PaintToolBoundary::serialize() const
 {
-    // Format: paths separated by "|", vertex indices within a path separated by ","
-    // Example: "10,20,30,40|50,60,70,80"
+    // Format: completed paths separated by "|", vertex indices separated by ","
+    // Pending state appended after "##PENDING##" separator:
+    //   pending_vertices|segment_marks|prev_hit_stack
+    // Example: "10,20,30|50,60,70##PENDING##5,10,15|0,5|1.0,2.0,3.0,42,4.0,5.0,6.0,43"
     std::string result;
     for (size_t pi = 0; pi < m_completed_paths.size(); ++pi) {
         if (pi > 0) result += '|';
@@ -325,42 +307,170 @@ std::string PaintToolBoundary::serialize() const
             result += std::to_string(path[vi]);
         }
     }
+
+    // Serialize pending state if there are pending vertices
+    if (!m_pending_vertices.empty()) {
+        result += "##PENDING##";
+        // Pending vertices
+        for (size_t i = 0; i < m_pending_vertices.size(); ++i) {
+            if (i > 0) result += ',';
+            result += std::to_string(m_pending_vertices[i]);
+        }
+        result += '|';
+        // Segment marks
+        for (size_t i = 0; i < m_pending_segment_marks.size(); ++i) {
+            if (i > 0) result += ',';
+            result += std::to_string(m_pending_segment_marks[i]);
+        }
+        result += '|';
+        // Previous hit stack: x,y,z,facet pairs
+        for (size_t i = 0; i < m_prev_hit_stack.size(); ++i) {
+            if (i > 0) result += ';';
+            const auto &[pos, facet] = m_prev_hit_stack[i];
+            result += std::to_string(pos.x()) + ',' + std::to_string(pos.y()) + ','
+                    + std::to_string(pos.z()) + ',' + std::to_string(facet);
+        }
+        result += '|';
+        // Last hit position and facet
+        result += std::to_string(m_last_hit_pos.x()) + ',' + std::to_string(m_last_hit_pos.y()) + ','
+                + std::to_string(m_last_hit_pos.z()) + ',' + std::to_string(m_last_hit_facet);
+    }
+
     return result;
 }
 
 void PaintToolBoundary::deserialize(const std::string &data)
 {
-    // Clear existing completed paths (keep the path finder intact)
+    // Clear all state (keep the path finder intact)
     m_completed_paths.clear();
     m_boundary_edges.clear();
+    m_pending_vertices.clear();
+    m_pending_segment_marks.clear();
+    m_pending_segment_is_straight.clear();
+    m_prev_hit_stack.clear();
+    m_last_hit_pos = Vec3f::Zero();
+    m_last_hit_facet = -1;
     m_boundaries_dirty = true;
+    m_preview_dirty = true;
 
     if (data.empty())
         return;
 
-    // Parse "|"-separated paths, each with ","-separated vertex indices
-    size_t pos = 0;
-    while (pos < data.size()) {
-        size_t pipe = data.find('|', pos);
-        if (pipe == std::string::npos) pipe = data.size();
+    // Split off pending state if present
+    std::string completed_data = data;
+    std::string pending_data;
+    size_t pending_sep = data.find("##PENDING##");
+    if (pending_sep != std::string::npos) {
+        completed_data = data.substr(0, pending_sep);
+        pending_data = data.substr(pending_sep + 11); // len("##PENDING##") = 11
+    }
 
-        std::string path_str = data.substr(pos, pipe - pos);
-        if (!path_str.empty()) {
-            std::vector<int> path;
+    // Parse completed paths: "|"-separated paths, each with ","-separated vertex indices
+    if (!completed_data.empty()) {
+        size_t pos = 0;
+        while (pos < completed_data.size()) {
+            size_t pipe = completed_data.find('|', pos);
+            if (pipe == std::string::npos) pipe = completed_data.size();
+
+            std::string path_str = completed_data.substr(pos, pipe - pos);
+            if (!path_str.empty()) {
+                std::vector<int> path;
+                size_t vpos = 0;
+                while (vpos < path_str.size()) {
+                    size_t comma = path_str.find(',', vpos);
+                    if (comma == std::string::npos) comma = path_str.size();
+                    std::string num = path_str.substr(vpos, comma - vpos);
+                    if (!num.empty())
+                        path.push_back(std::stoi(num));
+                    vpos = comma + 1;
+                }
+                if (path.size() >= 2) {
+                    m_completed_paths.push_back(std::move(path));
+                }
+            }
+            pos = pipe + 1;
+        }
+    }
+
+    // Parse pending state: pending_vertices|segment_marks|prev_hit_stack|last_hit
+    if (!pending_data.empty()) {
+        // Split by '|' into 4 sections
+        std::vector<std::string> sections;
+        size_t pos = 0;
+        while (pos < pending_data.size()) {
+            size_t pipe = pending_data.find('|', pos);
+            if (pipe == std::string::npos) pipe = pending_data.size();
+            sections.push_back(pending_data.substr(pos, pipe - pos));
+            pos = pipe + 1;
+        }
+
+        // Section 0: pending vertices
+        if (sections.size() > 0 && !sections[0].empty()) {
             size_t vpos = 0;
-            while (vpos < path_str.size()) {
-                size_t comma = path_str.find(',', vpos);
-                if (comma == std::string::npos) comma = path_str.size();
-                std::string num = path_str.substr(vpos, comma - vpos);
+            while (vpos < sections[0].size()) {
+                size_t comma = sections[0].find(',', vpos);
+                if (comma == std::string::npos) comma = sections[0].size();
+                std::string num = sections[0].substr(vpos, comma - vpos);
                 if (!num.empty())
-                    path.push_back(std::stoi(num));
+                    m_pending_vertices.push_back(std::stoi(num));
                 vpos = comma + 1;
             }
-            if (path.size() >= 2) {
-                m_completed_paths.push_back(std::move(path));
+        }
+
+        // Section 1: segment marks
+        if (sections.size() > 1 && !sections[1].empty()) {
+            size_t vpos = 0;
+            while (vpos < sections[1].size()) {
+                size_t comma = sections[1].find(',', vpos);
+                if (comma == std::string::npos) comma = sections[1].size();
+                std::string num = sections[1].substr(vpos, comma - vpos);
+                if (!num.empty())
+                    m_pending_segment_marks.push_back(std::stoull(num));
+                vpos = comma + 1;
             }
         }
-        pos = pipe + 1;
+
+        // Section 2: prev hit stack (semicolon-separated entries, each x,y,z,facet)
+        if (sections.size() > 2 && !sections[2].empty()) {
+            size_t epos = 0;
+            while (epos < sections[2].size()) {
+                size_t semi = sections[2].find(';', epos);
+                if (semi == std::string::npos) semi = sections[2].size();
+                std::string entry = sections[2].substr(epos, semi - epos);
+                if (!entry.empty()) {
+                    std::vector<std::string> parts;
+                    size_t ppos = 0;
+                    while (ppos < entry.size()) {
+                        size_t comma = entry.find(',', ppos);
+                        if (comma == std::string::npos) comma = entry.size();
+                        parts.push_back(entry.substr(ppos, comma - ppos));
+                        ppos = comma + 1;
+                    }
+                    if (parts.size() >= 4) {
+                        Vec3f p(std::stof(parts[0]), std::stof(parts[1]), std::stof(parts[2]));
+                        int facet = std::stoi(parts[3]);
+                        m_prev_hit_stack.push_back({p, facet});
+                    }
+                }
+                epos = semi + 1;
+            }
+        }
+
+        // Section 3: last hit position and facet
+        if (sections.size() > 3 && !sections[3].empty()) {
+            std::vector<std::string> parts;
+            size_t ppos = 0;
+            while (ppos < sections[3].size()) {
+                size_t comma = sections[3].find(',', ppos);
+                if (comma == std::string::npos) comma = sections[3].size();
+                parts.push_back(sections[3].substr(ppos, comma - ppos));
+                ppos = comma + 1;
+            }
+            if (parts.size() >= 4) {
+                m_last_hit_pos = Vec3f(std::stof(parts[0]), std::stof(parts[1]), std::stof(parts[2]));
+                m_last_hit_facet = std::stoi(parts[3]);
+            }
+        }
     }
 
     // Rebuild edge set from deserialized paths

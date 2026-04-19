@@ -861,7 +861,8 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
             assert(mesh_idx < int(m_triangle_selectors.size()));
             const TriangleSelector::ClippingPlane &clp = this->get_clipping_plane_in_volume_coordinates(trafo_matrix);
 
-            // xyz fork: Boundary painter tool — handle clicks to place boundary points
+            // xyz fork: Boundary painter tool — handle clicks to place boundary points.
+            // Each click is an undoable action (snapshot taken before the change).
             if (m_tool_type == ToolType::BOUNDARY_PAINTER) {
                 auto *mmu_gizmo = dynamic_cast<GLGizmoMmuSegmentation*>(this);
                 if (mmu_gizmo && !projected_mouse_positions.empty()) {
@@ -875,11 +876,18 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
                         if (mo && mesh_idx < (int)mo->volumes.size())
                             bp.init(mo->volumes[mesh_idx]->mesh());
                     }
+                    // Take undo snapshot before modifying boundary state
+                    Plater::TakeSnapshot snapshot(wxGetApp().plater(),
+                        _L("Boundary segment").ToUTF8().data(),
+                        UndoRedo::SnapshotType::GizmoAction);
                     bp.add_point(pos.mesh_hit, int(pos.facet_idx),
                                  mmu_gizmo->m_boundary_snap_to_curve,
                                  mmu_gizmo->m_boundary_curvature_threshold,
                                  shift_down);
+                    update_model_object();
                 }
+                // Don't set m_button_down — boundary clicks are complete on LeftDown,
+                // not on LeftUp like paint strokes.
             }
             else if (m_tool_type == ToolType::SMART_FILL || m_tool_type == ToolType::BUCKET_FILL
                 || (m_tool_type == ToolType::BRUSH && m_cursor_type == TriangleSelector::CursorType::POINTER)) {
@@ -905,7 +913,7 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
                             && mmu_gizmo->m_boundary_painters[mesh_idx].has_boundaries())
                             mmu_gizmo->m_boundary_painters[mesh_idx].sync_to_selector(*m_triangle_selectors[mesh_idx]);
                         else
-                            m_triangle_selectors[mesh_idx]->clear_boundary_triangles();
+                            m_triangle_selectors[mesh_idx]->clear_boundary_edges();
                         m_triangle_selectors[mesh_idx]->bucket_fill_select_triangles(
                             mesh_hit, facet_idx, clp, fill_angle, true, true, respect_color);
                     }
@@ -1019,7 +1027,7 @@ bool GLGizmoPainterBase::gizmo_event(SLAGizmoEventType action, const Vec2d& mous
                 && mmu_gizmo->m_boundary_painters[m_rr.mesh_id].has_boundaries())
                 mmu_gizmo->m_boundary_painters[m_rr.mesh_id].sync_to_selector(*m_triangle_selectors[m_rr.mesh_id]);
             else
-                m_triangle_selectors[m_rr.mesh_id]->clear_boundary_triangles();
+                m_triangle_selectors[m_rr.mesh_id]->clear_boundary_edges();
             m_triangle_selectors[m_rr.mesh_id]->bucket_fill_select_triangles(
                 m_rr.hit, int(m_rr.facet), clp, fill_angle, true, false, respect_color);
         }

@@ -535,11 +535,32 @@ void TriangleSelector::bucket_fill_select_triangles(const Vec3f& hit, int facet_
                 // xyz fork: color boundary check is optional
                 if (respect_color && m_triangles[tr_idx].get_state() != start_facet_state)
                     continue;
-                // xyz fork: boundary painter — stop at boundary triangles
-                if (!m_boundary_triangles.empty()) {
-                    int src = m_triangles[tr_idx].source_triangle;
-                    if (m_boundary_triangles.count(src) > 0)
-                        continue;
+                // xyz fork: boundary painter — stop at boundary edges.
+                // Only block BFS traversal when crossing an actual boundary edge,
+                // not when touching a boundary triangle from the fill side.
+                if (!m_boundary_edges.empty()) {
+                    int src_cur = m_triangles[current_facet].source_triangle;
+                    int src_nbr = m_triangles[tr_idx].source_triangle;
+                    if (src_cur != src_nbr) {
+                        // Find the shared edge between the two original mesh triangles
+                        const Vec3i32 &tri_cur = m_mesh.its.indices[src_cur];
+                        const Vec3i32 &tri_nbr = m_mesh.its.indices[src_nbr];
+                        bool blocked = false;
+                        for (int ei = 0; ei < 3 && !blocked; ++ei) {
+                            int ea = tri_cur[ei], eb = tri_cur[(ei + 1) % 3];
+                            for (int ej = 0; ej < 3; ++ej) {
+                                int na = tri_nbr[ej], nb = tri_nbr[(ej + 1) % 3];
+                                if ((ea == na && eb == nb) || (ea == nb && eb == na)) {
+                                    int lo = std::min(ea, eb), hi = std::max(ea, eb);
+                                    if (m_boundary_edges.count({lo, hi}) > 0)
+                                        blocked = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (blocked)
+                            continue;
+                    }
                 }
 
                 const Vec3f& n1 = m_face_normals[m_triangles[tr_idx].source_triangle];

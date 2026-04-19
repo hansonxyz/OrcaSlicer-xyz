@@ -928,8 +928,9 @@ void GLGizmoMmuSegmentation::update_model_object()
             continue;
         ++idx;
         updated |= mv->mmu_segmentation_facets.set(*m_triangle_selectors[idx].get());
-        // xyz fork: save boundary paths to model volume
-        if (idx < (int)m_boundary_painters.size() && m_boundary_painters[idx].has_boundaries()) {
+        // xyz fork: save boundary paths (completed + pending) to model volume
+        if (idx < (int)m_boundary_painters.size()
+            && (m_boundary_painters[idx].has_boundaries() || m_boundary_painters[idx].has_pending())) {
             std::string data = m_boundary_painters[idx].serialize();
             if (data != mv->boundary_paths_data) {
                 mv->boundary_paths_data = data;
