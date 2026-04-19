@@ -69,6 +69,8 @@ public:
     int set_on_local_message_fn(OnMessageFn fn) override;
     int set_queue_on_main_fn(QueueOnMainFn fn) override;
 
+    const OpenBambu::Agent &agent() const { return m_agent; }
+
 private:
     OpenBambu::Agent m_agent;
     std::string m_log_dir;

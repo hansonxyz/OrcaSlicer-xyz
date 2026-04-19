@@ -383,6 +383,7 @@ protected:
     wxStaticText *m_ob_fan_parts_label{nullptr};
     wxStaticText *m_ob_fan_aux_label{nullptr};
     wxStaticText *m_ob_fan_chamber_label{nullptr};
+    wxWindow     *m_ob_settings_btn{nullptr};
     wxBitmap m_item_placeholder;
     ScalableBitmap m_thumbnail_placeholder;
     ScalableBitmap m_thumbnail_brokenimg;

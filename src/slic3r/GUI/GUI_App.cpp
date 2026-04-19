@@ -120,6 +120,7 @@
 #include "ModelMall.hpp"
 #include "HintNotification.hpp"
 
+#include "libslic3r/GitCommitHash.hpp"
 #include "slic3r/Utils/NetworkAgentFactory.hpp"
 #include "slic3r/Utils/BBLNetworkPlugin.hpp"
 #include "slic3r/Utils/bambu_networking.hpp"
@@ -2510,7 +2511,7 @@ void GUI_App::init_app_config()
     // Load custom basic settings visibility config if present
     BasicSettingsConfig::instance().load();
 
-    BOOST_LOG_TRIVIAL(info) << boost::format("gui mode, Current OrcaSlicer Version %1% build %2%") % SoftFever_VERSION % GIT_COMMIT_HASH;
+    BOOST_LOG_TRIVIAL(info) << boost::format("gui mode, Current OrcaSlicer Version %1% build %2%") % SoftFever_VERSION % get_git_commit_hash();
 
     //BBS: remove GCodeViewer as seperate APP logic
 	if (!app_config)

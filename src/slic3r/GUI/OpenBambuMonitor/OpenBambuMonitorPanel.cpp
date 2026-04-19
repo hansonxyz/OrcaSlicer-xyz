@@ -42,10 +42,30 @@
 
 #include "OpenBambuMonitorPanel.hpp"
 
+#include <chrono>
+
 namespace Slic3r {
 namespace GUI {
 
 #define REFRESH_INTERVAL       1000
+
+// Timing helper for performance diagnostics
+struct ScopedTimer {
+    const char *label;
+    std::chrono::steady_clock::time_point start;
+    ScopedTimer(const char *l) : label(l), start(std::chrono::steady_clock::now()) {
+        BOOST_LOG_TRIVIAL(info) << "XYZ_PERF [" << label << "] START";
+    }
+    ~ScopedTimer() {
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start).count();
+        BOOST_LOG_TRIVIAL(info) << "XYZ_PERF [" << label << "] END (" << ms << "ms)";
+    }
+    long elapsed_ms() const {
+        return (long)std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - start).count();
+    }
+};
 
 OpenBambuMonitorPanel::OpenBambuMonitorPanel(wxWindow* parent, wxWindowID id, const wxPoint& pos, const wxSize& size, long style)
     : wxPanel(parent, id, pos, size, style),
@@ -202,6 +222,13 @@ void OpenBambuMonitorPanel::init_tabpanel()
     });
     m_spinner_timer = new wxTimer(this, wxNewId());
 
+    // "Printer Offline" overlay label on the camera area
+    m_offline_label = new wxStaticText(m_status_info_panel, wxID_ANY, _L("Printer Offline"),
+        wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER_HORIZONTAL);
+    m_offline_label->SetFont(wxFont(16, wxFONTFAMILY_DEFAULT, wxFONTSTYLE_NORMAL, wxFONTWEIGHT_BOLD));
+    m_offline_label->SetForegroundColour(wxColour(180, 180, 180));
+    m_offline_label->Hide();
+
     m_initialized = true;
     show_status((int)MonitorStatus::MONITOR_NO_PRINTER);
 }
@@ -312,6 +339,8 @@ void OpenBambuMonitorPanel::update_all()
     if (!m_initialized)
         return;
 
+    ScopedTimer ua_timer("update_all");
+
     Slic3r::DeviceManager* dev = Slic3r::GUI::wxGetApp().getDeviceManager();
     if (!dev) return;
     obj = dev->get_selected_machine();
@@ -331,28 +360,57 @@ void OpenBambuMonitorPanel::update_all()
 
     if (obj->is_connecting()) {
         show_status(MONITOR_CONNECTING);
+        if (m_offline_label && m_offline_label->IsShown()) m_offline_label->Hide();
         return;
     } else if (!obj->is_connected()) {
         show_status((int) MONITOR_DISCONNECTED);
+        // Show "Printer Offline" overlay on camera area
+        if (m_offline_label && !m_offline_label->IsShown()) {
+            auto *cam = m_status_info_panel->get_media_ctrl();
+            if (cam) {
+                wxPoint cam_pos = cam->GetScreenPosition();
+                wxPoint panel_pos = m_status_info_panel->GetScreenPosition();
+                wxSize cam_size = cam->GetSize();
+                m_offline_label->SetSize(cam_size.x, -1);
+                m_offline_label->Wrap(cam_size.x);
+                wxSize lbl_size = m_offline_label->GetBestSize();
+                int x = (cam_pos.x - panel_pos.x) + (cam_size.x - lbl_size.x) / 2;
+                int y = (cam_pos.y - panel_pos.y) + (cam_size.y - lbl_size.y) / 2;
+                m_offline_label->SetPosition(wxPoint(x, y));
+                m_offline_label->Show();
+                m_offline_label->Raise();
+            }
+        }
+        // Hide spinner if showing
+        if (m_camera_spinner && m_camera_spinner->IsShown()) {
+            m_camera_spinner->Hide();
+            m_spinner_timer->Stop();
+        }
         return;
     }
 
     show_status(MONITOR_NORMAL);
+    if (m_offline_label && m_offline_label->IsShown()) m_offline_label->Hide();
 
     auto current_page = m_tabpanel->GetCurrentPage();
     if (current_page == m_status_info_panel) {
         if (m_status_info_panel->IsShown()) {
+            BOOST_LOG_TRIVIAL(info) << "XYZ_PERF [update_all] StatusPanel::update start @" << ua_timer.elapsed_ms() << "ms";
             m_status_info_panel->obj = obj;
             m_status_info_panel->m_media_play_ctrl->SetMachineObject(obj);
             m_status_info_panel->update(obj);
+            BOOST_LOG_TRIVIAL(info) << "XYZ_PERF [update_all] StatusPanel::update done @" << ua_timer.elapsed_ms() << "ms";
         }
     } else if (current_page == m_media_file_panel) {
         m_media_file_panel->UpdateByObj(obj);
     }
 
     // Update camera loading spinner and printer list highlight
+    BOOST_LOG_TRIVIAL(info) << "XYZ_PERF [update_all] update_camera_spinner start @" << ua_timer.elapsed_ms() << "ms";
     update_camera_spinner();
+    BOOST_LOG_TRIVIAL(info) << "XYZ_PERF [update_all] update_printer_list start @" << ua_timer.elapsed_ms() << "ms";
     update_printer_list();
+    BOOST_LOG_TRIVIAL(info) << "XYZ_PERF [update_all] update_printer_list done @" << ua_timer.elapsed_ms() << "ms";
 
     // After first data arrives for a new printer, trigger a layout refresh
     // so AMS cards and other dynamic content render correctly.
@@ -381,7 +439,8 @@ void OpenBambuMonitorPanel::update_all()
 
 bool OpenBambuMonitorPanel::Show(bool show)
 {
-    BOOST_LOG_TRIVIAL(info) << "OpenBambuMonitorPanel::Show(" << show << ") called";
+    ScopedTimer show_timer(show ? "Show(true)" : "Show(false)");
+
 #ifdef __APPLE__
     wxGetApp().mainframe->SetMinSize(wxGetApp().plater()->GetMinSize());
 #endif
@@ -393,25 +452,33 @@ bool OpenBambuMonitorPanel::Show(bool show)
         m_refresh_timer->Stop();
         m_refresh_timer->SetOwner(this);
         m_refresh_timer->Start(REFRESH_INTERVAL);
+
+        BOOST_LOG_TRIVIAL(info) << "XYZ_PERF [Show] update_all start @" << show_timer.elapsed_ms() << "ms";
         if (update_flag) { update_all(); }
+        BOOST_LOG_TRIVIAL(info) << "XYZ_PERF [Show] update_all done @" << show_timer.elapsed_ms() << "ms";
 
         // Trigger layout kick when data arrives
         m_needs_layout_kick = true;
 
         // Start printer list refresh
+        BOOST_LOG_TRIVIAL(info) << "XYZ_PERF [Show] update_printer_list start @" << show_timer.elapsed_ms() << "ms";
         update_printer_list();
+        BOOST_LOG_TRIVIAL(info) << "XYZ_PERF [Show] update_printer_list done @" << show_timer.elapsed_ms() << "ms";
         if (m_printer_list_timer) {
             m_printer_list_timer->Start(20000); // refresh every 20 seconds
         }
 
         if (dev) {
+            BOOST_LOG_TRIVIAL(info) << "XYZ_PERF [Show] load_machine start @" << show_timer.elapsed_ms() << "ms";
             obj = dev->get_selected_machine();
             if (obj == nullptr) {
                 dev->load_last_machine();
                 obj = dev->get_selected_machine();
-            } else {
-                obj->reset_update_time();
             }
+            BOOST_LOG_TRIVIAL(info) << "XYZ_PERF [Show] load_machine done @" << show_timer.elapsed_ms() << "ms"
+                << " obj=" << (obj ? obj->get_dev_id() : "null")
+                << " is_online=" << (obj ? (obj->m_is_online ? "true" : "false") : "n/a")
+                << " is_connected=" << (obj ? (obj->is_connected() ? "true" : "false") : "n/a");
         }
 
         // Deferred layout kick — initial show often has stale sizes from
@@ -455,55 +522,128 @@ void OpenBambuMonitorPanel::update_printer_list()
     if (auto *sel = dev->get_selected_machine())
         selected_id = sel->get_dev_id();
 
-    // Check if list actually changed
-    if (m_printer_buttons.size() == machines.size()) {
-        bool same = true;
+    // Update known printers: mark all as offline, then mark online ones
+    for (auto &kp : m_known_printers)
+        kp.second.online = false;
+
+    for (auto &pair : machines) {
+        auto *machine = pair.second;
+        if (!machine) continue;
+        std::string dev_id = machine->get_dev_id();
+        // Use m_is_online (set by SSDP) as the authoritative online indicator,
+        // not just "exists in localMachineList" (which includes saved-but-offline printers)
+        bool online = machine->m_is_online;
+        m_known_printers[dev_id] = {dev_id, machine->get_dev_name(), online};
+    }
+
+    // Auto-select next online printer if current selection is offline (OpenBambu LAN mode only)
+    if (!selected_id.empty() && !m_in_auto_select) {
+        auto sel_it = m_known_printers.find(selected_id);
+        bool selected_is_offline = (sel_it == m_known_printers.end() || !sel_it->second.online);
+        if (selected_is_offline) {
+            // Find first online printer with a saved access code
+            for (auto &kp : m_known_printers) {
+                if (kp.second.online) {
+                    std::string code = wxGetApp().app_config->get("user_access_code", kp.first);
+                    if (code.empty()) code = wxGetApp().app_config->get("access_code", kp.first);
+                    if (!code.empty()) {
+                        BOOST_LOG_TRIVIAL(info) << "OpenBambuMonitor: auto-selecting online printer "
+                            << kp.first << " (current " << selected_id << " is offline)";
+                        m_in_auto_select = true;
+                        select_printer_by_id(kp.first);
+                        m_in_auto_select = false;
+                        return; // select_printer_by_id calls update_printer_list again
+                    }
+                }
+            }
+            // No online printers — keep the offline one selected
+        }
+    }
+
+    // Build display list: check if it changed (printers added/removed or names changed)
+    bool list_changed = (m_printer_buttons.size() != m_known_printers.size());
+    if (!list_changed) {
         size_t i = 0;
-        for (auto &pair : machines) {
-            if (i >= m_printer_buttons.size() || m_printer_buttons[i]->GetName() != pair.first) {
-                same = false;
+        for (auto &kp : m_known_printers) {
+            if (i >= m_printer_buttons.size() || m_printer_buttons[i]->GetName() != kp.first) {
+                list_changed = true;
                 break;
+            }
+            // Check if display name changed (alias was saved)
+            auto *btn = dynamic_cast<TabButton*>(m_printer_buttons[i]);
+            if (btn) {
+                std::string alias = wxGetApp().app_config->get("openbambu_alias_" + kp.first);
+                std::string expected = alias.empty() ? (kp.second.dev_name.empty() ? kp.first : kp.second.dev_name) : alias;
+                wxString current_label = btn->GetLabel();
+                // Strip offline indicator prefix if present
+                wxString expected_label = kp.second.online ? wxString::FromUTF8(expected)
+                    : wxString::FromUTF8("\xE2\x97\x8F ") + wxString::FromUTF8(expected);
+                if (current_label != expected_label) {
+                    list_changed = true;
+                    break;
+                }
             }
             i++;
         }
-        if (same) {
-            // Just update selection highlight
-            for (auto *w : m_printer_buttons) {
-                auto *btn = dynamic_cast<TabButton*>(w);
-                if (!btn) continue;
-                bool is_sel = (btn->GetName() == selected_id);
-                btn->SetBackgroundColor(is_sel ? wxColour("#BFE1DE") : wxColour("#FEFFFF"));
-                btn->Refresh();
-            }
-            return;
+    }
+
+    static const wxColour BG_NORMAL("#FEFFFF");
+    static const wxColour BG_SELECTED("#BFE1DE");
+    static const wxColour TEXT_ONLINE(*wxBLACK);
+    static const wxColour TEXT_OFFLINE(120, 120, 120);
+
+    if (!list_changed) {
+        // Just update highlights and online/offline state
+        for (auto *w : m_printer_buttons) {
+            auto *btn = dynamic_cast<TabButton*>(w);
+            if (!btn) continue;
+            std::string dev_id = btn->GetName().ToStdString();
+            bool is_sel = (dev_id == selected_id);
+            btn->SetBackgroundColor(is_sel ? BG_SELECTED : BG_NORMAL);
+            auto it = m_known_printers.find(dev_id);
+            bool online = (it != m_known_printers.end() && it->second.online);
+            btn->SetTextColor(online ? TEXT_ONLINE : TEXT_OFFLINE);
+            btn->Refresh();
         }
+        return;
     }
 
     // Rebuild the list
     m_printer_list_sizer->Clear(true);
     m_printer_buttons.clear();
 
-    // Use TabButton — the exact same widget as Status/Storage buttons
-    static const wxColour BG_NORMAL("#FEFFFF");
-    static const wxColour BG_SELECTED("#BFE1DE");
     ScalableBitmap arrow_img(m_printer_list_panel, "monitor_arrow", 14);
     int em = em_unit(m_printer_list_panel);
 
-    for (auto &pair : machines) {
-        auto *machine = pair.second;
-        if (!machine) continue;
+    for (auto &kp : m_known_printers) {
+        auto &printer = kp.second;
+        bool is_sel = (printer.dev_id == selected_id);
 
-        std::string dev_id = machine->get_dev_id();
-        bool is_sel = (dev_id == selected_id);
+        // Show saved alias if exists, otherwise device ID
+        std::string alias = wxGetApp().app_config->get("openbambu_alias_" + printer.dev_id);
+        std::string display_name;
+        if (!alias.empty()) {
+            display_name = alias;
+        } else {
+            display_name = printer.dev_name.empty() ? printer.dev_id : printer.dev_name;
+        }
 
-        auto *btn = new TabButton(m_printer_list_panel, wxString::FromUTF8(dev_id), arrow_img, wxNO_BORDER);
+        // Offline indicator: orange dot prefix
+        wxString label;
+        if (!printer.online) {
+            label = wxString::FromUTF8("\xE2\x97\x8F ") + wxString::FromUTF8(display_name); // ● prefix
+        } else {
+            label = wxString::FromUTF8(display_name);
+        }
+
+        auto *btn = new TabButton(m_printer_list_panel, label, arrow_img, wxNO_BORDER);
         btn->SetCornerRadius(0);
         btn->SetMinSize({220 * em / 10, 46 * em / 10});
         btn->SetBackgroundColor(is_sel ? BG_SELECTED : BG_NORMAL);
-        btn->SetTextColor(*wxBLACK);
-        btn->SetName(dev_id);
+        btn->SetTextColor(printer.online ? TEXT_ONLINE : TEXT_OFFLINE);
+        btn->SetName(printer.dev_id);
 
-        btn->Bind(wxEVT_BUTTON, [this, dev_id](wxCommandEvent&) {
+        btn->Bind(wxEVT_BUTTON, [this, dev_id = printer.dev_id](wxCommandEvent&) {
             select_printer_by_id(dev_id);
         });
 
@@ -513,17 +653,20 @@ void OpenBambuMonitorPanel::update_printer_list()
 
     m_printer_list_panel->Layout();
     m_printer_list_panel->Fit();
-    // Re-layout the sidebar to accommodate the new button heights
     if (auto *parent = m_printer_list_panel->GetParent())
         parent->Layout();
 }
 
 void OpenBambuMonitorPanel::select_printer_by_id(const std::string &dev_id)
 {
+    ScopedTimer sel_timer("select_printer_by_id");
+    BOOST_LOG_TRIVIAL(info) << "XYZ_PERF [select_printer] dev_id=" << dev_id;
+
     Slic3r::DeviceManager* dev = Slic3r::GUI::wxGetApp().getDeviceManager();
     if (!dev) return;
 
     // Stop current camera feed BEFORE switching machines
+    BOOST_LOG_TRIVIAL(info) << "XYZ_PERF [select_printer] stop_stream start @" << sel_timer.elapsed_ms() << "ms";
     auto *ctrl = m_status_info_panel->get_media_play_ctrl();
     if (ctrl) {
         try {
@@ -531,12 +674,47 @@ void OpenBambuMonitorPanel::select_printer_by_id(const std::string &dev_id)
             ctrl->stop_stream();
         } catch (...) {}
     }
+    BOOST_LOG_TRIVIAL(info) << "XYZ_PERF [select_printer] stop_stream done @" << sel_timer.elapsed_ms() << "ms";
 
+    // Check if printer is online
+    auto it = m_known_printers.find(dev_id);
+    bool is_online = (it != m_known_printers.end() && it->second.online);
+    BOOST_LOG_TRIVIAL(info) << "XYZ_PERF [select_printer] is_online=" << (is_online ? "true" : "false");
+
+    BOOST_LOG_TRIVIAL(info) << "XYZ_PERF [select_printer] set_selected_machine start @" << sel_timer.elapsed_ms() << "ms";
     if (!dev->set_selected_machine(dev_id))
         return;
+    BOOST_LOG_TRIVIAL(info) << "XYZ_PERF [select_printer] set_selected_machine done @" << sel_timer.elapsed_ms() << "ms";
 
     set_default();
-    m_needs_layout_kick = true;
+
+    if (is_online) {
+        m_needs_layout_kick = true;
+        if (m_offline_label) m_offline_label->Hide();
+    } else {
+        // Printer is offline — don't try to connect or start camera
+        m_needs_layout_kick = false;
+        // Show "Printer Offline" overlay on the camera area
+        if (m_offline_label) {
+            CallAfter([this]() {
+                auto *cam = m_status_info_panel->get_media_ctrl();
+                if (cam && cam->IsShown()) {
+                    wxPoint cam_pos = cam->GetScreenPosition();
+                    wxPoint panel_pos = m_status_info_panel->GetScreenPosition();
+                    wxSize cam_size = cam->GetSize();
+                    m_offline_label->SetSize(cam_size.x, -1);
+                    m_offline_label->Wrap(cam_size.x);
+                    wxSize lbl_size = m_offline_label->GetBestSize();
+                    int x = (cam_pos.x - panel_pos.x) + (cam_size.x - lbl_size.x) / 2;
+                    int y = (cam_pos.y - panel_pos.y) + (cam_size.y - lbl_size.y) / 2;
+                    m_offline_label->SetPosition(wxPoint(x, y));
+                }
+                m_offline_label->Show();
+                m_offline_label->Raise();
+            });
+        }
+    }
+
     update_all();
     update_printer_list(); // refresh highlights
 

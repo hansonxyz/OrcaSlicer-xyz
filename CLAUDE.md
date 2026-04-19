@@ -455,7 +455,7 @@ Never wipe the build directory just to rebuild after code changes. Ninja's incre
 **Build discipline (lessons learned):**
 - **Never kill a running build to "check on it" or "restart it."** Builds run at idle priority and take time. Killing mid-build wastes all the work done so far and forces recompilation of partially-built objects. Let the build finish, check the result, then act.
 - **Never say "clean build" when you mean incremental.** `build_incremental.ps1` is ALWAYS the right script for development. It handles CMake reconfiguration (for new files in CMakeLists.txt) and incremental compilation automatically. There is no reason to do a clean/full build during normal development.
-- **When a build is running in the background, wait for the notification.** Do not poll, do not sleep-and-check, do not kill it to restart. Do other useful work or tell the user the build is running. The notification system exists for exactly this purpose.
+- **When a build is running in the background, wait for the notification.** Do not poll, do not sleep-and-check, do not kill it to restart, and **do NOT repeatedly check build progress with `tail`**. Monitoring an in-progress build wastes tokens and money for zero benefit. Launch the build with `run_in_background`, then do other useful work or tell the user the build is running. Only read the build output **after** the background task completion notification arrives. The notification system exists for exactly this purpose.
 - **Adding new source files to CMakeLists.txt is an incremental build operation.** CMake detects the CMakeLists.txt change, reconfigures, and Ninja builds only the new/changed files. This is not a reason for a full rebuild.
 
 ### Build Artifacts Directory
@@ -472,7 +472,7 @@ Never wipe the build directory just to rebuild after code changes. Ninja's incre
 ### Git Workflow
 
 - Feature branch: `xyz` (off `main`)
-- Clean, atomic commits suitable for upstream PR submission
+- **ALWAYS commit ALL changes.** Never selectively stage files — git is used as a backup, not a collaboration tool. `git add -A` every commit. The only exception is build artifacts (`.exe`, `.obj`, `.dll` in build dirs). Untracked source files, config files, resources — all get committed together.
 - One feature at a time, in order listed in GOALS.md
 
 ### Git Remotes

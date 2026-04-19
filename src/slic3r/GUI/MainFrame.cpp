@@ -1339,6 +1339,9 @@ void MainFrame::init_tabpanel() {
     m_calibration->SetBackgroundColour(*wxWHITE);
     m_tabpanel->AddPage(m_calibration, _L("Calibration"), std::string("tab_calibration_active"), std::string("tab_calibration_active"), false);
 
+    m_debug_console = new DebugConsolePanel(m_tabpanel);
+    m_tabpanel->AddPage(m_debug_console, _L("Debug"), std::string("tab_auxiliary_active"), std::string("tab_auxiliary_active"), false);
+
     if (m_plater) {
         // load initial config
         auto full_config = wxGetApp().preset_bundle->full_config();
@@ -3262,6 +3265,18 @@ void MainFrame::init_menubar_as_editor()
     //m_topbar->AddDropDownMenuItem(language_item);
     //m_topbar->AddDropDownMenuItem(config_item);
     m_topbar->AddDropDownSubMenu(helpMenu, _L("Help"));
+
+    append_menu_item(
+        m_topbar->GetTopMenu(), wxID_ANY, _L("Debug Console"), "",
+        [this](wxCommandEvent &) {
+            if (!m_debug_console) return;
+            int idx = m_tabpanel->FindPage(m_debug_console);
+            if (idx != wxNOT_FOUND) {
+                m_tabpanel->SetSelection(idx);
+                m_debug_console->on_show();
+            }
+        },
+        "", nullptr, []() { return true; }, this);
 
     // SoftFever calibrations
 

@@ -1,6 +1,7 @@
 #include "AboutDialog.hpp"
 #include "I18N.hpp"
 
+#include "libslic3r/GitCommitHash.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/Color.hpp"
 #include "GUI.hpp"
@@ -271,7 +272,7 @@ AboutDialog::AboutDialog()
 
         vesizer->Add(0, 0, 1, wxEXPAND, FromDIP(5));
         auto          version_string = std::string(SoftFever_VERSION);
-        wxStaticText* credits_string = new wxStaticText(this, wxID_ANY, wxString::Format("Build %s", std::string(GIT_COMMIT_HASH)), wxDefaultPosition, wxDefaultSize);
+        wxStaticText* credits_string = new wxStaticText(this, wxID_ANY, wxString::Format("Build %s", get_git_commit_hash()), wxDefaultPosition, wxDefaultSize);
         credits_string->SetFont(_build_string_font);
         wxFont version_font = GetFont();
         #ifdef __WXMSW__

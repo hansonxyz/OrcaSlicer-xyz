@@ -81,6 +81,9 @@ private:
     wxBoxSizer*       m_printer_list_sizer{nullptr};
     wxTimer*          m_printer_list_timer{nullptr};
     std::vector<wxWindow*> m_printer_buttons;
+    // Track all printers ever seen (dev_id → dev_name), including offline
+    struct KnownPrinter { std::string dev_id; std::string dev_name; bool online; };
+    std::map<std::string, KnownPrinter> m_known_printers;
     void            update_printer_list();
     void            select_printer_by_id(const std::string &dev_id);
 
@@ -89,6 +92,9 @@ private:
     wxTimer*        m_spinner_timer{nullptr};
     int             m_spinner_angle{0};
     void            update_camera_spinner();
+
+    /* offline overlay */
+    wxStaticText*   m_offline_label{nullptr};
 
     /* images */
     wxBitmap m_signal_strong_img;
@@ -103,6 +109,7 @@ private:
     bool m_initialized { false };
     bool update_flag{false};
     bool m_needs_layout_kick{false}; // set true on printer change, cleared after first data arrives
+    bool m_in_auto_select{false}; // guard against recursive auto-select
     wxTimer* m_refresh_timer = nullptr;
 
 public:

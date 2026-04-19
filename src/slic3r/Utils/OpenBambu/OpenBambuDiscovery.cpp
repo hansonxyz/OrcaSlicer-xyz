@@ -3,13 +3,16 @@
 #ifdef _WIN32
 #  include <winsock2.h>
 #  include <ws2tcpip.h>
+#  include <iphlpapi.h>
 #  pragma comment(lib, "ws2_32.lib")
+#  pragma comment(lib, "iphlpapi.lib")
 #else
 #  include <sys/socket.h>
 #  include <netinet/in.h>
 #  include <arpa/inet.h>
 #  include <unistd.h>
-#  include <poll.h>
+#  include <ifaddrs.h>
+#  include <net/if.h>
 #  define closesocket close
 #endif
 
@@ -18,13 +21,14 @@
 #include <algorithm>
 #include <chrono>
 #include <map>
+#include <vector>
+#include <boost/log/trivial.hpp>
 
 namespace OpenBambu {
 
 static constexpr const char *SSDP_MULTICAST_ADDR = "239.255.255.250";
 static constexpr uint16_t SSDP_PORTS[] = {2021, 1990};
 static constexpr int NUM_SSDP_PORTS = 2;
-static constexpr const char *BAMBU_SEARCH_TARGET = "urn:bambulab-com:device:3dprinter:1";
 
 // M-SEARCH probe template
 static constexpr const char *MSEARCH_TEMPLATE =
@@ -73,6 +77,66 @@ static std::map<std::string, std::string> parse_headers(const std::string &msg)
     return headers;
 }
 
+// Enumerate all active IPv4 addresses on this machine (one per interface).
+// Skips loopback. Used to create per-interface sockets so SSDP probes go
+// out every NIC with the correct source IP.
+static std::vector<in_addr> get_local_ipv4_addresses()
+{
+    std::vector<in_addr> result;
+
+#ifdef _WIN32
+    ULONG bufSize = 15000;
+    std::vector<BYTE> buf(bufSize);
+    auto *addrs = reinterpret_cast<IP_ADAPTER_ADDRESSES *>(buf.data());
+
+    ULONG rc = GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER,
+                                    nullptr, addrs, &bufSize);
+    if (rc == ERROR_BUFFER_OVERFLOW) {
+        buf.resize(bufSize);
+        addrs = reinterpret_cast<IP_ADAPTER_ADDRESSES *>(buf.data());
+        rc = GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER,
+                                  nullptr, addrs, &bufSize);
+    }
+    if (rc != NO_ERROR)
+        return result;
+
+    for (auto *adapter = addrs; adapter; adapter = adapter->Next) {
+        if (adapter->OperStatus != IfOperStatusUp)
+            continue;
+        if (adapter->IfType == IF_TYPE_SOFTWARE_LOOPBACK)
+            continue;
+
+        for (auto *ua = adapter->FirstUnicastAddress; ua; ua = ua->Next) {
+            if (ua->Address.lpSockaddr->sa_family != AF_INET)
+                continue;
+            auto *sa = reinterpret_cast<sockaddr_in *>(ua->Address.lpSockaddr);
+            if ((ntohl(sa->sin_addr.s_addr) >> 24) == 127)
+                continue;
+            result.push_back(sa->sin_addr);
+        }
+    }
+#else
+    struct ifaddrs *ifa_list = nullptr;
+    if (getifaddrs(&ifa_list) != 0)
+        return result;
+
+    for (auto *ifa = ifa_list; ifa; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr || ifa->ifa_addr->sa_family != AF_INET)
+            continue;
+        if (!(ifa->ifa_flags & IFF_UP))
+            continue;
+        if (ifa->ifa_flags & IFF_LOOPBACK)
+            continue;
+
+        auto *sa = reinterpret_cast<sockaddr_in *>(ifa->ifa_addr);
+        result.push_back(sa->sin_addr);
+    }
+    freeifaddrs(ifa_list);
+#endif
+
+    return result;
+}
+
 Discovery::Discovery()
 {
 #ifdef _WIN32
@@ -109,91 +173,39 @@ void Discovery::stop()
         m_listener_thread.join();
 }
 
-static Discovery::socket_t create_multicast_socket(uint16_t port)
-{
-    auto sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (sock == Discovery::INVALID_SOCK)
-        return Discovery::INVALID_SOCK;
-
-    // Allow multiple listeners on the same port
-    int reuse = 1;
-    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (const char *)&reuse, sizeof(reuse));
-#ifdef SO_REUSEPORT
-    setsockopt(sock, SOL_SOCKET, SO_REUSEPORT, (const char *)&reuse, sizeof(reuse));
-#endif
-
-    // Bind to the multicast port
-    sockaddr_in bind_addr{};
-    bind_addr.sin_family = AF_INET;
-    bind_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    bind_addr.sin_port = htons(port);
-
-    if (bind(sock, (sockaddr *)&bind_addr, sizeof(bind_addr)) < 0) {
-        closesocket(sock);
-        return Discovery::INVALID_SOCK;
-    }
-
-    // Join the multicast group on ALL interfaces (not just the default)
-    // This is important on multi-homed systems (WSL, VPN, Hyper-V)
-    ip_mreq mreq{};
-    mreq.imr_multiaddr.s_addr = inet_addr(SSDP_MULTICAST_ADDR);
-    mreq.imr_interface.s_addr = htonl(INADDR_ANY);
-
-    fprintf(stderr, "[DEBUG] Binding multicast on port %d, joining group %s\n", port, SSDP_MULTICAST_ADDR);
-
-    if (setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, (const char *)&mreq, sizeof(mreq)) < 0) {
-        fprintf(stderr, "[DEBUG] Failed to join multicast group on port %d (error %d)\n", port,
-#ifdef _WIN32
-            WSAGetLastError()
-#else
-            errno
-#endif
-        );
-        closesocket(sock);
-        return Discovery::INVALID_SOCK;
-    }
-    fprintf(stderr, "[DEBUG] Successfully joined multicast, socket ready on port %d\n", port);
-
-    // Set receive timeout (1 second) so we can check stop_requested periodically
-#ifdef _WIN32
-    DWORD timeout_ms = 1000;
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout_ms, sizeof(timeout_ms));
-#else
-    struct timeval tv;
-    tv.tv_sec = 1;
-    tv.tv_usec = 0;
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-#endif
-
-    return sock;
-}
-
-void Discovery::send_msearch(socket_t sock, uint16_t port)
+void Discovery::send_probes(const std::vector<socket_t> &socks, uint16_t port)
 {
     char buf[512];
     snprintf(buf, sizeof(buf), MSEARCH_TEMPLATE, port);
+    int msg_len = (int)strlen(buf);
 
-    sockaddr_in dest{};
-    dest.sin_family = AF_INET;
-    dest.sin_addr.s_addr = inet_addr(SSDP_MULTICAST_ADDR);
-    dest.sin_port = htons(port);
+    sockaddr_in mcast_dest{};
+    mcast_dest.sin_family = AF_INET;
+    mcast_dest.sin_addr.s_addr = inet_addr(SSDP_MULTICAST_ADDR);
+    mcast_dest.sin_port = htons(port);
 
-    int sent = sendto(sock, buf, (int)strlen(buf), 0, (sockaddr *)&dest, sizeof(dest));
-    (void)sent; // silence unused warning in release
-}
+    sockaddr_in bcast_dest{};
+    bcast_dest.sin_family = AF_INET;
+    bcast_dest.sin_addr.s_addr = inet_addr("255.255.255.255");
+    bcast_dest.sin_port = htons(port);
 
-void Discovery::send_msearch_broadcast(socket_t sock, uint16_t port)
-{
-    char buf[512];
-    snprintf(buf, sizeof(buf), MSEARCH_TEMPLATE, port);
+    for (auto sock : socks) {
+        // Multicast probe
+        int sent = sendto(sock, buf, msg_len, 0, (sockaddr *)&mcast_dest, sizeof(mcast_dest));
+        m_diag.last_send_result.store(sent);
+        if (sent < 0) {
+#ifdef _WIN32
+            m_diag.last_send_error.store(WSAGetLastError());
+#else
+            m_diag.last_send_error.store(errno);
+#endif
+        }
+        m_diag.probes_sent++;
 
-    sockaddr_in dest{};
-    dest.sin_family = AF_INET;
-    dest.sin_addr.s_addr = inet_addr("255.255.255.255");
-    dest.sin_port = htons(port);
-
-    int sent = sendto(sock, buf, (int)strlen(buf), 0, (sockaddr *)&dest, sizeof(dest));
-    (void)sent;
+        // Broadcast probe
+        sendto(sock, buf, msg_len, 0, (sockaddr *)&bcast_dest, sizeof(bcast_dest));
+        m_diag.probes_sent++;
+    }
 }
 
 std::string Discovery::parse_ssdp_message(const std::string &message, const std::string &source_ip)
@@ -259,108 +271,200 @@ void Discovery::listener_thread_func()
 {
     m_running.store(true);
 
-    // Use a single ephemeral UDP socket for both M-SEARCH and receiving responses.
-    // Multicast sockets on fixed ports had issues with Windows firewall silently
-    // blocking inbound traffic. The ephemeral approach matches what works in practice.
-    socket_t sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (sock == INVALID_SOCK) {
+    // Create one socket per network interface, each bound to that interface's IP.
+    // This ensures the source IP in outgoing probes is correct so printers can
+    // send unicast responses back. Critical on multi-homed systems (Hyper-V, WSL, VPN).
+    auto ifaces = get_local_ipv4_addresses();
+    m_diag.interfaces_found.store((int)ifaces.size());
+
+    std::vector<socket_t> socks;
+
+    for (auto &addr : ifaces) {
+        socket_t sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (sock == INVALID_SOCK)
+            continue;
+
+        // Bind to this interface's IP on an ephemeral port
+        sockaddr_in bind_addr{};
+        bind_addr.sin_family = AF_INET;
+        bind_addr.sin_addr = addr;
+        bind_addr.sin_port = 0;
+        if (::bind(sock, (sockaddr *)&bind_addr, sizeof(bind_addr)) < 0) {
+            closesocket(sock);
+            continue;
+        }
+
+        // Enable broadcast
+        int bcast = 1;
+        setsockopt(sock, SOL_SOCKET, SO_BROADCAST, (const char *)&bcast, sizeof(bcast));
+
+        // Non-blocking mode for poll-based receive
+#ifdef _WIN32
+        u_long nonblock = 1;
+        ioctlsocket(sock, FIONBIO, &nonblock);
+#else
+        int flags = fcntl(sock, F_GETFL, 0);
+        fcntl(sock, F_SETFL, flags | O_NONBLOCK);
+#endif
+
+        BOOST_LOG_TRIVIAL(info) << "[SSDP] Created socket on " << inet_ntoa(addr);
+        socks.push_back(sock);
+    }
+
+    if (socks.empty()) {
+        BOOST_LOG_TRIVIAL(error) << "[SSDP] No usable network interfaces found";
         m_running.store(false);
         return;
     }
 
-    // Bind to any available port on the default route interface
-    sockaddr_in bind_addr{};
-    bind_addr.sin_family = AF_INET;
-    bind_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-    bind_addr.sin_port = 0;
-    bind(sock, (sockaddr *)&bind_addr, sizeof(bind_addr));
+    // Create multicast listener sockets on ports 2021 and 1990.
+    // Bambu printers (especially A1 series) broadcast unsolicited NOTIFY messages
+    // to 239.255.255.250 on these ports every ~5 seconds. The A1 Mini does NOT
+    // respond to M-SEARCH probes — it only sends NOTIFY. We must listen for these.
+    std::vector<socket_t> mcast_socks;
+    for (int i = 0; i < NUM_SSDP_PORTS; ++i) {
+        socket_t msock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        if (msock == INVALID_SOCK)
+            continue;
 
-    // Enable broadcast for wider compatibility
-    int bcast = 1;
-    setsockopt(sock, SOL_SOCKET, SO_BROADCAST, (const char *)&bcast, sizeof(bcast));
+        int reuse = 1;
+        setsockopt(msock, SOL_SOCKET, SO_REUSEADDR, (const char *)&reuse, sizeof(reuse));
 
-    // Set 2 second receive timeout
+        sockaddr_in bind_addr{};
+        bind_addr.sin_family = AF_INET;
+        bind_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+        bind_addr.sin_port = htons(SSDP_PORTS[i]);
+
+        if (::bind(msock, (sockaddr *)&bind_addr, sizeof(bind_addr)) < 0) {
+            closesocket(msock);
+            continue;
+        }
+
+        // Join multicast group on every interface
+        for (auto &addr : ifaces) {
+            ip_mreq mreq{};
+            mreq.imr_multiaddr.s_addr = inet_addr(SSDP_MULTICAST_ADDR);
+            mreq.imr_interface = addr;
+            setsockopt(msock, IPPROTO_IP, IP_ADD_MEMBERSHIP, (const char *)&mreq, sizeof(mreq));
+        }
+
+        // Non-blocking
 #ifdef _WIN32
-    DWORD timeout_ms = 2000;
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (const char *)&timeout_ms, sizeof(timeout_ms));
+        u_long nonblock = 1;
+        ioctlsocket(msock, FIONBIO, &nonblock);
 #else
-    struct timeval tv;
-    tv.tv_sec = 2;
-    tv.tv_usec = 0;
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        int flags = fcntl(msock, F_GETFL, 0);
+        fcntl(msock, F_SETFL, flags | O_NONBLOCK);
 #endif
 
-    // Send initial M-SEARCH probes (multicast + broadcast for reliability)
-    for (int i = 0; i < NUM_SSDP_PORTS; ++i) {
-        send_msearch(sock, SSDP_PORTS[i]);
-        // Also broadcast
-        send_msearch_broadcast(sock, SSDP_PORTS[i]);
+        BOOST_LOG_TRIVIAL(info) << "[SSDP] Multicast listener on port " << SSDP_PORTS[i];
+        mcast_socks.push_back(msock);
     }
 
+    // Combine all sockets for polling: per-interface sockets + multicast listeners
+    std::vector<socket_t> all_socks;
+    all_socks.insert(all_socks.end(), socks.begin(), socks.end());
+    all_socks.insert(all_socks.end(), mcast_socks.begin(), mcast_socks.end());
+
+    // Send initial M-SEARCH probes on all interfaces
+    for (int i = 0; i < NUM_SSDP_PORTS; ++i)
+        send_probes(socks, SSDP_PORTS[i]);
+
     auto last_msearch = std::chrono::steady_clock::now();
+    m_diag.last_probe_time = last_msearch;
     char buf[4096];
 
     while (!m_stop_requested.load()) {
-        sockaddr_in sender{};
-        int sender_len = sizeof(sender);
+        // Poll all sockets for incoming data
+        bool got_any = false;
 
-        int n = recvfrom(sock, buf, sizeof(buf) - 1, 0,
-                         (sockaddr *)&sender, &sender_len);
+        for (auto sock : all_socks) {
+            for (;;) {
+                sockaddr_in sender{};
+                int sender_len = sizeof(sender);
+                int n = recvfrom(sock, buf, sizeof(buf) - 1, 0,
+                                 (sockaddr *)&sender, &sender_len);
 
-        if (n > 0) {
-            buf[n] = '\0';
-            std::string source_ip = inet_ntoa(sender.sin_addr);
-            std::string json = parse_ssdp_message(std::string(buf, n), source_ip);
-
-            if (!json.empty()) {
-                // Dedup: extract dev_id from JSON for rate-limiting
-                bool should_fire = true;
-                {
-                    // Quick extract of dev_id from the JSON
-                    std::string dev_id;
-                    auto pos = json.find("\"dev_id\":\"");
-                    if (pos != std::string::npos) {
-                        pos += 10;
-                        auto end = json.find("\"", pos);
-                        if (end != std::string::npos)
-                            dev_id = json.substr(pos, end - pos);
-                    }
-
-                    if (!dev_id.empty()) {
-                        std::lock_guard<std::mutex> lock(m_dedup_mutex);
-                        auto now_dedup = std::chrono::steady_clock::now();
-                        auto it = m_last_seen.find(dev_id);
-                        if (it != m_last_seen.end()) {
-                            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-                                now_dedup - it->second).count();
-                            if (elapsed < DEDUP_INTERVAL_SEC)
-                                should_fire = false;
-                        }
-                        if (should_fire)
-                            m_last_seen[dev_id] = now_dedup;
-                    }
+                if (n <= 0) {
+#ifdef _WIN32
+                    int err = WSAGetLastError();
+                    if (err != WSAEWOULDBLOCK)
+                        m_diag.recv_errors++;
+#endif
+                    break; // No more data on this socket
                 }
 
-                if (should_fire) {
-                    std::lock_guard<std::mutex> lock(m_callback_mutex);
-                    if (m_callback)
-                        m_callback(json);
+                got_any = true;
+                buf[n] = '\0';
+                m_diag.packets_received++;
+                std::string source_ip = inet_ntoa(sender.sin_addr);
+                std::string json = parse_ssdp_message(std::string(buf, n), source_ip);
+
+                if (!json.empty()) {
+                    m_diag.bambu_responses++;
+                    m_diag.last_response_time = std::chrono::steady_clock::now();
+
+                    // Dedup: only fire callback once per device per interval
+                    bool should_fire = true;
+                    {
+                        std::string dev_id;
+                        auto pos = json.find("\"dev_id\":\"");
+                        if (pos != std::string::npos) {
+                            pos += 10;
+                            auto end = json.find("\"", pos);
+                            if (end != std::string::npos)
+                                dev_id = json.substr(pos, end - pos);
+                        }
+
+                        if (!dev_id.empty()) {
+                            std::lock_guard<std::mutex> lock(m_dedup_mutex);
+                            auto now_dedup = std::chrono::steady_clock::now();
+                            auto it = m_last_seen.find(dev_id);
+                            if (it != m_last_seen.end()) {
+                                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                                    now_dedup - it->second).count();
+                                if (elapsed < DEDUP_INTERVAL_SEC)
+                                    should_fire = false;
+                            }
+                            if (should_fire)
+                                m_last_seen[dev_id] = now_dedup;
+                            else
+                                m_diag.dedup_suppressed++;
+                        }
+                    }
+
+                    if (should_fire) {
+                        m_diag.callbacks_fired++;
+                        std::lock_guard<std::mutex> lock(m_callback_mutex);
+                        if (m_callback)
+                            m_callback(json);
+                    }
                 }
             }
         }
 
-        // Re-send M-SEARCH every 30 seconds
+        if (!got_any) {
+            m_diag.recv_timeouts++;
+            // Sleep briefly to avoid busy-spinning when no data
+#ifdef _WIN32
+            Sleep(50);
+#else
+            usleep(50000);
+#endif
+        }
+
+        // Re-send M-SEARCH every 20 seconds
         auto now = std::chrono::steady_clock::now();
-        if (std::chrono::duration_cast<std::chrono::seconds>(now - last_msearch).count() >= 30) {
-            for (int i = 0; i < NUM_SSDP_PORTS; ++i) {
-                send_msearch(sock, SSDP_PORTS[i]);
-                send_msearch_broadcast(sock, SSDP_PORTS[i]);
-            }
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - last_msearch).count() >= 20) {
+            for (int i = 0; i < NUM_SSDP_PORTS; ++i)
+                send_probes(socks, SSDP_PORTS[i]);
+            m_diag.last_probe_time = now;
             last_msearch = now;
         }
     }
 
-    closesocket(sock);
+    for (auto sock : all_socks)
+        closesocket(sock);
 
     m_running.store(false);
 }

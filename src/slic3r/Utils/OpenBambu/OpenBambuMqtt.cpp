@@ -1,5 +1,6 @@
 #include "OpenBambuMqtt.hpp"
 #include <boost/log/trivial.hpp>
+#include <chrono>
 
 #ifdef _WIN32
 #  include <winsock2.h>
@@ -228,6 +229,8 @@ bool MqttClient::connect(const std::string &host, uint16_t port,
                           const std::string &access_code,
                           const std::string &ca_pem_path)
 {
+    auto connect_start = std::chrono::steady_clock::now();
+    BOOST_LOG_TRIVIAL(info) << "XYZ_PERF [MQTT::connect] START host=" << host << " port=" << port << " serial=" << serial;
     if (m_connected.load()) disconnect();
 
     // Save connection params for auto-reconnect
@@ -283,9 +286,15 @@ bool MqttClient::connect(const std::string &host, uint16_t port,
 
     // TCP connect
     if (::connect(m_socket, (sockaddr *)&addr, sizeof(addr)) < 0) {
+        auto tcp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - connect_start).count();
+        BOOST_LOG_TRIVIAL(info) << "XYZ_PERF [MQTT::connect] TCP connect FAILED after " << tcp_ms << "ms";
         fprintf(stderr, "MQTT: TCP connect to %s:%d failed\n", host.c_str(), port);
         closesocket(m_socket); m_socket = -1;
         return false;
+    }
+    {
+        auto tcp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - connect_start).count();
+        BOOST_LOG_TRIVIAL(info) << "XYZ_PERF [MQTT::connect] TCP connected @" << tcp_ms << "ms";
     }
 
     // Set up TLS
@@ -323,6 +332,8 @@ bool MqttClient::connect(const std::string &host, uint16_t port,
 
     // TLS handshake
     if (SSL_connect((SSL *)m_ssl) != 1) {
+        auto tls_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - connect_start).count();
+        BOOST_LOG_TRIVIAL(info) << "XYZ_PERF [MQTT::connect] TLS handshake FAILED @" << tls_ms << "ms";
         fprintf(stderr, "MQTT: TLS handshake failed\n");
         unsigned long err;
         while ((err = ERR_get_error()) != 0) {
@@ -334,6 +345,10 @@ bool MqttClient::connect(const std::string &host, uint16_t port,
         SSL_CTX_free((SSL_CTX *)m_ssl_ctx); m_ssl_ctx = nullptr;
         closesocket(m_socket); m_socket = -1;
         return false;
+    }
+    {
+        auto tls_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - connect_start).count();
+        BOOST_LOG_TRIVIAL(info) << "XYZ_PERF [MQTT::connect] TLS handshake done @" << tls_ms << "ms";
     }
 
     // Send MQTT CONNECT
@@ -358,6 +373,10 @@ bool MqttClient::connect(const std::string &host, uint16_t port,
         return false;
     }
 
+    {
+        auto mqtt_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - connect_start).count();
+        BOOST_LOG_TRIVIAL(info) << "XYZ_PERF [MQTT::connect] CONNACK received @" << mqtt_ms << "ms — fully connected";
+    }
     fprintf(stderr, "MQTT: Connected to %s:%d as %s\n", host.c_str(), port, client_id.c_str());
 
     // Subscribe to the report topic

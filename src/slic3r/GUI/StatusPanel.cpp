@@ -6099,6 +6099,124 @@ void StatusPanel::set_openbambu_mode(bool enabled)
         m_switch_lamp->SetLabels(_L("On"), _L("Off"));
     }
 
+    // Add "Printer Settings" button to the Control title bar, left of "Printer Parts"
+    if (m_panel_control_title && m_parts_btn) {
+        auto *settings_btn = new Button(m_panel_control_title, _L("Printer Settings"));
+        settings_btn->SetStyle(ButtonStyle::Confirm, ButtonType::Window);
+        m_ob_settings_btn = settings_btn;
+
+        settings_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+            std::string dev_id = obj ? obj->get_dev_id() : "";
+            std::string dev_name = obj ? obj->get_dev_name() : "";
+            std::string printer_type = obj ? obj->printer_type : "";
+            std::string dev_ip = obj ? obj->get_dev_ip() : "";
+            std::string access_code = obj ? obj->get_access_code() : "";
+
+            if (dev_id.empty()) {
+                wxMessageBox(_L("No printer selected."), _L("Printer Settings"), wxOK | wxICON_INFORMATION);
+                return;
+            }
+
+            // Build info + settings dialog
+            wxDialog dlg(this, wxID_ANY, _L("Printer Settings"), wxDefaultPosition, wxSize(FromDIP(400), FromDIP(350)));
+            auto *main_sizer = new wxBoxSizer(wxVERTICAL);
+
+            // Info section
+            auto *info_box = new wxStaticBoxSizer(wxVERTICAL, &dlg, _L("Printer Information"));
+            auto add_info = [&](const wxString &label, const wxString &value) {
+                auto *row = new wxBoxSizer(wxHORIZONTAL);
+                auto *lbl = new wxStaticText(&dlg, wxID_ANY, label + ":", wxDefaultPosition, wxSize(FromDIP(120), -1));
+                lbl->SetFont(::Label::Body_13);
+                auto *val = new wxStaticText(&dlg, wxID_ANY, value);
+                val->SetFont(::Label::Head_13);
+                row->Add(lbl, 0, wxALIGN_CENTER_VERTICAL);
+                row->Add(val, 1, wxALIGN_CENTER_VERTICAL);
+                info_box->Add(row, 0, wxEXPAND | wxALL, FromDIP(3));
+            };
+            add_info(_L("Device ID"), wxString::FromUTF8(dev_name));
+            add_info(_L("Serial Number"), wxString::FromUTF8(dev_id));
+            add_info(_L("Model"), wxString::FromUTF8(printer_type));
+            add_info(_L("IP Address"), wxString::FromUTF8(dev_ip));
+            main_sizer->Add(info_box, 0, wxEXPAND | wxALL, FromDIP(10));
+
+            // Settings section
+            auto *settings_box = new wxStaticBoxSizer(wxVERTICAL, &dlg, _L("Settings"));
+
+            // Printer Name — pre-fill with saved alias, or current dev_name if no alias
+            auto *name_row = new wxBoxSizer(wxHORIZONTAL);
+            auto *name_lbl = new wxStaticText(&dlg, wxID_ANY, _L("Printer Name:"), wxDefaultPosition, wxSize(FromDIP(120), -1));
+            name_lbl->SetFont(::Label::Body_13);
+            std::string saved_alias = wxGetApp().app_config->get("openbambu_alias_" + dev_id);
+            std::string name_value = saved_alias.empty() ? dev_name : saved_alias;
+            auto *name_input = new wxTextCtrl(&dlg, wxID_ANY, wxString::FromUTF8(name_value));
+            name_input->SetFont(::Label::Body_13);
+            name_row->Add(name_lbl, 0, wxALIGN_CENTER_VERTICAL);
+            name_row->Add(name_input, 1, wxEXPAND);
+            settings_box->Add(name_row, 0, wxEXPAND | wxALL, FromDIP(3));
+
+            // Access Code
+            auto *code_row = new wxBoxSizer(wxHORIZONTAL);
+            auto *code_lbl = new wxStaticText(&dlg, wxID_ANY, _L("Access Code:"), wxDefaultPosition, wxSize(FromDIP(120), -1));
+            code_lbl->SetFont(::Label::Body_13);
+            auto *code_input = new wxTextCtrl(&dlg, wxID_ANY, wxString::FromUTF8(access_code));
+            code_input->SetFont(::Label::Body_13);
+            code_row->Add(code_lbl, 0, wxALIGN_CENTER_VERTICAL);
+            code_row->Add(code_input, 1, wxEXPAND);
+            settings_box->Add(code_row, 0, wxEXPAND | wxALL, FromDIP(3));
+
+            main_sizer->Add(settings_box, 0, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(10));
+
+            // Buttons
+            auto *btn_sizer = dlg.CreateStdDialogButtonSizer(wxOK | wxCANCEL);
+            main_sizer->Add(btn_sizer, 0, wxALIGN_CENTER | wxALL, FromDIP(10));
+
+            dlg.SetSizer(main_sizer);
+            dlg.Layout();
+            dlg.Fit();
+
+            if (dlg.ShowModal() == wxID_OK) {
+                std::string new_name = name_input->GetValue().ToStdString();
+                std::string new_code = code_input->GetValue().ToStdString();
+
+                // Save name alias
+                if (!new_name.empty()) {
+                    wxGetApp().app_config->set("openbambu_alias_" + dev_id, new_name);
+                    if (obj) obj->set_dev_name(new_name);
+                }
+
+                // Save access code
+                // TODO: persist to user_access_code in config
+
+                wxGetApp().app_config->save();
+
+                // Force sidebar printer list to rebuild with new name
+                // by posting a size event which triggers update_all → update_printer_list
+                if (auto *monitor = dynamic_cast<wxWindow*>(GetParent())) {
+                    // Clear the printer buttons cache to force rebuild
+                    // The OpenBambuMonitorPanel's update_printer_list checks button count
+                    // to decide whether to rebuild. By posting a refresh event, the next
+                    // update_all tick will pick up the new name.
+                    wxSizeEvent evt(monitor->GetSize());
+                    evt.SetEventObject(monitor);
+                    monitor->GetEventHandler()->ProcessEvent(evt);
+                }
+            }
+        });
+
+        // Insert before m_parts_btn in the title sizer
+        auto *title_sizer = m_panel_control_title->GetSizer();
+        if (title_sizer) {
+            for (size_t i = 0; i < title_sizer->GetItemCount(); i++) {
+                auto *item = title_sizer->GetItem(i);
+                if (item && item->GetWindow() == m_parts_btn) {
+                    title_sizer->Insert(i, settings_btn, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(10));
+                    break;
+                }
+            }
+            m_panel_control_title->Layout();
+        }
+    }
+
     // Rearrange: put temperature controls in a horizontal row, centered in the box
     if (m_temp_ctrl_sizer && m_tempCtrl_nozzle && m_tempCtrl_bed && m_tempCtrl_chamber) {
         // Center temp controls in the box: give m_temp_ctrl_sizer the full width

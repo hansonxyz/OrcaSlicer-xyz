@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8" />
+<title>Debug Console</title>
+<link rel="stylesheet" href="https://unpkg.com/@xterm/xterm@5.5.0/css/xterm.css" />
+<script src="https://unpkg.com/@xterm/xterm@5.5.0/lib/xterm.js"></script>
+<script src="https://unpkg.com/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; background: #1e1e1e; overflow: hidden; }
+  #terminal-container {
+    position: absolute;
+    top: 20px; left: 20px; right: 20px; bottom: 20px;
+  }
+  .xterm { height: 100%; }
+</style>
+</head>
+<body>
+<div id="terminal-container"></div>
+<script>
+(function() {
+  var term = new Terminal({
+    cursorBlink: true,
+    fontSize: 14,
+    fontFamily: "'Cascadia Code', 'Consolas', 'Courier New', monospace",
+    theme: {
+      background: '#1e1e1e',
+      foreground: '#cccccc',
+      cursor: '#cccccc',
+      selectionBackground: '#264f78',
+      black: '#1e1e1e',
+      red: '#f44747',
+      green: '#6a9955',
+      yellow: '#dcdcaa',
+      blue: '#569cd6',
+      magenta: '#c586c0',
+      cyan: '#4ec9b0',
+      white: '#d4d4d4',
+      brightBlack: '#808080',
+      brightRed: '#f44747',
+      brightGreen: '#6a9955',
+      brightYellow: '#dcdcaa',
+      brightBlue: '#569cd6',
+      brightMagenta: '#c586c0',
+      brightCyan: '#4ec9b0',
+      brightWhite: '#ffffff'
+    }
+  });
+
+  var fitAddon = new FitAddon.FitAddon();
+  term.loadAddon(fitAddon);
+
+  var container = document.getElementById('terminal-container');
+  term.open(container);
+  fitAddon.fit();
+
+  window.addEventListener('resize', function() { fitAddon.fit(); });
+
+  var PROMPT = '\x1b[36morca>\x1b[0m ';
+  var inputLine = '';
+  var history = [];
+  var historyIndex = -1;
+
+  function writePrompt() {
+    term.write('\r\n' + PROMPT);
+  }
+
+  // Called from C++ to write output to the terminal
+  window.termWrite = function(text) {
+    term.write('\r\n' + text);
+    writePrompt();
+  };
+
+  // Called from C++ to write raw output (no prompt after)
+  window.termWriteRaw = function(text) {
+    term.write(text);
+  };
+
+  term.write('\x1b[33mOrcaSlicer Debug Console\x1b[0m');
+  term.write('\r\nType \x1b[32mhelp\x1b[0m for available commands.');
+  writePrompt();
+
+  term.onKey(function(ev) {
+    var key = ev.key;
+    var domEvent = ev.domEvent;
+    var keyCode = domEvent.keyCode;
+
+    if (keyCode === 13) { // Enter
+      if (inputLine.trim().length > 0) {
+        history.push(inputLine);
+        historyIndex = history.length;
+        sendCommand(inputLine.trim());
+      } else {
+        writePrompt();
+      }
+      inputLine = '';
+    } else if (keyCode === 8) { // Backspace
+      if (inputLine.length > 0) {
+        inputLine = inputLine.slice(0, -1);
+        term.write('\b \b');
+      }
+    } else if (keyCode === 38) { // Up arrow
+      if (history.length > 0 && historyIndex > 0) {
+        // Clear current input
+        while (inputLine.length > 0) {
+          term.write('\b \b');
+          inputLine = inputLine.slice(0, -1);
+        }
+        historyIndex--;
+        inputLine = history[historyIndex];
+        term.write(inputLine);
+      }
+    } else if (keyCode === 40) { // Down arrow
+      // Clear current input
+      while (inputLine.length > 0) {
+        term.write('\b \b');
+        inputLine = inputLine.slice(0, -1);
+      }
+      if (historyIndex < history.length - 1) {
+        historyIndex++;
+        inputLine = history[historyIndex];
+        term.write(inputLine);
+      } else {
+        historyIndex = history.length;
+        inputLine = '';
+      }
+    } else if (keyCode === 67 && domEvent.ctrlKey) { // Ctrl+C
+      inputLine = '';
+      term.write('^C');
+      writePrompt();
+    } else if (!domEvent.ctrlKey && !domEvent.altKey && key.length === 1) {
+      // Printable character
+      inputLine += key;
+      term.write(key);
+    }
+  });
+
+  // Paste support
+  term.onData(function(data) {
+    // onData fires for paste operations (multi-char strings)
+    // onKey already handles single keypresses, so only handle multi-char here
+    if (data.length > 1) {
+      // Filter to printable chars, no control sequences
+      var clean = data.replace(/[\x00-\x1f\x7f]/g, '');
+      if (clean.length > 0) {
+        inputLine += clean;
+        term.write(clean);
+      }
+    }
+  });
+
+  function sendCommand(cmd) {
+    try {
+      if (window.debugConsole) {
+        window.debugConsole.postMessage(cmd);
+      } else if (window.chrome && window.chrome.webview) {
+        window.chrome.webview.postMessage(cmd);
+      } else {
+        window.termWrite('\x1b[31mError: No C++ bridge available\x1b[0m');
+      }
+    } catch(e) {
+      window.termWrite('\x1b[31mError: ' + e.message + '\x1b[0m');
+    }
+  }
+})();
+</script>
+</body>
+</html>

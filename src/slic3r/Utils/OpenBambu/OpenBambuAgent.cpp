@@ -100,6 +100,12 @@ void Agent::set_on_ssdp_msg_fn(OnMsgArrivedFn fn)
 bool Agent::start_discovery(bool start_flag, bool sending)
 {
     if (start_flag) {
+        // Wire up the discovery callback before starting (same as start())
+        m_discovery.set_callback([this](std::string json) {
+            std::lock_guard<std::mutex> lock(m_callback_mutex);
+            if (m_on_ssdp_msg_fn)
+                m_on_ssdp_msg_fn(json);
+        });
         m_discovery.start();
     } else {
         m_discovery.stop();

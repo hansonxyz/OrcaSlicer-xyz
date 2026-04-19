@@ -121,6 +121,8 @@ public:
     std::string get_camera_url(const std::string &dev_ip, const std::string &access_code,
                                 const std::string &model_code);
 
+    const Discovery &discovery() const { return m_discovery; }
+
 private:
     Discovery m_discovery;
     MqttClient m_mqtt;
