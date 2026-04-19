@@ -190,6 +190,18 @@ void MediaPlayCtrl::SetMachineObject(MachineObject* obj)
     }
     m_machine = machine;
     BOOST_LOG_TRIVIAL(info) << "MediaPlayCtrl switch machine: " << m_machine;
+
+    // Invalidate token so in-flight async callbacks from the previous printer are dropped.
+    // Any weak_ptr<int> captured by get_camera_url callbacks will now expire.
+    m_token = std::make_shared<int>(0);
+
+    // Flush pending tasks to prevent stale stop/load commands from the previous printer
+    // from racing with new commands for this printer.
+    {
+        boost::unique_lock lock(m_mutex);
+        m_tasks.clear();
+    }
+
     m_disable_lan = false;
     m_failed_retry = 0;
     m_last_failed_codes.clear();
@@ -200,8 +212,16 @@ void MediaPlayCtrl::SetMachineObject(MachineObject* obj)
     } else {
         m_streaming = false;
     }
-    if (m_last_state != MEDIASTATE_IDLE)
-        Stop(" ");
+    if (m_last_state != MEDIASTATE_IDLE) {
+        // Synchronously stop the media control before proceeding, rather than
+        // queuing an async <stop> that could race with the next Play().
+        m_media_ctrl->InvalidateBestSize();
+        m_button_play->SetIcon("media_play");
+        m_media_ctrl->Stop();
+        m_last_state = MEDIASTATE_IDLE;
+        m_url.clear();
+        SetStatus(" ");
+    }
     if (m_next_retry.IsValid()) // Try open 2 seconds later, to avoid state conflict
         m_next_retry = wxDateTime::Now() + wxTimeSpan::Seconds(2);
     else
