@@ -136,6 +136,12 @@ public:
     AMSModel m_ext_model{AMSModel::EXT_AMS};
     AMSModel m_is_none_ams_mode{AMSModel::EXT_AMS};
     bool     m_single_nozzle_no_ams = { true };
+    bool     m_single_ams_centered = { false };
+
+    // Grid mode: show all AMS units simultaneously in a 2x2 grid
+    bool              m_grid_mode{false};
+    wxPanel*          m_grid_panel{nullptr};
+    wxFlexGridSizer*  m_grid_sizer{nullptr};
 
     void SetAmsModel(AMSModel mode, AMSModel ext_mode) {m_ams_model = mode; m_ext_model = ext_mode;};
     void AmsSelectedSwitch(wxCommandEvent& event);
@@ -177,6 +183,9 @@ public:
     void SetExtruder(bool on_off, int nozzle_id, std::string ams_id, std::string slot_id);
     void SetAmsStep(std::string ams_id, std::string canid, AMSPassRoadType type, AMSPassRoadSTEP step);
     void SwitchAms(std::string ams_id);
+    void UpdateCardExitX();
+    void AddAmsToGrid(AMSinfo& info);
+    void UpdateGridRoad();
 
     void msw_rescale();
     void on_filament_load(wxCommandEvent &event);

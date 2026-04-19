@@ -120,6 +120,7 @@
 #include "ModelMall.hpp"
 #include "HintNotification.hpp"
 
+#include "libslic3r/GitCommitHash.hpp"
 #include "slic3r/Utils/NetworkAgentFactory.hpp"
 #include "slic3r/Utils/BBLNetworkPlugin.hpp"
 #include "slic3r/Utils/bambu_networking.hpp"
@@ -1876,9 +1877,14 @@ bool GUI_App::hot_reload_network_plugin()
         m_device_manager->add_user_subscribe();
     }
 
-    if (mainframe && mainframe->m_monitor) {
-        mainframe->m_monitor->update_network_version_footer();
-        mainframe->m_monitor->set_default();
+    if (mainframe) {
+        if (mainframe->m_monitor) {
+            mainframe->m_monitor->update_network_version_footer();
+            mainframe->m_monitor->set_default();
+        }
+        if (mainframe->m_openbambu_monitor) {
+            mainframe->m_openbambu_monitor->set_default();
+        }
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": reset monitor panel";
     }
 
@@ -2013,6 +2019,9 @@ bool GUI_App::check_networking_version()
 
 bool GUI_App::is_compatibility_version()
 {
+    // xyz fork: OpenBambu mode doesn't use the DLL, so "compatible" is always true
+    if (app_config && !app_config->get_bool("use_bambu_network_plugin"))
+        return true;
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__<< boost::format(": m_networking_compatible=%1%")%m_networking_compatible;
     return m_networking_compatible;
 }
@@ -2502,7 +2511,7 @@ void GUI_App::init_app_config()
     // Load custom basic settings visibility config if present
     BasicSettingsConfig::instance().load();
 
-    BOOST_LOG_TRIVIAL(info) << boost::format("gui mode, Current OrcaSlicer Version %1% build %2%") % SoftFever_VERSION % GIT_COMMIT_HASH;
+    BOOST_LOG_TRIVIAL(info) << boost::format("gui mode, Current OrcaSlicer Version %1% build %2%") % SoftFever_VERSION % get_git_commit_hash();
 
     //BBS: remove GCodeViewer as seperate APP logic
 	if (!app_config)
@@ -3395,7 +3404,13 @@ void GUI_App::copy_network_if_available()
 
 bool GUI_App::on_init_network(bool try_backup)
 {
-    auto should_load_networking_plugin = app_config->get_bool("installed_networking");
+    // xyz fork: OpenBambu — skip proprietary DLL entirely when not opted in
+    bool use_bambu_plugin = app_config->get_bool("use_bambu_network_plugin");
+    if (!use_bambu_plugin) {
+        BOOST_LOG_TRIVIAL(info) << "OpenBambu: using open-source LAN protocol (proprietary DLL disabled)";
+    }
+
+    auto should_load_networking_plugin = use_bambu_plugin && app_config->get_bool("installed_networking");
 
     std::string config_version = app_config->get_network_plugin_version();
 
@@ -3513,6 +3528,20 @@ bool GUI_App::on_init_network(bool try_backup)
         std::string country_code = app_config->get_country_code();
         m_agent->set_country_code(country_code);
         m_agent->start();
+
+        // xyz fork: OpenBambu — set the printer agent and start SSDP discovery
+        // immediately when the DLL isn't loaded. Normally the printer agent is
+        // set later by update_printer_agent() on preset change, but we need
+        // discovery running from startup for the Device tab to find printers.
+        if (!use_bambu_plugin) {
+            auto openbambu_agent = Slic3r::NetworkAgentFactory::create_printer_agent_by_id(
+                "openbambu", m_agent->get_cloud_agent(), data_directory);
+            if (openbambu_agent) {
+                m_agent->set_printer_agent(openbambu_agent);
+                openbambu_agent->start_discovery(true, true);
+                BOOST_LOG_TRIVIAL(info) << "OpenBambu: printer agent set and discovery started";
+            }
+        }
     }
 
     if (!should_load_networking_plugin) {
@@ -3570,7 +3599,12 @@ void GUI_App::switch_printer_agent()
     // Read printer_agent from config, falling back to default
     std::string effective_agent_id = ORCA_PRINTER_AGENT_ID;
     if (preset_bundle->is_bbl_vendor()) {
-        effective_agent_id = BBL_PRINTER_AGENT_ID;
+        // xyz fork: OpenBambu — use open LAN agent for BBL printers unless DLL is opted in
+        if (app_config && !app_config->get_bool("use_bambu_network_plugin")) {
+            effective_agent_id = "openbambu";
+        } else {
+            effective_agent_id = BBL_PRINTER_AGENT_ID;
+        }
     } else {
         const DynamicPrintConfig& config = preset_bundle->printers.get_edited_preset().config;
         if (config.has("printer_agent")) {
@@ -3681,9 +3715,11 @@ void GUI_App::select_machine(const std::string& agent_id)
     }
     existing->local_use_ssl = boost::istarts_with(print_host, "https://");
 
-    // Use MonitorPanel::select_machine() to trigger full selection flow
-    // This reuses existing logic for machine switching (UI updates, callbacks, etc.)
-    if (mainframe && mainframe->m_monitor) {
+    // Use the active monitor panel's select_machine() to trigger full selection flow
+    if (mainframe && mainframe->m_openbambu_monitor) {
+        mainframe->m_openbambu_monitor->select_machine(dev_id);
+        BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": triggered select_machine (OpenBambu) for dev_id=" << dev_id;
+    } else if (mainframe && mainframe->m_monitor) {
         mainframe->m_monitor->select_machine(dev_id);
         BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << ": triggered select_machine for dev_id=" << dev_id;
     } else {
@@ -4525,11 +4561,10 @@ void GUI_App::get_login_info()
                 GUI::wxGetApp().run_script(strJS);
             }
         }
-        if(app_config->get_bool("installed_networking")) {
-            mainframe->m_webview->SetLoginPanelVisibility(true);
-        } else {
-            mainframe->m_webview->SetLoginPanelVisibility(false);
-        }
+        // xyz fork: hide login panel in OpenBambu mode (no Bambu account needed)
+        bool show_login = app_config->get_bool("installed_networking")
+                          && app_config->get_bool("use_bambu_network_plugin");
+        mainframe->m_webview->SetLoginPanelVisibility(show_login);
     }
 }
 

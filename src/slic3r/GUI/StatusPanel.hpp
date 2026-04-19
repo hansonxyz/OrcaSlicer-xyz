@@ -378,6 +378,12 @@ public:
 class StatusBasePanel : public wxScrolledWindow
 {
 protected:
+    bool m_openbambu_mode{false};  // When true, use FitInside() and OpenBambu layout
+    // OpenBambu mode: inline fan speed labels (updated from update_misc_ctrl)
+    wxStaticText *m_ob_fan_parts_label{nullptr};
+    wxStaticText *m_ob_fan_aux_label{nullptr};
+    wxStaticText *m_ob_fan_chamber_label{nullptr};
+    wxWindow     *m_ob_settings_btn{nullptr};
     wxBitmap m_item_placeholder;
     ScalableBitmap m_thumbnail_placeholder;
     ScalableBitmap m_thumbnail_brokenimg;
@@ -474,6 +480,7 @@ protected:
     ImageSwitchButton *m_switch_speed;
 
     /* TempInput */
+    wxBoxSizer *    m_temp_ctrl_sizer{nullptr};   // vertical sizer holding temp controls
     wxBoxSizer *    m_misc_ctrl_sizer;
     StaticBox*      m_fan_panel;
     StaticLine *    m_line_nozzle;
@@ -611,6 +618,7 @@ public:
     void           show_ams_group(bool show = true);
     void show_filament_load_group(bool show = true);
     MediaPlayCtrl* get_media_play_ctrl() {return m_media_play_ctrl;};
+    wxWindow* get_media_ctrl() {return m_media_ctrl;};
 };
 
 
@@ -618,6 +626,7 @@ class StatusPanel : public StatusBasePanel
 {
 private:
     friend class MonitorPanel;
+    friend class OpenBambuMonitorPanel;
 
 protected:
     std::shared_ptr<SliceInfoPopup> m_slice_info_popup;
@@ -827,6 +836,9 @@ public:
     void set_default();
     void show_status(int status);
     void set_hold_count(int& count);
+
+    // OpenBambu mode: hides axis/extruder/bed movement controls
+    void set_openbambu_mode(bool enabled);
 
     void rescale_camera_icons();
     void on_sys_color_changed();

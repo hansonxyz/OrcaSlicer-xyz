@@ -1687,6 +1687,7 @@ wxBoxSizer *StatusBasePanel::create_temp_axis_group(wxWindow *parent)
 wxBoxSizer *StatusBasePanel::create_temp_control(wxWindow *parent)
 {
     auto sizer = new wxBoxSizer(wxVERTICAL);
+    m_temp_ctrl_sizer = sizer;
 
     wxWindowID nozzle_id = wxWindow::NewControlId();
     m_tempCtrl_nozzle    = new TempInput(parent, nozzle_id, TEMP_BLANK_STR, TempInputType::TEMP_OF_NORMAL_TYPE, TEMP_BLANK_STR, wxString("monitor_nozzle_temp"),
@@ -2186,9 +2187,9 @@ void StatusBasePanel::expand_filament_loading(wxMouseEvent& e)
     ///m_button_retry->Show(tag_show);
     m_filament_step->Show(tag_show);
     Layout();
-    Fit();
-    wxGetApp().mainframe->m_monitor->get_status_panel()->Layout();
-    wxGetApp().mainframe->m_monitor->Layout();
+    if (m_openbambu_mode) { FitInside(); } else { Fit(); }
+    Layout();
+    if (auto *parent = GetParent()) parent->Layout();
 }
 
 void StatusBasePanel::show_ams_group(bool show)
@@ -2198,8 +2199,15 @@ void StatusBasePanel::show_ams_group(bool show)
         m_ams_control->Layout();
         m_ams_control->Fit();
         Layout();
-        Fit();
-        wxGetApp().mainframe->m_monitor->Layout();
+        if (m_openbambu_mode) {
+            // In OpenBambu mode, Fit() would shrink the panel (hidden controls reduce
+            // min size). Instead, just do FitInside() to update scroll extents without
+            // changing the panel's actual size.
+            FitInside();
+        } else {
+            Fit();
+        }
+        if (auto *parent = GetParent()) parent->Layout();
     }
 
     if (m_ams_control_box->IsShown() != show) {
@@ -2207,8 +2215,12 @@ void StatusBasePanel::show_ams_group(bool show)
         m_ams_control->Layout();
         m_ams_control->Fit();
         Layout();
-        Fit();
-        wxGetApp().mainframe->m_monitor->Layout();
+        if (m_openbambu_mode) {
+            FitInside();
+        } else {
+            Fit();
+        }
+        if (auto *parent = GetParent()) parent->Layout();
     }
 }
 
@@ -2230,10 +2242,10 @@ void StatusBasePanel::show_filament_load_group(bool show)
         m_filament_step->SetupSteps(cur_ext ? cur_ext->HasFilamentInExt() : false);
 
         Layout();
-        Fit();
+        if (m_openbambu_mode) { FitInside(); } else { Fit(); }
 
-        wxGetApp().mainframe->m_monitor->get_status_panel()->Layout();
-        wxGetApp().mainframe->m_monitor->Layout();
+        Layout();
+        if (auto *parent = GetParent()) parent->Layout();
     }
 }
 
@@ -3195,7 +3207,8 @@ void StatusPanel::update_misc_ctrl(MachineObject *obj)
 
     /*switch extder*/
     m_extruder_switching_status->updateBy(obj);
-    m_extruder_label->Show(!m_extruder_switching_status->has_content_shown());/*hide the label if there are shown infos from m_extruder_switching_status*/
+    if (!m_openbambu_mode)
+        m_extruder_label->Show(!m_extruder_switching_status->has_content_shown());/*hide the label if there are shown infos from m_extruder_switching_status*/
 
     /*other*/
     if (obj->is_core_xy()) {
@@ -3208,12 +3221,27 @@ void StatusPanel::update_misc_ctrl(MachineObject *obj)
     update_extruder_status(obj);
 
     if (obj->is_fdm_type()) {
-        if (!m_fan_panel->IsShown())
+        if (!m_openbambu_mode && !m_fan_panel->IsShown())
             m_fan_panel->Show();
         bool is_suppt_part_fun = true;
         bool is_suppt_aux_fun  = obj->GetFan()->GetSupportAuxFanData();
         bool is_suppt_cham_fun = obj->GetFan()->GetSupportChamberFan();
         if (m_fan_control_popup) { m_fan_control_popup->update_fan_data(obj); }
+
+        // Update inline fan speed labels in OpenBambu mode
+        // Fan speeds are 0-255, convert to percentage
+        if (m_openbambu_mode) {
+            auto *fan = obj->GetFan();
+            int parts_pct = (fan->GetCoolingFanSpeed() * 100 + 127) / 255;
+            int aux_pct   = (fan->GetBigFan1Speed() * 100 + 127) / 255;
+            int cham_pct  = (fan->GetBigFan2Speed() * 100 + 127) / 255;
+            if (m_ob_fan_parts_label)
+                m_ob_fan_parts_label->SetLabel(wxString::Format("%d%%", parts_pct));
+            if (m_ob_fan_aux_label)
+                m_ob_fan_aux_label->SetLabel(is_suppt_aux_fun ? wxString::Format("%d%%", aux_pct) : "--");
+            if (m_ob_fan_chamber_label)
+                m_ob_fan_chamber_label->SetLabel(is_suppt_cham_fun ? wxString::Format("%d%%", cham_pct) : "--");
+        }
     } else {
         if (m_fan_panel->IsShown()) {
             m_fan_panel->Hide();
@@ -3716,6 +3744,9 @@ void StatusPanel::update_subtask(MachineObject *obj)
 
             if (obj->is_printing_finished()) {
                 obj->update_model_task();
+                // Show completed state instead of "in progress" appearance
+                m_project_task_panel->update_stage_value_with_machine(_L("Completed"), 100, obj);
+                m_project_task_panel->update_left_time("00:00");
                 m_project_task_panel->enable_abort_button(false);
                 m_project_task_panel->enable_partskip_button(nullptr, false);
                 m_project_task_panel->enable_pause_resume_button(false, "resume_disable");
@@ -6040,6 +6071,265 @@ void ScoreDialog::set_cloud_bitmap(std::vector<std::string> cloud_bitmaps)
     }
     Layout();
     Fit();
+}
+
+void StatusPanel::set_openbambu_mode(bool enabled)
+{
+    m_openbambu_mode = enabled;
+    if (!enabled) return;
+
+    // Hide axis (XY) control, bed (Z) controls, extruder controls, and separators.
+    if (m_bpButton_xy)          m_bpButton_xy->Hide();
+    if (m_bpButton_z_10)        m_bpButton_z_10->Hide();
+    if (m_bpButton_z_1)         m_bpButton_z_1->Hide();
+    if (m_bpButton_z_down_1)    m_bpButton_z_down_1->Hide();
+    if (m_bpButton_z_down_10)   m_bpButton_z_down_10->Hide();
+    if (m_staticText_z_tip)     m_staticText_z_tip->Hide();
+    if (m_bpButton_e_10)        m_bpButton_e_10->Hide();
+    if (m_bpButton_e_down_10)   m_bpButton_e_down_10->Hide();
+    if (m_extruder_book)        m_extruder_book->Hide();
+    if (m_extruder_label)       m_extruder_label->Hide();
+    if (m_nozzle_btn_panel)     m_nozzle_btn_panel->Hide();
+    if (m_extruder_switching_status) m_extruder_switching_status->Hide();
+    if (m_temp_temp_line)       m_temp_temp_line->Hide();
+    if (m_temp_extruder_line)   m_temp_extruder_line->Hide();
+
+    // Change lamp labels from "Lamp"/"Lamp" to "On"/"Off"
+    if (m_switch_lamp) {
+        m_switch_lamp->SetLabels(_L("On"), _L("Off"));
+    }
+
+    // Add "Printer Settings" button to the Control title bar, left of "Printer Parts"
+    if (m_panel_control_title && m_parts_btn) {
+        auto *settings_btn = new Button(m_panel_control_title, _L("Printer Settings"));
+        settings_btn->SetStyle(ButtonStyle::Confirm, ButtonType::Window);
+        m_ob_settings_btn = settings_btn;
+
+        settings_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+            std::string dev_id = obj ? obj->get_dev_id() : "";
+            std::string dev_name = obj ? obj->get_dev_name() : "";
+            std::string printer_type = obj ? obj->printer_type : "";
+            std::string dev_ip = obj ? obj->get_dev_ip() : "";
+            std::string access_code = obj ? obj->get_access_code() : "";
+
+            if (dev_id.empty()) {
+                wxMessageBox(_L("No printer selected."), _L("Printer Settings"), wxOK | wxICON_INFORMATION);
+                return;
+            }
+
+            // Build info + settings dialog
+            wxDialog dlg(this, wxID_ANY, _L("Printer Settings"), wxDefaultPosition, wxSize(FromDIP(400), FromDIP(350)));
+            auto *main_sizer = new wxBoxSizer(wxVERTICAL);
+
+            // Info section
+            auto *info_box = new wxStaticBoxSizer(wxVERTICAL, &dlg, _L("Printer Information"));
+            auto add_info = [&](const wxString &label, const wxString &value) {
+                auto *row = new wxBoxSizer(wxHORIZONTAL);
+                auto *lbl = new wxStaticText(&dlg, wxID_ANY, label + ":", wxDefaultPosition, wxSize(FromDIP(120), -1));
+                lbl->SetFont(::Label::Body_13);
+                auto *val = new wxStaticText(&dlg, wxID_ANY, value);
+                val->SetFont(::Label::Head_13);
+                row->Add(lbl, 0, wxALIGN_CENTER_VERTICAL);
+                row->Add(val, 1, wxALIGN_CENTER_VERTICAL);
+                info_box->Add(row, 0, wxEXPAND | wxALL, FromDIP(3));
+            };
+            add_info(_L("Device ID"), wxString::FromUTF8(dev_name));
+            add_info(_L("Serial Number"), wxString::FromUTF8(dev_id));
+            add_info(_L("Model"), wxString::FromUTF8(printer_type));
+            add_info(_L("IP Address"), wxString::FromUTF8(dev_ip));
+            main_sizer->Add(info_box, 0, wxEXPAND | wxALL, FromDIP(10));
+
+            // Settings section
+            auto *settings_box = new wxStaticBoxSizer(wxVERTICAL, &dlg, _L("Settings"));
+
+            // Printer Name — pre-fill with saved alias, or current dev_name if no alias
+            auto *name_row = new wxBoxSizer(wxHORIZONTAL);
+            auto *name_lbl = new wxStaticText(&dlg, wxID_ANY, _L("Printer Name:"), wxDefaultPosition, wxSize(FromDIP(120), -1));
+            name_lbl->SetFont(::Label::Body_13);
+            std::string saved_alias = wxGetApp().app_config->get("openbambu_alias_" + dev_id);
+            std::string name_value = saved_alias.empty() ? dev_name : saved_alias;
+            auto *name_input = new wxTextCtrl(&dlg, wxID_ANY, wxString::FromUTF8(name_value));
+            name_input->SetFont(::Label::Body_13);
+            name_row->Add(name_lbl, 0, wxALIGN_CENTER_VERTICAL);
+            name_row->Add(name_input, 1, wxEXPAND);
+            settings_box->Add(name_row, 0, wxEXPAND | wxALL, FromDIP(3));
+
+            // Access Code
+            auto *code_row = new wxBoxSizer(wxHORIZONTAL);
+            auto *code_lbl = new wxStaticText(&dlg, wxID_ANY, _L("Access Code:"), wxDefaultPosition, wxSize(FromDIP(120), -1));
+            code_lbl->SetFont(::Label::Body_13);
+            auto *code_input = new wxTextCtrl(&dlg, wxID_ANY, wxString::FromUTF8(access_code));
+            code_input->SetFont(::Label::Body_13);
+            code_row->Add(code_lbl, 0, wxALIGN_CENTER_VERTICAL);
+            code_row->Add(code_input, 1, wxEXPAND);
+            settings_box->Add(code_row, 0, wxEXPAND | wxALL, FromDIP(3));
+
+            main_sizer->Add(settings_box, 0, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(10));
+
+            // Buttons
+            auto *btn_sizer = dlg.CreateStdDialogButtonSizer(wxOK | wxCANCEL);
+            main_sizer->Add(btn_sizer, 0, wxALIGN_CENTER | wxALL, FromDIP(10));
+
+            dlg.SetSizer(main_sizer);
+            dlg.Layout();
+            dlg.Fit();
+
+            if (dlg.ShowModal() == wxID_OK) {
+                std::string new_name = name_input->GetValue().ToStdString();
+                std::string new_code = code_input->GetValue().ToStdString();
+
+                // Save name alias
+                if (!new_name.empty()) {
+                    wxGetApp().app_config->set("openbambu_alias_" + dev_id, new_name);
+                    if (obj) obj->set_dev_name(new_name);
+                }
+
+                // Save access code
+                // TODO: persist to user_access_code in config
+
+                wxGetApp().app_config->save();
+
+                // Force sidebar printer list to rebuild with new name
+                // by posting a size event which triggers update_all → update_printer_list
+                if (auto *monitor = dynamic_cast<wxWindow*>(GetParent())) {
+                    // Clear the printer buttons cache to force rebuild
+                    // The OpenBambuMonitorPanel's update_printer_list checks button count
+                    // to decide whether to rebuild. By posting a refresh event, the next
+                    // update_all tick will pick up the new name.
+                    wxSizeEvent evt(monitor->GetSize());
+                    evt.SetEventObject(monitor);
+                    monitor->GetEventHandler()->ProcessEvent(evt);
+                }
+            }
+        });
+
+        // Insert before m_parts_btn in the title sizer
+        auto *title_sizer = m_panel_control_title->GetSizer();
+        if (title_sizer) {
+            for (size_t i = 0; i < title_sizer->GetItemCount(); i++) {
+                auto *item = title_sizer->GetItem(i);
+                if (item && item->GetWindow() == m_parts_btn) {
+                    title_sizer->Insert(i, settings_btn, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(10));
+                    break;
+                }
+            }
+            m_panel_control_title->Layout();
+        }
+    }
+
+    // Rearrange: put temperature controls in a horizontal row, centered in the box
+    if (m_temp_ctrl_sizer && m_tempCtrl_nozzle && m_tempCtrl_bed && m_tempCtrl_chamber) {
+        // Center temp controls in the box: give m_temp_ctrl_sizer the full width
+        // by changing its proportion in content_sizer, and add internal centering.
+        wxWindow *box_parent = m_tempCtrl_nozzle->GetParent();
+        if (box_parent && box_parent->GetSizer()) {
+            auto *content_sizer = box_parent->GetSizer();
+            // Zero out all other items' proportions so they don't absorb space,
+            // then give m_temp_ctrl_sizer proportion=1 to fill the box.
+            for (size_t i = 0; i < content_sizer->GetItemCount(); i++) {
+                auto *item = content_sizer->GetItem(i);
+                if (item && item->GetSizer() == m_temp_ctrl_sizer) {
+                    item->SetProportion(1);
+                    item->SetFlag(wxEXPAND | wxALL);
+                    item->SetBorder(FromDIP(5));
+                } else if (item) {
+                    item->SetProportion(0);
+                }
+            }
+        }
+
+        // Detach all items from the vertical temp sizer
+        m_temp_ctrl_sizer->Clear(false); // false = don't delete windows
+
+        // Hide separator lines between temps
+        if (m_line_nozzle) m_line_nozzle->Hide();
+
+        // Create horizontal sizer for temps
+        auto *temp_row = new wxBoxSizer(wxHORIZONTAL);
+        temp_row->Add(m_tempCtrl_nozzle, 1, wxEXPAND | wxALL, 1);
+        temp_row->Add(m_tempCtrl_bed, 1, wxEXPAND | wxALL, 1);
+        temp_row->Add(m_tempCtrl_chamber, 1, wxEXPAND | wxALL, 1);
+
+        // Create labeled indicator row: Parts / Aux / Ext / Speed / Lamp
+        // Each gets a vertical sizer with label above, control/value below
+        wxWindow *ctrl_parent = m_tempCtrl_nozzle->GetParent();
+
+        auto make_labeled_ctrl = [this, ctrl_parent](const wxString &label, wxWindow *ctrl) {
+            auto *col = new wxBoxSizer(wxVERTICAL);
+            auto *lbl = new wxStaticText(ctrl_parent, wxID_ANY, label, wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER_HORIZONTAL);
+            lbl->SetFont(::Label::Body_10);
+            lbl->SetForegroundColour(wxColour(150, 150, 150));
+            col->Add(lbl, 0, wxALIGN_CENTER_HORIZONTAL | wxBOTTOM, FromDIP(2));
+            col->Add(ctrl, 0, wxALIGN_CENTER_HORIZONTAL, 0);
+            return col;
+        };
+
+        auto make_labeled_text = [this, ctrl_parent](const wxString &label, wxStaticText **out_value) {
+            auto *col = new wxBoxSizer(wxVERTICAL);
+            // Label on top
+            auto *lbl = new wxStaticText(ctrl_parent, wxID_ANY, label, wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER_HORIZONTAL);
+            lbl->SetFont(::Label::Body_10);
+            lbl->SetForegroundColour(wxColour(150, 150, 150));
+            // Fan icon centered (same size as speed/lamp icons)
+            auto *icon = new wxStaticBitmap(ctrl_parent, wxID_ANY, create_scaled_bitmap("monitor_fan_on", nullptr, 22));
+            // Value below icon
+            auto *val = new wxStaticText(ctrl_parent, wxID_ANY, "--", wxDefaultPosition, wxDefaultSize, wxALIGN_CENTER_HORIZONTAL);
+            val->SetFont(::Label::Head_13);
+            // Clicking opens the fan control popup
+            auto open_fan = [this](wxMouseEvent&) {
+                wxCommandEvent evt(wxEVT_COMMAND_BUTTON_CLICKED);
+                on_nozzle_fan_switch(evt);
+            };
+            for (auto *w : {(wxWindow*)lbl, (wxWindow*)icon, (wxWindow*)val}) {
+                w->SetCursor(wxCursor(wxCURSOR_HAND));
+                w->Bind(wxEVT_LEFT_DOWN, open_fan);
+            }
+            *out_value = val;
+            col->Add(lbl, 0, wxALIGN_CENTER_HORIZONTAL | wxBOTTOM, FromDIP(2));
+            col->Add(icon, 0, wxALIGN_CENTER_HORIZONTAL | wxBOTTOM, FromDIP(2));
+            col->Add(val, 0, wxALIGN_CENTER_HORIZONTAL, 0);
+            return col;
+        };
+
+        auto *indicator_row = new wxBoxSizer(wxHORIZONTAL);
+        indicator_row->AddStretchSpacer(1);
+
+        // 3 fan speed indicators as text labels
+        indicator_row->Add(make_labeled_text(_L("Parts"), &m_ob_fan_parts_label), 0, wxALIGN_BOTTOM | wxLEFT | wxRIGHT, FromDIP(8));
+        indicator_row->Add(make_labeled_text(_L("Aux"), &m_ob_fan_aux_label), 0, wxALIGN_BOTTOM | wxLEFT | wxRIGHT, FromDIP(8));
+        indicator_row->Add(make_labeled_text(_L("Exhaust"), &m_ob_fan_chamber_label), 0, wxALIGN_BOTTOM | wxLEFT | wxRIGHT, FromDIP(8));
+
+        // Speed control
+        if (m_switch_speed) {
+            indicator_row->Add(make_labeled_ctrl(_L("Speed"), m_switch_speed), 0, wxALIGN_BOTTOM | wxLEFT | wxRIGHT, FromDIP(8));
+        }
+
+        // Lamp control
+        if (m_switch_lamp) {
+            indicator_row->Add(make_labeled_ctrl(_L("Lamp"), m_switch_lamp), 0, wxALIGN_BOTTOM | wxLEFT | wxRIGHT, FromDIP(8));
+        }
+        indicator_row->AddStretchSpacer(1);
+
+        // Hide the old fan panel (moved to inline labels)
+        if (m_fan_panel) m_fan_panel->Hide();
+
+        // Re-add to temp sizer: horizontal temp row, then indicator row, all centered
+        m_temp_ctrl_sizer->Add(temp_row, 0, wxALIGN_CENTER_HORIZONTAL | wxLEFT | wxRIGHT, FromDIP(5));
+
+        auto *sep = new StaticLine(m_tempCtrl_nozzle->GetParent());
+        sep->SetLineColour(STATIC_BOX_LINE_COL);
+        m_temp_ctrl_sizer->Add(sep, 0, wxEXPAND | wxLEFT | wxRIGHT, 12);
+
+        m_temp_ctrl_sizer->Add(indicator_row, 0, wxEXPAND | wxTOP | wxBOTTOM, FromDIP(5));
+
+        // Hide the old misc sizer content (separators, fan panel in old position)
+        // The fan panel and speed/lamp have been moved to indicator_row
+    }
+
+    // Re-layout the parent to reclaim the space
+    if (m_machine_ctrl_panel) {
+        m_machine_ctrl_panel->Layout();
+    }
 }
 
 } // namespace GUI

@@ -759,6 +759,8 @@ public:
 
     void reset_gcode_toolpaths();
     void reset_last_loaded_gcode() { m_last_loaded_gcode = ""; }
+    // xyz fork: reset background slicing process (invalidates Print state)
+    void reset_background_process();
 
     const Mouse3DController& get_mouse3d_controller() const;
     Mouse3DController& get_mouse3d_controller();

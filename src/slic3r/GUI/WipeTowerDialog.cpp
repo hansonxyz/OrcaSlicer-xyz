@@ -3,6 +3,7 @@
 #include <wx/sizer.h>
 #include "libslic3r/FlushVolCalc.hpp"
 #include "WipeTowerDialog.hpp"
+#include "PurgeCalibrationDialog.hpp"
 #include "GUI.hpp"
 #include "I18N.hpp"
 #include "GUI_App.hpp"
@@ -490,6 +491,18 @@ WipingDialog::WipingDialog(wxWindow* parent, const int max_flush_volume) :
             }
             else if (j["msg"].get<std::string>() == "quit") {
                 this->Close();
+            }
+            // xyz fork: close flushing volumes and open calibration dialog
+            else if (j["msg"].get<std::string>() == "openCalibration") {
+                CallAfter([this] {
+                    // Close this dialog first, then open calibration
+                    if (IsModal()) EndModal(wxID_CANCEL);
+                    else Close();
+                    // Open calibration after this dialog is fully closed
+                    wxGetApp().CallAfter([] {
+                        open_purge_calibration_dialog(wxGetApp().mainframe);
+                    });
+                });
             }
         }
         catch (...) {

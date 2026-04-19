@@ -19,6 +19,7 @@
 //BBS: GUI refactor
 #include "ParamsPanel.hpp"
 #include "Monitor.hpp"
+#include "OpenBambuMonitor/OpenBambuMonitorPanel.hpp"
 #include "Auxiliary.hpp"
 #include "Project.hpp"
 #include "CalibrationPanel.hpp"
@@ -35,6 +36,7 @@
 #include "PrinterWebView.hpp"
 #include "calib_dlg.hpp"
 #include "MultiMachinePage.hpp"
+#include "DebugConsolePanel.hpp"
 
 #define ENABEL_PRINT_ALL 0
 
@@ -376,12 +378,14 @@ public:
     Plater*               m_plater { nullptr };
     //BBS: GUI refactor
     MonitorPanel*         m_monitor{ nullptr };
+    OpenBambuMonitorPanel* m_openbambu_monitor{ nullptr };
 
     //AuxiliaryPanel*       m_auxiliary{ nullptr };
     MultiMachinePage*     m_multi_machine{ nullptr };
     ProjectPanel*         m_project{ nullptr };
 
     CalibrationPanel*     m_calibration{ nullptr };
+    DebugConsolePanel*    m_debug_console{ nullptr };
     WebViewPanel*         m_webview { nullptr };
     PrinterWebView*       m_printer_view{nullptr};
     wxLogWindow*          m_log_window { nullptr };

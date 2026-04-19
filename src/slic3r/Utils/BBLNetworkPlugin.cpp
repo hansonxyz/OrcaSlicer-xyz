@@ -1,4 +1,5 @@
 #include "BBLNetworkPlugin.hpp"
+#include "BambuCrashGuard.hpp"
 #include "NetworkAgent.hpp"
 
 #include <stdio.h>
@@ -156,6 +157,13 @@ int BBLNetworkPlugin::initialize(bool using_backup, const std::string& version)
         return -1;
     }
 
+    // Install crash guard before any DLL functions are called.
+    // This catches ACCESS_VIOLATION in DLL background threads and
+    // terminates just the thread instead of crashing the whole process.
+#if defined(_MSC_VER) || defined(_WIN32)
+    BambuCrashGuard::install(m_networking_module);
+#endif
+
     // Load file transfer interface
     InitFTModule(m_networking_module);
 
@@ -183,6 +191,11 @@ int BBLNetworkPlugin::initialize(bool using_backup, const std::string& version)
 
 int BBLNetworkPlugin::unload()
 {
+    // Remove crash guard before unloading the DLL
+#if defined(_MSC_VER) || defined(_WIN32)
+    BambuCrashGuard::uninstall();
+#endif
+
     UnloadFTModule();
 
 #if defined(_MSC_VER) || defined(_WIN32)
@@ -233,7 +246,7 @@ std::string BBLNetworkPlugin::get_version() const
     if (m_get_version) {
         return m_get_version();
     }
-    BOOST_LOG_TRIVIAL(warning) << __FUNCTION__ << boost::format(", get_version not supported, return 00.00.00.00!");
+    // No warning — this is expected when the DLL isn't loaded (OpenBambu mode)
     return "00.00.00.00";
 }
 

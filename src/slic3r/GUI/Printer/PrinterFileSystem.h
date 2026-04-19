@@ -29,6 +29,7 @@ wxDECLARE_EVENT(EVT_UPLOAD_CHANGED, wxCommandEvent);
 
 class PrinterFileSystem : public wxEvtHandler, public boost::enable_shared_from_this<PrinterFileSystem>, BambuLib
 {
+private:
     static const int CTRL_TYPE     = 0x3001;
 
     enum {
@@ -75,7 +76,7 @@ public:
 public:
     PrinterFileSystem();
 
-    ~PrinterFileSystem();
+    virtual ~PrinterFileSystem();
 
 public:
     enum FileType {
@@ -91,7 +92,7 @@ public:
         G_YEAR,
     };
 
-    void SetFileType(FileType type, std::string const & storage = {});
+    virtual void SetFileType(FileType type, std::string const & storage = {});
 
     void SetGroupMode(GroupMode mode);
 
@@ -178,11 +179,11 @@ public:
     typedef std::vector<File> FileList;
     typedef std::vector<std::string> MediaAbilityList;
 
-    void ListAllFiles();
+    virtual void ListAllFiles();
 
-    void DeleteFiles(size_t index);
+    virtual void DeleteFiles(size_t index);
 
-    void DownloadFiles(size_t index, std::string const &path);
+    virtual void DownloadFiles(size_t index, std::string const &path);
 
     void GetPickImage(int id, const std::string &local_path, const std::string &path);
 
@@ -233,15 +234,15 @@ public:
     Status GetStatus() const { return m_status; }
     int GetLastError() const { return m_last_error; }
 
-    void Attached();
+    virtual void Attached();
 
-    void Start();
+    virtual void Start();
 
-    void Retry();
+    virtual void Retry();
 
-    void SetUrl(std::string const &url);
+    virtual void SetUrl(std::string const &url);
 
-    void Stop(bool quit = false);
+    virtual void Stop(bool quit = false);
 
     boost::uint32_t RequestMediaAbility(int api_version);
 
@@ -253,7 +254,7 @@ public:
 
     void CancelUploadTask(bool send_cancel_req = true);
 
-private:
+protected:
     void BuildGroups();
 
     void UpdateGroupSelect();
@@ -274,8 +275,10 @@ private:
 
     std::pair<FileList &, size_t> FindFile(std::pair<FileType, std::string> type, size_t index, std::string const &name, bool by_path);
 
+protected:
     void SendChangedEvent(wxEventType type, size_t index = (size_t)-1, std::string const &str = {}, long extra = 0);
 
+private:
     static void DumpLog(void* context, int level, tchar const *msg);
 
 private:
@@ -397,8 +400,11 @@ private:
     boost::mutex m_mutex;
     boost::condition_variable m_cond;
     boost::thread m_recv_thread;
-    Status m_status;
+protected:
+    Status m_status = Initializing;
     int m_last_error = 0;
+
+private:
 
     MediaAbilityList m_media_ability_list;
     std::map<boost::uint32_t, callback_t3>  m_produce_message_cb_map;

@@ -123,6 +123,7 @@ MonitorPanel::MonitorPanel(wxWindow* parent, wxWindowID id, const wxPoint& pos, 
     Bind(wxEVT_SIZE, &MonitorPanel::on_size, this);
     Bind(wxEVT_COMMAND_CHOICE_SELECTED, &MonitorPanel::on_select_printer, this);
 
+
     m_select_machine.Bind(EVT_FINISHED_UPDATE_MACHINE_LIST, [this](wxCommandEvent& e) {
         m_side_tools->start_interval();
         });
@@ -389,6 +390,28 @@ void MonitorPanel::update_all()
     }
 
     update_hms_tag();
+
+    // xyz fork: camera auto-start DISABLED for crash investigation (2026-04-07)
+    // See CLAUDE.md "Bambu DLL Crash Investigation" section.
+#if 0
+    // xyz fork: detect if user manually stopped camera
+    if (m_camera_auto_state == CameraAutoState::ACTIVE) {
+        auto *ctrl = m_status_info_panel->get_media_play_ctrl();
+        if (ctrl && ctrl->is_idle()) {
+            m_camera_auto_state = CameraAutoState::OFF;
+            m_camera_user_stopped = true;
+        }
+    }
+
+    // xyz fork: detect print start while on Device tab → auto-start camera
+    if (obj) {
+        bool is_printing = MachineObject::is_in_printing_status(obj->print_status);
+        if (is_printing && !m_was_printing && !m_camera_user_stopped) {
+            check_camera_auto_start();
+        }
+        m_was_printing = is_printing;
+    }
+#endif
 }
 
 void MonitorPanel::update_hms_tag()
@@ -412,6 +435,7 @@ void MonitorPanel::update_hms_tag()
 
 bool MonitorPanel::Show(bool show)
 {
+    BOOST_LOG_TRIVIAL(info) << "MonitorPanel::Show(" << show << ") called";
 #ifdef __APPLE__
     wxGetApp().mainframe->SetMinSize(wxGetApp().plater()->GetMinSize());
 #endif
@@ -432,11 +456,25 @@ bool MonitorPanel::Show(bool show)
             obj = dev->get_selected_machine();
             if (obj == nullptr) {
                 dev->load_last_machine();
+                obj = dev->get_selected_machine();
             } else {
                 obj->reset_update_time();
             }
+            // xyz fork: camera auto-start DISABLED for crash investigation (2026-04-07)
+#if 0
+            m_camera_user_stopped = false;
+            m_was_printing = obj ? MachineObject::is_in_printing_status(obj->print_status) : false;
+            check_camera_auto_start();
+#endif
         }
     } else {
+        // xyz fork: camera auto-start DISABLED for crash investigation (2026-04-07)
+#if 0
+        m_camera_auto_state = CameraAutoState::OFF;
+        m_camera_user_stopped = false;
+        m_was_printing = false;
+#endif
+
         stop_update();
         m_refresh_timer->Stop();
     }
@@ -549,6 +587,38 @@ void MonitorPanel::update_network_version_footer()
     }
 
     m_tabpanel->SetFooterText(footer_text);
+}
+
+// xyz fork: Smart camera lifecycle management implementation
+// See Monitor.hpp for the full behavior specification.
+
+void MonitorPanel::check_camera_auto_start()
+{
+    if (!this->IsShown()) return;
+    if (!wxGetApp().app_config->get_bool("auto_start_camera")) return;
+    if (m_camera_user_stopped) return;
+
+    DeviceManager *dev = wxGetApp().getDeviceManager();
+    if (!dev) return;
+    MachineObject *machine = dev->get_selected_machine();
+    if (!machine || !MachineObject::is_in_printing_status(machine->print_status))
+        return;
+
+    auto *ctrl = m_status_info_panel->get_media_play_ctrl();
+    if (!ctrl) return;
+
+    // Only start if camera is idle (not already streaming)
+    if (ctrl->is_idle()) {
+        try {
+            ctrl->jump_to_play();
+            m_camera_auto_state = CameraAutoState::ACTIVE;
+        } catch (...) {
+            // Suppress errors on automatic start
+        }
+    } else {
+        // Camera is already running — just track the state
+        m_camera_auto_state = CameraAutoState::ACTIVE;
+    }
 }
 
 } // GUI

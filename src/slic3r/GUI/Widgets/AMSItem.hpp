@@ -631,6 +631,9 @@ public:
     // void                         Update(AMSRoadDownPartMode nozzle, AMSRoadShowMode left_mode, AMSRoadShowMode right_mode, int left_len, int right_len);
     void UpdateLeft(int nozzle_num, AMSRoadShowMode mode);
     void UpdateRight(int nozzle_num, AMSRoadShowMode mode);
+    // Set the X position (in this widget's coords) where the AMS card exit line is.
+    // Used when single AMS is centered and not aligned with the extruder.
+    void SetCardExitX(int x) { m_card_exit_x = x; }
 
     void OnVamsLoading(bool load, wxColour col = AMS_CONTROL_GRAY500);
     void SetPassRoadColour(bool left, wxColour col);
@@ -640,6 +643,17 @@ public:
     void paintEvent(wxPaintEvent& evt);
     void render(wxDC& dc);
     void doRender(wxDC& dc);
+    void doRenderGrid(wxDC& dc);
+
+    // Grid mode: show roads from multiple AMS cards merging to a center column
+    struct GridCardExit {
+        int x;                  // X position of card exit in road widget coords
+        std::string ams_id;     // which AMS this exit belongs to
+    };
+    void SetGridMode(bool grid, int merge_x);
+    void SetGridExits(const std::vector<GridCardExit>& exits);
+    void SetGridActiveCard(const std::string& ams_id, wxColour color);
+    void ClearGridActiveCard();
 
     void msw_rescale();
 
@@ -650,6 +664,7 @@ private:
     AMSRoadShowMode m_right_rode_mode      = {AMSRoadShowMode::AMS_ROAD_MODE_FOUR};
     bool            m_selected             = {false};
 
+    int             m_card_exit_x          = {-1}; // -1 = not set, use default
     int             m_left_road_length     = {-1};
     int             m_right_road_length    = {-1};
     int             m_passroad_width       = {6};
@@ -661,6 +676,13 @@ private:
     std::map<int, wxColour> m_road_color;
     bool m_vams_loading{false};
     AMSModel m_ams_model;
+
+    // Grid mode state
+    bool                        m_grid_mode{false};
+    int                         m_grid_merge_x{-1};
+    std::vector<GridCardExit>   m_grid_exits;
+    std::string                 m_grid_active_ams_id;
+    wxColour                    m_grid_active_color;
 };
 
 /*************************************************

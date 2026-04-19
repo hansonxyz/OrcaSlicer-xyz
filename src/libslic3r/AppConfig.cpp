@@ -40,7 +40,7 @@ using namespace nlohmann;
 namespace Slic3r {
 
 // xyz fork: check our fork's releases for updates instead of upstream OrcaSlicer
-static const std::string VERSION_CHECK_URL = "https://api.github.com/repos/hansonxyz/OrcaSlicer-xyz/releases/latest";
+static const std::string VERSION_CHECK_URL = "https://api.github.com/repos/hansonxyz/fosslink-desktop/releases/latest";
 static const std::string PROFILE_UPDATE_URL = "https://api.github.com/repos/OrcaSlicer/orcaslicer-profiles/releases/tags";
 static const std::string MODELS_STR = "models";
 
@@ -340,6 +340,28 @@ void AppConfig::set_defaults()
 
     if(get("auto_arrange").empty()) {
         set_bool("auto_arrange", true);
+    }
+
+    // xyz fork: default auto-start camera to enabled
+    if(get("auto_start_camera").empty()) {
+        set_bool("auto_start_camera", true);
+    }
+
+    // xyz fork: OpenBambu — connection mode for Bambu Lab printers.
+    // "openbambu" = open-source LAN protocol (default, no DLL loaded)
+    // "bambu_stealth" = Bambu DLL with stealth mode (no cloud transmission)
+    // "bambu_online" = Bambu DLL with full cloud (account login, remote print)
+    if (get("bambu_connection_mode").empty()) {
+        set("bambu_connection_mode", "openbambu");
+    }
+    // Derive use_bambu_network_plugin and stealth_mode from connection mode
+    {
+        std::string mode = get("bambu_connection_mode");
+        bool use_plugin = (mode == "bambu_stealth" || mode == "bambu_online");
+        set_bool("use_bambu_network_plugin", use_plugin);
+        if (use_plugin) {
+            set_bool("stealth_mode", mode == "bambu_stealth");
+        }
     }
 
     if (get("show_model_mesh").empty()) {

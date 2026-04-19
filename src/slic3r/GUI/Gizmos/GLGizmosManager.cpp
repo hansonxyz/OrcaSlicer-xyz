@@ -1010,13 +1010,16 @@ bool GLGizmosManager::on_key(wxKeyEvent& evt)
                         processed = mmu_seg->on_number_key_down(keyCode - '0');
                     }
                 }
-                else if (keyCode == 'F' || keyCode == 'T' || keyCode == 'S' || keyCode == 'C' || keyCode == 'H' || keyCode == 'G') {
+                else if (keyCode == 'F' || keyCode == 'T' || keyCode == 'S' || keyCode == 'C' || keyCode == 'H' || keyCode == 'G' || keyCode == 'D') {
                     processed = mmu_seg->on_key_down_select_tool_type(keyCode);
                     if (processed) {
                         // force extra frame to automatically update window size
                         wxGetApp().imgui()->set_requires_extra_frame();
                     }
                 }
+                // xyz fork: Ctrl+Z for boundary painter uses standard undo system.
+                // Each boundary click takes a snapshot, so Ctrl+Z restores the
+                // previous state one segment at a time.
             }
         }
         else if (m_current == FdmSupports) {

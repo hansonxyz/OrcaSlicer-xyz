@@ -157,6 +157,34 @@ void GLGizmoMmuSegmentation::render_painter_gizmo()
 
     render_triangles(selection);
 
+    // xyz fork: render boundary painter lines
+    {
+        const ModelObject *mo_bp = m_c->selection_info()->model_object();
+        int bp_mesh_id = -1;
+        for (const ModelVolume *mv : mo_bp->volumes) {
+            if (!mv->is_model_part())
+                continue;
+            ++bp_mesh_id;
+            if (bp_mesh_id >= (int)m_boundary_painters.size())
+                break;
+            auto &bp = m_boundary_painters[bp_mesh_id];
+            if (!bp.is_initialized())
+                continue;
+            Transform3d trafo = mo_bp->instances[selection.get_instance_idx()]->get_transformation().get_matrix() * mv->get_matrix();
+            const auto &verts = mv->mesh().its.vertices;
+            bp.update_boundary_model(verts, m_boundary_animate);
+            bp.update_preview_model(verts);
+            bp.render_boundaries(trafo);
+            bp.render_preview(trafo);
+            bp.render_start_marker(trafo, verts);
+            // Request continuous repaint for marching ants animation
+            if (m_boundary_animate && (bp.has_boundaries() || bp.has_pending())) {
+                m_parent.set_as_dirty();
+                m_parent.request_extra_frame();
+            }
+        }
+    }
+
     // xyz fork: render sharp edge boundary preview
     if (m_show_sharp_edges) {
         const ModelObject *mo = m_c->selection_info()->model_object();
@@ -237,8 +265,8 @@ bool GLGizmoMmuSegmentation::on_key_down_select_tool_type(int keyCode) {
     case 'G':
         m_current_tool = ImGui::GapFillIcon;
         break;
-    case 'B':
-        m_current_tool = ImGui::BoundedFillIcon;
+    case 'D':
+        m_current_tool = ImGui::BoundaryPainterIcon;
         break;
     default:
         return false;
@@ -474,13 +502,13 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
     m_imgui->text(m_desc.at("tool_type"));
 
     std::array<wchar_t, 7> tool_ids;
-    tool_ids = { ImGui::CircleButtonIcon, ImGui::SphereButtonIcon, ImGui::TriangleButtonIcon, ImGui::HeightRangeIcon, ImGui::FillButtonIcon, ImGui::GapFillIcon, ImGui::BoundedFillIcon };
+    tool_ids = { ImGui::CircleButtonIcon, ImGui::SphereButtonIcon, ImGui::TriangleButtonIcon, ImGui::HeightRangeIcon, ImGui::FillButtonIcon, ImGui::GapFillIcon, ImGui::BoundaryPainterIcon };
     std::array<wchar_t, 7> icons;
     if (m_is_dark_mode)
-        icons = { ImGui::CircleButtonDarkIcon, ImGui::SphereButtonDarkIcon, ImGui::TriangleButtonDarkIcon, ImGui::HeightRangeDarkIcon, ImGui::FillButtonDarkIcon, ImGui::GapFillDarkIcon, ImGui::BoundedFillDarkIcon };
+        icons = { ImGui::CircleButtonDarkIcon, ImGui::SphereButtonDarkIcon, ImGui::TriangleButtonDarkIcon, ImGui::HeightRangeDarkIcon, ImGui::FillButtonDarkIcon, ImGui::GapFillDarkIcon, ImGui::BoundaryPainterDarkIcon };
     else
-        icons = { ImGui::CircleButtonIcon, ImGui::SphereButtonIcon, ImGui::TriangleButtonIcon, ImGui::HeightRangeIcon, ImGui::FillButtonIcon, ImGui::GapFillIcon, ImGui::BoundedFillIcon };
-    std::array<wxString, 7> tool_tips = { _L("Circle"), _L("Sphere"), _L("Triangle"), _L("Height Range"), _L("Fill"), _L("Gap Fill"), _L("Bounded Fill") };
+        icons = { ImGui::CircleButtonIcon, ImGui::SphereButtonIcon, ImGui::TriangleButtonIcon, ImGui::HeightRangeIcon, ImGui::FillButtonIcon, ImGui::GapFillIcon, ImGui::BoundaryPainterIcon };
+    std::array<wxString, 7> tool_tips = { _L("Circle"), _L("Sphere"), _L("Triangle"), _L("Height Range"), _L("Fill (F)"), _L("Gap Fill"), _L("Boundary (D)") };
     for (int i = 0; i < tool_ids.size(); i++) {
         std::string  str_label = std::string("");
         std::wstring btn_name  = icons[i] + boost::nowide::widen(str_label);
@@ -545,7 +573,7 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
             m_imgui->bbl_checkbox(_L("Snap to edges"), m_snap_to_edges);
             if (m_snap_to_edges) {
                 ImGui::AlignTextToFramePadding();
-                m_imgui->text(_L("Edge sensitivity") + ":");
+                m_imgui->text(_L("Min edge angle"));
                 std::string fmt = std::string("%.f") + I18N::translate_utf8("°", "Edge snap threshold");
                 ImGui::SameLine(circle_max_width);
                 ImGui::PushItemWidth(sliders_width);
@@ -553,6 +581,7 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
                 ImGui::SameLine(drag_left_width + circle_max_width);
                 ImGui::PushItemWidth(1.5 * slider_icon_width);
                 ImGui::BBLDragFloat("##snap_threshold_input", &m_snap_curvature_threshold, 0.05f, 0.0f, 0.0f, "%.2f");
+                m_imgui->text(_L("Lower = sharper edges only. Higher = gentler curves."));
             }
         }
 
@@ -607,10 +636,16 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
 
     } else if (m_current_tool == ImGui::FillButtonIcon) {
         m_cursor_type = TriangleSelector::CursorType::POINTER;
-        m_imgui->bbl_checkbox(m_desc["edge_detection"], m_detect_geometry_edge);
         m_tool_type = ToolType::BUCKET_FILL;
 
-        if (m_detect_geometry_edge) {
+        // xyz fork: Fill constraint checkboxes
+        ImGui::Separator();
+        m_imgui->text(_L("Fill stops at:"));
+        m_imgui->bbl_checkbox(_L("Surface angle"), m_fill_respect_angle);
+        m_imgui->bbl_checkbox(_L("Color boundaries"), m_fill_respect_color);
+        m_imgui->bbl_checkbox(_L("Boundary lines"), m_fill_respect_boundary);
+
+        if (m_fill_respect_angle) {
             ImGui::AlignTextToFramePadding();
             m_imgui->text(m_desc["smart_fill_angle"]);
             std::string format_str = std::string("%.f") + I18N::translate_utf8("°", "Face angle threshold,"
@@ -625,9 +660,6 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
             ImGui::SameLine(drag_left_width + sliders_left_width);
             ImGui::PushItemWidth(1.5 * slider_icon_width);
             ImGui::BBLDragFloat("##smart_fill_angle_input", &m_smart_fill_angle, 0.05f, 0.0f, 0.0f, "%.2f");
-        } else {
-            // set to negative value to disable edge detection
-            m_smart_fill_angle = -1.f;
         }
         ImGui::Separator();
         if (m_c->object_clipper()->get_position() == 0.f) {
@@ -701,28 +733,59 @@ void GLGizmoMmuSegmentation::on_render_input_window(float x, float y, float bott
         ImGui::PushItemWidth(1.5 * slider_icon_width);
         ImGui::BBLDragFloat("##gap_area_input", &TriangleSelectorPatch::gap_area, 0.05f, 0.0f, 0.0f, "%.2f");
     }
-    else if (m_current_tool == ImGui::BoundedFillIcon) {
+    else if (m_current_tool == ImGui::BoundaryPainterIcon) {
         m_cursor_type = TriangleSelector::CursorType::POINTER;
-        m_tool_type = ToolType::BOUNDED_FILL;
-        // No angle slider - bounded fill ignores angles, only stops at color boundaries
+        m_tool_type = ToolType::BOUNDARY_PAINTER;
+
         ImGui::Separator();
-        if (m_c->object_clipper()->get_position() == 0.f) {
+        m_imgui->text(_L("Click to place boundary points. Click start point to close."));
+        m_imgui->text(_L("Hold Shift for straight line mode (red preview)."));
+        m_imgui->text(_L("Ctrl+Z to undo last segment. Esc to cancel."));
+
+        ImGui::Separator();
+        m_imgui->bbl_checkbox(_L("Snap to sharp edges"), m_boundary_snap_to_curve);
+        if (m_boundary_snap_to_curve) {
             ImGui::AlignTextToFramePadding();
-            m_imgui->text(m_desc.at("clipping_of_view"));
-        } else {
-            if (m_imgui->button(m_desc.at("reset_direction"))) {
-                wxGetApp().CallAfter([this]() { m_c->object_clipper()->set_position_by_ratio(-1., false); });
+            m_imgui->text(_L("Min edge angle"));
+            ImGui::SameLine(sliders_left_width);
+            ImGui::PushItemWidth(sliders_width);
+            std::string angle_fmt = std::string("%.0f") + I18N::translate_utf8("°",
+                "Edge angle threshold for snap-to-edge");
+            m_imgui->bbl_slider_float_style("##boundary_curvature", &m_boundary_curvature_threshold, 5.f, 90.f, angle_fmt.data());
+            m_imgui->text(_L("Lower = sharper edges only. Higher = gentler curves."));
+        }
+
+        // Show boundary count and clear button
+        size_t total_boundaries = 0;
+        for (const auto &bp : m_boundary_painters)
+            total_boundaries += bp.boundary_count();
+        bool has_pending = false;
+        for (const auto &bp : m_boundary_painters)
+            if (bp.has_pending()) { has_pending = true; break; }
+
+        ImGui::Separator();
+        m_imgui->text(wxString::Format(_L("Boundaries: %zu"), total_boundaries));
+        if (has_pending) {
+            m_imgui->text(_L("(placing points...)"));
+            if (m_imgui->button(_L("Close Boundary"))) {
+                for (auto &bp : m_boundary_painters)
+                    if (bp.has_pending()) bp.close_boundary();
+            }
+            ImGui::SameLine();
+            if (m_imgui->button(_L("Cancel"))) {
+                for (auto &bp : m_boundary_painters)
+                    if (bp.has_pending()) bp.cancel_current();
             }
         }
-        auto clp_dist = float(m_c->object_clipper()->get_position());
-        ImGui::SameLine(sliders_left_width);
-        ImGui::PushItemWidth(sliders_width);
-        bool slider_clp_dist = m_imgui->bbl_slider_float_style("##clp_dist", &clp_dist, 0.f, 1.f, "%.2f", 1.0f, true);
-        ImGui::SameLine(drag_left_width + sliders_left_width);
-        ImGui::PushItemWidth(1.5 * slider_icon_width);
-        bool b_clp_dist_input = ImGui::BBLDragFloat("##clp_dist_input", &clp_dist, 0.05f, 0.0f, 0.0f, "%.2f");
-        if (slider_clp_dist || b_clp_dist_input) { m_c->object_clipper()->set_position_by_ratio(clp_dist, true); }
+        if (total_boundaries > 0 || has_pending) {
+            if (m_imgui->button(_L("Clear All Boundaries"))) {
+                for (auto &bp : m_boundary_painters)
+                    bp.clear();
+            }
+            m_imgui->bbl_checkbox(_L("Animate boundaries"), m_boundary_animate);
+        }
     }
+    // xyz fork: Bounded Fill tool removed — merged into Fill tool with checkboxes
 
 
     ImGui::Separator();
@@ -865,6 +928,18 @@ void GLGizmoMmuSegmentation::update_model_object()
             continue;
         ++idx;
         updated |= mv->mmu_segmentation_facets.set(*m_triangle_selectors[idx].get());
+        // xyz fork: save boundary paths (completed + pending) to model volume
+        if (idx < (int)m_boundary_painters.size()
+            && (m_boundary_painters[idx].has_boundaries() || m_boundary_painters[idx].has_pending())) {
+            std::string data = m_boundary_painters[idx].serialize();
+            if (data != mv->boundary_paths_data) {
+                mv->boundary_paths_data = data;
+                updated = true;
+            }
+        } else if (!mv->boundary_paths_data.empty()) {
+            mv->boundary_paths_data.clear();
+            updated = true;
+        }
     }
 
     if (updated) {
@@ -939,12 +1014,35 @@ void GLGizmoMmuSegmentation::update_from_model_object(bool first_update)
 
     this->init_model_triangle_selectors();
 
+    // xyz fork: restore boundary paths from model volumes
+    {
+        const ModelObject *mo = m_c->selection_info()->model_object();
+        int bp_idx = -1;
+        m_boundary_painters.clear();
+        for (const ModelVolume *mv : mo->volumes) {
+            if (!mv->is_model_part())
+                continue;
+            ++bp_idx;
+            m_boundary_painters.emplace_back();
+            if (!mv->boundary_paths_data.empty()) {
+                m_boundary_painters.back().init(mv->mesh());
+                m_boundary_painters.back().deserialize(mv->boundary_paths_data);
+            }
+        }
+    }
+
     // ORCA: Refresh cache when model changes
     this->update_used_filaments();
 }
 
 void GLGizmoMmuSegmentation::tool_changed(wchar_t old_tool, wchar_t new_tool)
 {
+    // xyz fork: cancel unclosed boundaries when switching away from boundary painter
+    if (old_tool == ImGui::BoundaryPainterIcon && new_tool != ImGui::BoundaryPainterIcon) {
+        for (auto &bp : m_boundary_painters)
+            if (bp.has_pending()) bp.cancel_current();
+    }
+
     if ((old_tool == ImGui::GapFillIcon && new_tool == ImGui::GapFillIcon) ||
         (old_tool != ImGui::GapFillIcon && new_tool != ImGui::GapFillIcon))
         return;

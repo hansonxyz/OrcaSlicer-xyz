@@ -158,6 +158,28 @@ public:
     void jump_to_HMS();
     void jump_to_LiveView();
     void update_network_version_footer();
+
+    // xyz fork: Smart camera lifecycle management
+    //
+    // Camera auto-start behavior:
+    // - Auto-starts when Device tab is opened and printer is actively printing
+    //   (honors "Auto-start camera" preference; errors suppressed on auto-start)
+    // - Auto-starts when a print begins while Device tab is visible
+    // - If the user manually stops the camera during a print, it stays off
+    //   until the next print starts or the user leaves and returns to the
+    //   Device tab (which triggers a fresh auto-start check)
+    // - All auto-start behavior is gated on the "auto_start_camera" preference
+    //
+    // Future wishlist:
+    // - Pause camera when window minimized/obscured, resume when visible
+    //   (wxEVT_ACTIVATE and wxEVT_ICONIZE don't reliably fire on Windows
+    //   for this use case — needs further investigation)
+    enum class CameraAutoState { OFF, ACTIVE };
+    CameraAutoState m_camera_auto_state = CameraAutoState::OFF;
+    bool m_camera_user_stopped = false; // true if user manually stopped camera
+    bool m_was_printing = false;        // tracks print state transitions
+
+    void check_camera_auto_start();
 };
 
 

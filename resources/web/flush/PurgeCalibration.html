@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <style>
+      * { user-select: none; -webkit-user-select: none; }
+      html, body { margin: 0; padding: 0; height: 100%; background: #f5f5f5; font-family: sans-serif; overscroll-behavior: none; }
+      body { position: fixed; inset: 0; }
+      .container { background: #fff; padding: 20px; padding-bottom: 10px; border: 1px solid #ccc; max-width: fit-content(1000px); margin: 0 auto; }
+      .tip-panel { background: #eeeeee; padding: 10px; margin-bottom: 10px; font-size: 12px; }
+      .scroll-container { max-width: 100%; max-height: 400px; overflow: auto; border: 1px solid #ccc; position: relative; margin: 0px; }
+      table { border-collapse: collapse; width: 100%; }
+      th, td { border: 1px solid #ccc; text-align: center; padding: 2px; position: relative; width: 55px; height: 28px; }
+      thead th { position: sticky; top: 0; background: #eee; z-index: 10; }
+      tbody th { position: sticky; left: 0; background: #eee; z-index: 9; }
+      tbody tr:nth-child(even) { background: #ffffff; }
+      tbody tr:nth-child(odd) { background: #eeeeee; }
+      tbody td:first-child, thead th:first-child { position: sticky; top: 0; left: 0; background: #eee; z-index: 11; }
+      .icon-button { display: inline-block; width: 16px; height: 16px; border: 1px solid #999; text-align: center; line-height: 15px; color: #fff; font-weight: bold; font-size: 10px; border-radius: 4px; cursor: default; user-select: none; padding: 1px; }
+      .form-row { display: flex; align-items: center; margin-bottom: 6px; font-size: 12px; }
+      .form-label { width: 110px; flex-shrink: 0; }
+      .form-control { max-width: 200px; }
+      select { padding: 6px 9px; border: 1px solid #dbdbdb; border-radius: 3px; font-size: 12px; cursor: pointer; appearance: auto; background-color: white; color: black; }
+      select:hover, select:focus { outline: none; border-color: #26A69A; background-color: #edfaf2; }
+      input[type="number"].form-input { width: 50px; padding: 4px 6px; border: 1px solid #dbdbdb; border-radius: 3px; font-size: 12px; text-align: center; }
+      .cell-check { display: flex; align-items: center; justify-content: center; gap: 5px; }
+      .cell-check input[type="checkbox"] { margin: 0; cursor: pointer; }
+      .cell-vol { font-size: 10px; color: #ffffff; }
+      .cell-diag { background: #d0d0d0 !important; }
+      .warning-text { color: #b48600; font-size: 11px; margin: 6px 0; }
+      .normal-text { color: black; font-size: 12px; }
+      .button-row { display: flex; justify-content: space-between; align-items: center; margin: 10px 0 0 0; }
+      .button-left { display: flex; gap: 8px; }
+      .button-right { display: flex; gap: 8px; }
+
+      /* Dark mode - copied from WipingDialog */
+      body.dark-mode { background-color: #2d2d31; color: #e0e0e0; }
+      body.dark-mode .container { background: inherit; border-color: #2d2d31; }
+      body.dark-mode .tip-panel { background: #4c4c55; color: #ccc; }
+      body.dark-mode .scroll-container { border-color: #4c4c55; }
+      body.dark-mode table { background: inherit; border-color: #4c4c55; }
+      body.dark-mode th, body.dark-mode td { background: inherit; border-color: #555; color: #e0e0e0; }
+      body.dark-mode thead th { position: sticky; z-index: 10; }
+      body.dark-mode tbody th { position: sticky; z-index: 9; }
+      body.dark-mode tbody tr:nth-child(even) { background: #2d2d31; }
+      body.dark-mode tbody tr:nth-child(odd) { background: #4c4c55; }
+      body.dark-mode tbody td:first-child, body.dark-mode thead th:first-child { position: sticky; z-index: 11; }
+      body.dark-mode select { background-color: #2d2d31; color: white; border-color: #4c4c55; }
+      body.dark-mode input[type="number"].form-input { background-color: #4c4c55; color: white; border-color: #666; }
+      body.dark-mode .cell-vol { color: #aaa; }
+      body.dark-mode .cell-diag { background: #1a1a1e !important; }
+      body.dark-mode .warning-text { color: #d4a017; }
+      body.dark-mode .normal-text { color: #e0e0e0; }
+      body.dark-mode .icon-button { background-color: #4c4c55; }
+    </style>
+  </head>
+
+  <link rel="stylesheet" type="text/css" href="../include/global.css" />
+
+  <body>
+    <div class="container">
+      <div class="tip-panel" id="tip_panel">
+        Select filament transition pairs to include in the calibration test print.
+        Each checked pair will produce a graduated purge strip for measurement.
+      </div>
+
+      <div class="form-row">
+        <div class="form-label">Filament group</div>
+        <select id="type_select" class="form-control" onchange="onTypeChanged()"></select>
+      </div>
+      <div class="form-row">
+        <div class="form-label">Base layers</div>
+        <input type="number" id="base_layers" class="form-input form-control" value="2" min="0" max="5" />
+      </div>
+      <div class="form-row">
+        <div class="form-label">Base filament</div>
+        <select id="base_filament" class="form-control"></select>
+      </div>
+      <div class="form-row">
+        <div class="form-label">Label filament</div>
+        <select id="label_filament" class="form-control"></select>
+      </div>
+
+      <div style="font-size:12px; font-weight:bold; margin:8px 0 4px 0;">Transition pairs (check to include):</div>
+
+      <div class="scroll-container">
+        <table id="calibTable">
+          <thead><tr><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div id="warning_panel" class="warning-text" style="display:none;"></div>
+      <div id="strip_limit_warning" class="warning-text" style="display:none;"></div>
+
+      <div class="button-row">
+        <div class="button-left">
+          <div class="ButtonStyleRegular ButtonTypeCompact" onclick="selectAll()">Select All</div>
+          <div class="ButtonStyleRegular ButtonTypeCompact" onclick="deselectAll()">Deselect All</div>
+        </div>
+        <div class="button-right">
+          <div class="ButtonStyleConfirm ButtonTypeWindow" id="generate_btn" onclick="generate()">Generate Test Print</div>
+          <div class="ButtonStyleRegular ButtonTypeWindow" onclick="cancel()">Cancel</div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      let m_filaments = [];
+      let m_recommended_matrix = [];
+      let m_selected_indices = [];
+      let m_checkboxes = [];
+      let m_max_strips = 99;
+
+      // Same luminance function as WipingDialog
+      function getLuminance(color) {
+        const hex = color.replace(/^#/, '');
+        const r = parseInt(hex.slice(0, 2), 16);
+        const g = parseInt(hex.slice(2, 4), 16);
+        const b = parseInt(hex.slice(4, 6), 16);
+        return (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+      }
+
+      // Send init request to C++ on load (same pattern as WipingDialog)
+      window.addEventListener("DOMContentLoaded", function() {
+        var data = JSON.stringify({ msg: 'init' });
+        window.purgeCalibration.postMessage(data);
+      });
+
+      document.addEventListener("keydown", function(event) {
+        if (event.key === "Escape") { event.preventDefault(); cancel(); }
+      }, true);
+
+      // Called from C++ with all data
+      function buildCalibration(data) {
+        m_filaments = data.filaments;
+        m_recommended_matrix = data.recommended_matrix;
+        m_max_strips = data.max_strips || 99;
+
+        if (data.is_dark_mode) document.body.classList.add('dark-mode');
+
+        // Populate filament dropdowns
+        var baseSelect = document.getElementById('base_filament');
+        var labelSelect = document.getElementById('label_filament');
+        baseSelect.innerHTML = '';
+        labelSelect.innerHTML = '';
+        for (var i = 0; i < m_filaments.length; i++) {
+          var f = m_filaments[i];
+          baseSelect.add(new Option((f.index + 1) + ': ' + f.name, f.index));
+          labelSelect.add(new Option((f.index + 1) + ': ' + f.name, f.index));
+        }
+
+        // Smart defaults: base = filament 0, label = filament 1 (distinct from base)
+        // If only 1 filament, both default to 0
+        var n = m_filaments.length;
+        baseSelect.value = 0;
+        labelSelect.value = (n > 1) ? 1 : 0;
+
+        // Populate type dropdown
+        var typeSelect = document.getElementById('type_select');
+        typeSelect.innerHTML = '';
+        var baseTypes = [];
+        var hasSoluble = false;
+        var solubleName = '';
+        for (var i = 0; i < m_filaments.length; i++) {
+          var f = m_filaments[i];
+          if (f.is_soluble) { hasSoluble = true; solubleName = f.type; }
+          else if (baseTypes.indexOf(f.type) === -1) baseTypes.push(f.type);
+        }
+        for (var i = 0; i < baseTypes.length; i++) {
+          typeSelect.add(new Option(baseTypes[i], baseTypes[i]));
+          if (hasSoluble) typeSelect.add(new Option(baseTypes[i] + ' + ' + solubleName, baseTypes[i] + '+soluble'));
+        }
+
+        if (baseTypes.length > 1) {
+          document.getElementById('warning_panel').style.display = 'block';
+          document.getElementById('warning_panel').innerText =
+            'Cross-type calibration (e.g. PLA to PETG) is not available. Consistent bed temperature is required.';
+        }
+
+        onTypeChanged();
+      }
+
+      function onTypeChanged() {
+        var val = document.getElementById('type_select').value;
+        var baseType = val.replace('+soluble', '');
+        var includeSoluble = val.indexOf('+soluble') >= 0;
+
+        m_selected_indices = [];
+        for (var i = 0; i < m_filaments.length; i++) {
+          var f = m_filaments[i];
+          if (f.type === baseType || (f.is_soluble && includeSoluble))
+            m_selected_indices.push(i);
+        }
+        buildTable();
+      }
+
+      function buildTable() {
+        var thead = document.querySelector("#calibTable thead tr");
+        var tbody = document.querySelector("#calibTable tbody");
+        thead.innerHTML = "<th><div style='font-size:11px'>from/to</div></th>";
+        tbody.innerHTML = "";
+        m_checkboxes = [];
+
+        var n = m_selected_indices.length;
+
+        // Column headers — same icon-button style as WipingDialog
+        for (var ci = 0; ci < n; ci++) {
+          var f = m_filaments[m_selected_indices[ci]];
+          var th = document.createElement("th");
+          var lum = getLuminance(f.color);
+          var textColor = lum > 0.5 ? "black" : "white";
+          th.innerHTML = '<div class="icon-button" style="background:' + f.color + ';color:' + textColor + ';">' + (f.index + 1) + '</div>';
+          thead.appendChild(th);
+        }
+
+        // Rows
+        for (var ri = 0; ri < n; ri++) {
+          var fromF = m_filaments[m_selected_indices[ri]];
+          var tr = document.createElement("tr");
+
+          var rowHeader = document.createElement("th");
+          var lum = getLuminance(fromF.color);
+          var textColor = lum > 0.5 ? "black" : "white";
+          rowHeader.innerHTML = '<div class="icon-button" style="background:' + fromF.color + ';color:' + textColor + ';">' + (fromF.index + 1) + '</div>';
+          tr.appendChild(rowHeader);
+
+          for (var ci = 0; ci < n; ci++) {
+            var td = document.createElement("td");
+            if (ri === ci) {
+              td.className = 'cell-diag';
+              tr.appendChild(td);
+              continue;
+            }
+
+            var toF = m_filaments[m_selected_indices[ci]];
+            var vol = 0;
+            if (fromF.index < m_recommended_matrix.length && toF.index < m_recommended_matrix[fromF.index].length)
+              vol = Math.round(m_recommended_matrix[fromF.index][toF.index]);
+
+            var cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.checked = true;
+            cb.dataset.from = fromF.index;
+            cb.dataset.to = toF.index;
+            cb.addEventListener('change', validateSelection);
+            m_checkboxes.push(cb);
+
+            var span = document.createElement('span');
+            span.className = 'cell-vol';
+            span.innerText = vol;
+
+            var div = document.createElement('div');
+            div.className = 'cell-check';
+            div.appendChild(cb);
+            div.appendChild(span);
+            td.appendChild(div);
+            tr.appendChild(td);
+          }
+          tbody.appendChild(tr);
+        }
+        validateSelection();
+      }
+
+      function selectAll() { for (var i = 0; i < m_checkboxes.length; i++) m_checkboxes[i].checked = true; validateSelection(); }
+      function deselectAll() { for (var i = 0; i < m_checkboxes.length; i++) m_checkboxes[i].checked = false; validateSelection(); }
+
+      function validateSelection() {
+        var count = 0;
+        for (var i = 0; i < m_checkboxes.length; i++)
+          if (m_checkboxes[i].checked) count++;
+
+        var warn = document.getElementById('strip_limit_warning');
+        var btn = document.getElementById('generate_btn');
+        if (count > m_max_strips) {
+          warn.style.display = 'block';
+          warn.innerText = 'Too many pairs selected (' + count + '). Maximum ' + m_max_strips +
+            ' test strips fit on the bed. Deselect some pairs and calibrate the rest on another print.';
+          btn.style.opacity = '0.4';
+          btn.style.pointerEvents = 'none';
+        } else if (count === 0) {
+          warn.style.display = 'none';
+          btn.style.opacity = '0.4';
+          btn.style.pointerEvents = 'none';
+        } else {
+          warn.style.display = 'none';
+          btn.style.opacity = '1';
+          btn.style.pointerEvents = 'auto';
+        }
+      }
+
+      function generate() {
+        var pairs = [];
+        for (var i = 0; i < m_checkboxes.length; i++) {
+          if (m_checkboxes[i].checked)
+            pairs.push({ from: parseInt(m_checkboxes[i].dataset.from), to: parseInt(m_checkboxes[i].dataset.to) });
+        }
+        if (pairs.length === 0) { alert('No transition pairs selected.'); return; }
+        var data = JSON.stringify({
+          msg: 'generate',
+          pairs: pairs,
+          base_layers: parseInt(document.getElementById('base_layers').value) || 0,
+          base_filament: parseInt(document.getElementById('base_filament').value) || 0,
+          label_filament: parseInt(document.getElementById('label_filament').value) || 0
+        });
+        window.purgeCalibration.postMessage(data);
+      }
+
+      function cancel() {
+        window.purgeCalibration.postMessage(JSON.stringify({ msg: 'cancel' }));
+      }
+    </script>
+  </body>
+</html>

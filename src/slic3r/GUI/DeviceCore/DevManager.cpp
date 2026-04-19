@@ -1,4 +1,5 @@
 #include <nlohmann/json.hpp>
+#include <thread>
 #include "DevManager.h"
 #include "DevUtil.h"
 
@@ -32,8 +33,8 @@ namespace Slic3r
                 obj->dev_connection_type = "lan";
                 obj->bind_state          = "free";
                 obj->bind_sec_link       = "secure";
-                obj->m_is_online         = true;
-                obj->last_alive          = Slic3r::Utils::get_current_time_utc();
+                obj->m_is_online         = false; // Offline until SSDP confirms
+                obj->last_alive          = 0; // epoch = never seen
                 obj->set_access_code(config->get("access_code", m.dev_id), false);
                 obj->set_user_access_code(config->get("user_access_code", m.dev_id), false);
                 if (obj->has_access_right()) {
@@ -169,6 +170,7 @@ namespace Slic3r
     {
         try {
             json j = json::parse(json_str);
+            BOOST_LOG_TRIVIAL(info) << "XYZ_SSDP on_machine_alive: " << j.value("dev_id", "?") << " ip=" << j.value("dev_ip", "?");
             std::string dev_name        = j["dev_name"].get<std::string>();
             std::string dev_id          = j["dev_id"].get<std::string>();
             std::string dev_ip          = j["dev_ip"].get<std::string>();
@@ -515,12 +517,21 @@ namespace Slic3r
                         m_agent->disconnect_printer();
                         it->second->reset();
 
+                        // Only connect if printer is confirmed online via SSDP
+                        if (it->second->m_is_online) {
 #if !BBL_RELEASE_TO_PUBLIC
-                        it->second->connect(Slic3r::GUI::wxGetApp().app_config->get("enable_ssl_for_mqtt") == "true" ? true : false);
+                            bool use_ssl = Slic3r::GUI::wxGetApp().app_config->get("enable_ssl_for_mqtt") == "true";
 #else
-                        it->second->connect(it->second->local_use_ssl);
+                            bool use_ssl = it->second->local_use_ssl;
 #endif
-                        it->second->set_lan_mode_connection_state(true);
+                            auto *obj_ptr = it->second;
+                            std::thread([obj_ptr, use_ssl]() {
+                                obj_ptr->connect(use_ssl);
+                            }).detach();
+                            it->second->set_lan_mode_connection_state(true);
+                        } else {
+                            BOOST_LOG_TRIVIAL(info) << "set_selected_machine: printer " << dev_id << " is offline, skipping MQTT connect";
+                        }
                     }
                 }
             }
@@ -539,12 +550,22 @@ namespace Slic3r
                     {
                         BOOST_LOG_TRIVIAL(info) << "set_selected_machine: select new lan machine, dev_id =" << dev_id;
                         it->second->reset();
+
+                        // Only connect if printer is confirmed online via SSDP
+                        if (it->second->m_is_online) {
 #if !BBL_RELEASE_TO_PUBLIC
-                        it->second->connect(Slic3r::GUI::wxGetApp().app_config->get("enable_ssl_for_mqtt") == "true" ? true : false);
+                            bool use_ssl = Slic3r::GUI::wxGetApp().app_config->get("enable_ssl_for_mqtt") == "true";
 #else
-                        it->second->connect(it->second->local_use_ssl);
+                            bool use_ssl = it->second->local_use_ssl;
 #endif
-                        it->second->set_lan_mode_connection_state(true);
+                            auto *obj_ptr = it->second;
+                            std::thread([obj_ptr, use_ssl]() {
+                                obj_ptr->connect(use_ssl);
+                            }).detach();
+                            it->second->set_lan_mode_connection_state(true);
+                        } else {
+                            BOOST_LOG_TRIVIAL(info) << "set_selected_machine: printer " << dev_id << " is offline, skipping MQTT connect";
+                        }
                     }
                 }
             }

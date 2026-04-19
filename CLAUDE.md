@@ -71,34 +71,92 @@ ctest --test-dir ./tests/sla_print/sla_print_tests
 ```
 
 ### Post-Build Testing Workflow
-After building, always launch the software for the user to test:
+
+**Standard test cycle (kill → build → launch):**
 ```bash
-# GUI launch (pass test file as argument when available):
-powershell.exe -Command "Start-Process -FilePath 'build\OrcaSlicer\orca-slicer.exe' -ArgumentList 'path\to\test.3mf' -WorkingDirectory 'build\OrcaSlicer'"
+# Step 1: Kill any running instance (MUST use PowerShell, not taskkill)
+powershell.exe -Command "Stop-Process -Name orca-slicer -Force -ErrorAction SilentlyContinue"
+
+# Step 2: Build
+powershell.exe -ExecutionPolicy Bypass -File xyz/build_artifacts/build_incremental.ps1
+
+# Step 3: Launch with test file (note: inner quotes needed for paths with spaces)
+powershell.exe -Command "Start-Process -FilePath 'C:\Users\brian\bin\orca_conf_gen\reference\orcaslicer\build\OrcaSlicer\orca-slicer.exe' -ArgumentList '\"C:\Users\brian\Desktop\Crystal Dragon Statue - Spryo.3mf\"' -WorkingDirectory 'C:\Users\brian\bin\orca_conf_gen\reference\orcaslicer\build\OrcaSlicer'"
 ```
-- Always launch the app after a successful build if testing a visual feature
-- Pass the current test file as a CLI argument to save the user a step
-- For headless/CLI testing, invoke directly and capture output
-- Current test file: `Z:\cabinets\Things\Projects\drg_buff_beer_mugs_coloration_2.3mf` (plate 1)
-- If OrcaSlicer is blocking a build (DLL locked), kill it before building:
-  ```bash
-  # taskkill does NOT work reliably from Git Bash. Use PowerShell:
-  powershell.exe -Command "Stop-Process -Name orca-slicer -Force"
-  ```
+
+**Detecting if the app is running:**
+```bash
+# DO NOT use tasklist from Git Bash — it silently fails and gives false negatives.
+# ALWAYS use PowerShell Get-Process:
+powershell.exe -Command "Get-Process -Name 'orca-slicer' -ErrorAction SilentlyContinue | Select-Object Id, ProcessName"
+```
+
+**Killing the app before builds:**
+```bash
+# taskkill does NOT work reliably from Git Bash. Always use PowerShell:
+powershell.exe -Command "Stop-Process -Name orca-slicer -Force -ErrorAction SilentlyContinue"
+```
+
+**Resource file changes (HTML, images, etc.):**
+The incremental build script syncs `resources/` to `build/OrcaSlicer/resources/` using `robocopy /E` after each build. This ensures HTML changes (like WebView dialogs) are deployed without a full reinstall. Do NOT use `robocopy /MIR` — the `/MIR` flag deletes destination files not in the source, which destroys cmake-installed generated files and causes startup crashes.
+
+**Bambu DLL Crash Investigation (CRITICAL — ACTIVE):**
+
+The xyz fork experiences frequent crashes from the Bambu networking DLL (`bambu_networking_*.dll`). **These crashes are OUR problem.** The fact that the crashing code is in a closed-source DLL is a constraint on HOW we debug it, not a reason to dismiss it. Stock OrcaSlicer uses the same DLL and does not crash this frequently, which means something in our fork is triggering it. We must find what and fix it.
+
+**NEVER say "not our code" or "not our fault" about these crashes.** If our software crashes, it is our responsibility to fix it regardless of which module the fault address is in. Treat this exactly like any other bug: reproduce, bisect, fix.
+
+Two crash patterns (both from the Bambu DLL):
+1. `0xc0000005` ACCESS_VIOLATION in `bambu_networking_*.dll` — background thread null deref. Generates crash log. **BambuCrashGuard VEH catches these** (terminates thread, not process).
+2. `0xc0000409` STATUS_STACK_BUFFER_OVERRUN in `ucrtbase.dll` — DLL corrupts its stack, CRT security cookie check kills process. No crash log. VEH **cannot** catch these (`__fastfail` bypasses all handlers). Check Windows Event Log: `Get-WinEvent -FilterHashtable @{LogName="Application"; Level=2}`.
+
+Investigation status (2026-04-07):
+- Camera auto-start code (`#if 0`'d) is first suspect — disabled for testing
+- Need to systematically bisect xyz fork changes vs stock OrcaSlicer to find the trigger
+- BambuCrashGuard (VEH) installed in `BBLNetworkPlugin::initialize()` — catches type 1 crashes
+- Type 2 crashes require either process isolation or finding/fixing the root cause
+- The DLL is loaded via `LoadLibrary` and called through function pointers (`BBLNetworkPlugin`)
+- The DLL creates its own background threads (MQTT, SSDP) — we don't control them
+
+Resolution: **OpenBambu** — open-source LAN protocol replacement.
+- Source: `src/slic3r/Utils/OpenBambu/` (~1,700 lines, zero new dependencies)
+- Implements SSDP discovery, MQTT over TLS, FTPS upload, camera URL construction
+- Preference: `use_bambu_network_plugin` (default false = OpenBambu active, DLL not loaded)
+- When true, falls back to proprietary DLL (requires restart)
+- See `C:\Users\brian\bin\openbambu\PLAN.md` for full protocol documentation
+- All protocols tested against X1 Carbon on LAN
+
+**OpenBambu Code Structure:**
+- `src/slic3r/Utils/OpenBambu/OpenBambuAgent.hpp/cpp` — Unified API (SSDP + MQTT + FTP + camera URLs)
+- `src/slic3r/Utils/OpenBambu/OpenBambuPrinterAgent.hpp/cpp` — IPrinterAgent implementation for OrcaSlicer integration
+- `src/slic3r/Utils/OpenBambu/OpenBambuDiscovery.hpp/cpp` — SSDP printer discovery
+- `src/slic3r/Utils/OpenBambu/OpenBambuMqtt.hpp/cpp` — Raw MQTT 3.1.1 over TLS
+- `src/slic3r/Utils/OpenBambu/OpenBambuFtp.hpp/cpp` — FTPS upload (implicit TLS, port 990)
+- `src/slic3r/Utils/OpenBambu/OpenBambuCommands.hpp` — JSON command builders (header-only)
+- `src/slic3r/Utils/NetworkAgentFactory.cpp` — Registers OpenBambuPrinterAgent
+
+**OpenBambu Device Tab (alternative Device tab for OpenBambu mode):**
+- `src/slic3r/GUI/OpenBambuMonitor/OpenBambuMonitorPanel.hpp/cpp` — Clone of MonitorPanel for OpenBambu mode. Differences: no Update tab, no HMS tab, StatusPanel in OpenBambu mode (no axis/extruder/bed controls).
+- `src/slic3r/GUI/OpenBambuMonitor/OpenBambuStatus.hpp/cpp` — MQTT data model and parser (TempHistory ring buffer, PrinterStatus struct)
+- `src/slic3r/GUI/OpenBambuMonitor/archive_v1/` — Rejected from-scratch panel (archived for reference, DO NOT use)
+- `MainFrame::m_openbambu_monitor` — Created instead of `m_monitor` when `use_bambu_network_plugin` is false
+- `StatusPanel::set_openbambu_mode(true)` — Hides axis/extruder/bed controls, called by OpenBambuMonitorPanel
+- When adding new `m_monitor->` references elsewhere, always guard with null check and add parallel `m_openbambu_monitor` handling
+
+**OpenBambu Preferences:**
+- Preferences > Online > Connection: dropdown with "OpenBambu (LAN Only)", "Bambu Lab Official (Stealth Mode)", "Bambu Lab Official (Online Mode)"
+- `bambu_connection_mode` config key (default "openbambu"), derives `use_bambu_network_plugin` and `stealth_mode`
+- Changing connection mode requires app restart
+
+**Current test files:**
+- `C:\Users\brian\Desktop\Crystal Dragon Statue - Spryo.3mf` — multi-material Spyro statue, good for testing paint tools, boundary painter, flushing volumes, tree supports
+- `Z:\cabinets\Things\Projects\drg_buff_beer_mugs_coloration_2.3mf` (plate 2) — multi-material model with spatially isolated regions
 
 ### CLI Headless Slicing (for testing xyz fork features)
-OrcaSlicer supports headless CLI slicing. This is useful for testing features like Filament Lookahead without the GUI:
+OrcaSlicer supports headless CLI slicing:
 ```bash
-# Slice plate 2 of a 3MF file and output gcode
-build/OrcaSlicer/orca-slicer.exe --slice 2 "Z:\cabinets\Things\Projects\drg_buff_beer_mugs_coloration_2.3mf"
-
-# Then inspect the gcode for feature-specific metadata:
-grep "LOOKAHEAD_EXCLUSION_ZONE" output.gcode    # Filament Lookahead exclusion zones
-grep "ANY_TYPE_DEBUG" output.gcode               # Any Type support material debug
+build/OrcaSlicer/orca-slicer.exe --slice 2 "path\to\model.3mf"
 ```
-
-**Test files:**
-- `Z:\cabinets\Things\Projects\drg_buff_beer_mugs_coloration_2.3mf` (plate 2) - multi-material model with spatially isolated regions, good for testing Filament Lookahead
 
 ## Architecture
 
@@ -383,6 +441,8 @@ cmake --build build --config Release
 
 Output binary: `build/src/orca-slicer.exe` (raw build output, missing DLLs)
 
+**Build output structure:** `orca-slicer.exe` is a thin stub — virtually all compiled code lives in `OrcaSlicer.dll`. When checking whether a build actually recompiled, check the DLL timestamp (`build/src/OrcaSlicer.dll` or `build/OrcaSlicer/OrcaSlicer.dll` post-install), not the exe.
+
 **Runnable installation:** `build/OrcaSlicer/orca-slicer.exe` (after install step - has all DLLs, resources, and WebView2). Always run from this location, not from `build/src/`.
 
 ### Build Policy
@@ -393,6 +453,17 @@ Output binary: `build/src/orca-slicer.exe` (raw build output, missing DLLs)
 - First-time setup (deps + initial slicer build)
 
 Never wipe the build directory just to rebuild after code changes. Ninja's incremental builds are fast and reliable.
+
+**Build discipline (lessons learned):**
+- **Never kill a running build to "check on it" or "restart it."** Builds run at idle priority and take time. Killing mid-build wastes all the work done so far and forces recompilation of partially-built objects. Let the build finish, check the result, then act.
+- **Never say "clean build" when you mean incremental.** `build_incremental.ps1` is ALWAYS the right script for development. It handles CMake reconfiguration (for new files in CMakeLists.txt) and incremental compilation automatically. There is no reason to do a clean/full build during normal development.
+- **NEVER monitor a running build. The procedure is exactly 3 steps:**
+  1. Launch the build with `run_in_background: true`
+  2. Tell the user the build is running
+  3. You will receive a background task completion notification — ONLY THEN read the output file
+
+  **That is IT. There is no step 2.5.** Do NOT: check the output file (`tail`, `cat`, `Read`), check process status (`Get-Process`), poll CPU time, count compiler processes, check DLL timestamps, spawn a PowerShell wait loop, or do ANYTHING AT ALL to monitor progress. Ask yourself: "what will I do with this information?" The answer is always "nothing, because there is nothing to do but wait." So don't gather it. Every check wastes tokens and money for literally zero value. No exceptions, no edge cases, no "just a quick check."
+- **Adding new source files to CMakeLists.txt is an incremental build operation.** CMake detects the CMakeLists.txt change, reconfigures, and Ninja builds only the new/changed files. This is not a reason for a full rebuild.
 
 ### Build Artifacts Directory
 
@@ -408,7 +479,7 @@ Never wipe the build directory just to rebuild after code changes. Ninja's incre
 ### Git Workflow
 
 - Feature branch: `xyz` (off `main`)
-- Clean, atomic commits suitable for upstream PR submission
+- **ALWAYS commit ALL changes.** Never selectively stage files — git is used as a backup, not a collaboration tool. `git add -A` every commit. The only exception is build artifacts (`.exe`, `.obj`, `.dll` in build dirs). Untracked source files, config files, resources — all get committed together.
 - One feature at a time, in order listed in GOALS.md
 
 ### Git Remotes

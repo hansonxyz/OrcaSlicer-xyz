@@ -37,6 +37,9 @@ public:
     void SetMachineObject(MachineObject * obj);
 
     bool IsStreaming() const;
+    // xyz fork: camera lifecycle accessors
+    bool is_idle() const;
+    void stop_stream();
 
     void ToggleStream();
 

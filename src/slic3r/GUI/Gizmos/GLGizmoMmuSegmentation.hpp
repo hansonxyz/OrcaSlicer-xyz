@@ -2,6 +2,7 @@
 #define slic3r_GLGizmoMmuSegmentation_hpp_
 
 #include "GLGizmoPainterBase.hpp"
+#include "PaintToolBoundary.hpp"
 
 namespace Slic3r::GUI {
 
@@ -123,9 +124,19 @@ protected:
     bool                              m_show_sharp_edges = false;
     float                             m_sharp_edges_cached_angle = -1.f;
 public:
+    // xyz fork: Fill tool constraint checkboxes (public for GLGizmoPainterBase access)
+    bool                              m_fill_respect_angle = true;     // stop at surface angle changes
+    bool                              m_fill_respect_color = true;     // stop at color boundaries
+    bool                              m_fill_respect_boundary = true;  // stop at boundary painter lines
     // xyz fork: Crease-snapping brush (public for GLGizmoPainterBase access)
     bool                              m_snap_to_edges = false;
     float                             m_snap_curvature_threshold = 15.f;
+    // xyz fork: Boundary painter tool
+    std::vector<PaintToolBoundary>    m_boundary_painters; // one per mesh
+    bool                              m_boundary_snap_to_curve = false;
+    float                             m_boundary_curvature_threshold = 30.f;
+    bool                              m_boundary_animate = true;
+    bool is_boundary_painter_active() const { return m_tool_type == ToolType::BOUNDARY_PAINTER; }
 protected:
 
     static const constexpr float      CursorRadiusMin = 0.1f; // cannot be zero

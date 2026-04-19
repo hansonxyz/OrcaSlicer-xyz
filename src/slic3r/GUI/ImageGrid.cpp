@@ -176,19 +176,9 @@ void Slic3r::GUI::ImageGrid::DoAction(size_t index, int action)
 void Slic3r::GUI::ImageGrid::UpdateFileSystem()
 {
     if (!m_file_sys) return;
-    if (m_file_sys->GetFileType() < PrinterFileSystem::F_MODEL) {
-        if (m_file_sys->GetGroupMode() == PrinterFileSystem::G_NONE) {
-            m_cell_size.Set(396, 228);
-            m_border_size.Set(384, 216);
-        }
-        else {
-            m_cell_size.Set(496, 286);
-            m_border_size.Set(480, 270);
-        }
-    } else {
-        m_cell_size.Set(292, 288);
-        m_border_size.Set(266, 264);
-    }
+    // Use consistent card dimensions for all file types (model-style with info bar)
+    m_cell_size.Set(292, 288);
+    m_border_size.Set(266, 264);
     m_cell_size = m_cell_size * em_unit(this) / 10;
     m_border_size  = m_border_size * em_unit(this) / 10;
     m_content_rect = wxRect(SHADOW_WIDTH, SHADOW_WIDTH, m_border_size.GetWidth(), m_border_size.GetHeight());
@@ -549,8 +539,8 @@ void ImageGrid::render(wxDC& dc)
             pt += m_content_rect.GetTopLeft();
             // Draw content
             decltype(&ImageGrid::renderContent1) contentRender[] = {
-                &ImageGrid::renderContent1,
-                &ImageGrid::renderContent1,
+                &ImageGrid::renderContent2,
+                &ImageGrid::renderContent2,
                 &ImageGrid::renderContent2
             };
             (this->*contentRender[m_file_sys->GetFileType()])(dc, pt, index, hit_image == index);

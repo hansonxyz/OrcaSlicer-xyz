@@ -7,6 +7,7 @@
 #include "Widgets/SwitchButton.hpp"
 #include "Widgets/Label.hpp"
 #include "Printer/PrinterFileSystem.h"
+#include "slic3r/Utils/OpenBambu/OpenBambuFileSystem.hpp"
 #include "MsgDialog.hpp"
 #include "Widgets/ProgressDialog.hpp"
 #include <libslic3r/Model.hpp>
@@ -226,10 +227,17 @@ void MediaFilePanel::UpdateByObj(MachineObject* obj)
         m_device_busy  = obj->is_camera_busy_off();
         m_local_proto  = obj->file_local;
         m_remote_proto = obj->get_file_remote();
+        // In OpenBambu mode, force LAN proto support — we use FTPS directly
+        if (!wxGetApp().app_config->get_bool("use_bambu_network_plugin") && !m_lan_ip.empty())
+            m_local_proto = 1;
         m_model_download_support = obj->file_model_download;
 
-        if (m_sdcard_exist != (obj->GetStorage()->get_sdcard_state() == DevStorage::HAS_SDCARD_NORMAL)) {
-            m_sdcard_exist = obj->GetStorage()->get_sdcard_state() == DevStorage::HAS_SDCARD_NORMAL;
+        bool has_sdcard = (obj->GetStorage()->get_sdcard_state() == DevStorage::HAS_SDCARD_NORMAL);
+        // In OpenBambu mode, assume SD card present (FTPS root is the SD card)
+        if (!wxGetApp().app_config->get_bool("use_bambu_network_plugin"))
+            has_sdcard = true;
+        if (m_sdcard_exist != has_sdcard) {
+            m_sdcard_exist = has_sdcard;
             sdcard_state_changed = true;
         }
     } else {
@@ -270,7 +278,14 @@ void MediaFilePanel::UpdateByObj(MachineObject* obj)
     if (m_machine.empty()) {
         m_image_grid->SetStatus(m_bmp_failed, _L("Please confirm if the printer is connected."));
     } else {
-        boost::shared_ptr<PrinterFileSystem> fs(new PrinterFileSystem);
+        bool use_openbambu = !wxGetApp().app_config->get_bool("use_bambu_network_plugin");
+        boost::shared_ptr<PrinterFileSystem> fs;
+        if (use_openbambu) {
+            fs.reset(new OpenBambuFileSystem);
+            m_local_proto = 1; // Force LAN proto so fetchUrl() constructs the URL
+        } else {
+            fs.reset(new PrinterFileSystem);
+        }
         fs->Attached();
         m_image_grid->SetFileSystem(fs);
         m_image_grid->SetFileType(m_last_type, m_external ? "" : "internal");

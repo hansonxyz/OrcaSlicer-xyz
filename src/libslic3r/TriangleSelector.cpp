@@ -479,7 +479,7 @@ void TriangleSelector::append_touching_edges(int itriangle, int vertexi, int ver
 }
 
 // BBS: add seed_fill_angle parameter
-void TriangleSelector::bucket_fill_select_triangles(const Vec3f& hit, int facet_start, const ClippingPlane &clp, float seed_fill_angle, bool propagate, bool force_reselection)
+void TriangleSelector::bucket_fill_select_triangles(const Vec3f& hit, int facet_start, const ClippingPlane &clp, float seed_fill_angle, bool propagate, bool force_reselection, bool respect_color)
 {
     int start_facet_idx = select_unsplit_triangle(hit, facet_start);
     assert(start_facet_idx != -1);
@@ -530,8 +530,38 @@ void TriangleSelector::bucket_fill_select_triangles(const Vec3f& hit, int facet_
 
             std::vector<int> touching_triangles = get_all_touching_triangles(current_facet, neighbors[current_facet], neighbors_propagated[current_facet]);
             for(const int tr_idx : touching_triangles) {
-                if (tr_idx < 0 || visited[tr_idx] || m_triangles[tr_idx].get_state() != start_facet_state || is_facet_clipped(tr_idx, clp))
+                if (tr_idx < 0 || visited[tr_idx] || is_facet_clipped(tr_idx, clp))
                     continue;
+                // xyz fork: color boundary check is optional
+                if (respect_color && m_triangles[tr_idx].get_state() != start_facet_state)
+                    continue;
+                // xyz fork: boundary painter — stop at boundary edges.
+                // Only block BFS traversal when crossing an actual boundary edge,
+                // not when touching a boundary triangle from the fill side.
+                if (!m_boundary_edges.empty()) {
+                    int src_cur = m_triangles[current_facet].source_triangle;
+                    int src_nbr = m_triangles[tr_idx].source_triangle;
+                    if (src_cur != src_nbr) {
+                        // Find the shared edge between the two original mesh triangles
+                        const Vec3i32 &tri_cur = m_mesh.its.indices[src_cur];
+                        const Vec3i32 &tri_nbr = m_mesh.its.indices[src_nbr];
+                        bool blocked = false;
+                        for (int ei = 0; ei < 3 && !blocked; ++ei) {
+                            int ea = tri_cur[ei], eb = tri_cur[(ei + 1) % 3];
+                            for (int ej = 0; ej < 3; ++ej) {
+                                int na = tri_nbr[ej], nb = tri_nbr[(ej + 1) % 3];
+                                if ((ea == na && eb == nb) || (ea == nb && eb == na)) {
+                                    int lo = std::min(ea, eb), hi = std::max(ea, eb);
+                                    if (m_boundary_edges.count({lo, hi}) > 0)
+                                        blocked = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (blocked)
+                            continue;
+                    }
+                }
 
                 const Vec3f& n1 = m_face_normals[m_triangles[tr_idx].source_triangle];
                 const Vec3f& n2 = m_face_normals[m_triangles[current_facet].source_triangle];

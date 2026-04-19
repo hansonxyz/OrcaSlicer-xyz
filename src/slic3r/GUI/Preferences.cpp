@@ -66,6 +66,7 @@ std::tuple<wxBoxSizer*, ComboBox*> PreferencesDialog::create_item_combobox_base(
     combo_title->Wrap(DESIGN_TITLE_SIZE.x);
     m_sizer_combox->Add(combo_title, 0, wxALIGN_CENTER);
 
+    // xyz fork: proportion=1 so comboboxes fill remaining width
     auto combobox = new ::ComboBox(m_parent, wxID_ANY, wxEmptyString, wxDefaultPosition, DESIGN_LARGE_COMBOBOX_SIZE, 0, nullptr, wxCB_READONLY);
     combobox->SetFont(::Label::Body_14);
     combobox->GetDropDown().SetFont(::Label::Body_14);
@@ -77,7 +78,7 @@ std::tuple<wxBoxSizer*, ComboBox*> PreferencesDialog::create_item_combobox_base(
 
     combobox->SetSelection(current_index);
 
-    m_sizer_combox->Add(combobox, 0, wxALIGN_CENTER | wxLEFT, FromDIP(5));
+    m_sizer_combox->Add(combobox, 1, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, FromDIP(5));
 
     return {m_sizer_combox, combobox};
 }
@@ -273,7 +274,7 @@ wxBoxSizer *PreferencesDialog::create_item_language_combobox(wxString title, wxS
     }
     combobox->SetSelection(m_current_language_selected);
 
-    m_sizer_combox->Add(combobox, 0, wxALIGN_CENTER | wxLEFT, FromDIP(5));
+    m_sizer_combox->Add(combobox, 1, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, FromDIP(5));
 
     combobox->Bind(wxEVT_LEFT_DOWN, [this, combobox](wxMouseEvent &e) {
         m_current_language_selected = combobox->GetSelection();
@@ -354,7 +355,7 @@ wxBoxSizer *PreferencesDialog::create_item_region_combobox(wxString title, wxStr
     auto combobox = new ::ComboBox(m_parent, wxID_ANY, wxEmptyString, wxDefaultPosition, DESIGN_LARGE_COMBOBOX_SIZE, 0, nullptr, wxCB_READONLY);
     combobox->SetFont(::Label::Body_14);
     combobox->GetDropDown().SetFont(::Label::Body_14);
-    m_sizer_combox->Add(combobox, 0, wxALIGN_CENTER | wxLEFT, FromDIP(5));
+    m_sizer_combox->Add(combobox, 1, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, FromDIP(5));
 
     std::vector<wxString>::iterator iter;
     for (iter = vlist.begin(); iter != vlist.end(); iter++) { combobox->Append(*iter); }
@@ -440,7 +441,7 @@ wxBoxSizer *PreferencesDialog::create_item_loglevel_combobox(wxString title, wxS
     auto severity_level = app_config->get("log_severity_level");
     if (!severity_level.empty()) { combobox->SetValue(severity_level); }
 
-    m_sizer_combox->Add(combobox, 0, wxALIGN_CENTER | wxLEFT, FromDIP(5));
+    m_sizer_combox->Add(combobox, 1, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, FromDIP(5));
 
     //// save config
     combobox->GetDropDown().Bind(wxEVT_COMBOBOX, [this](wxCommandEvent &e) {
@@ -532,9 +533,10 @@ wxBoxSizer *PreferencesDialog::create_item_input(wxString title, wxString title2
     second_title->SetToolTip(tooltip);
     second_title->Wrap(-1);
 
+    // xyz fork: proportion=1 so text inputs fill remaining width
     sizer_input->AddSpacer(FromDIP(DESIGN_LEFT_MARGIN));
     sizer_input->Add(input_title , 0, wxALIGN_CENTER_VERTICAL);
-    sizer_input->Add(input       , 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(5));
+    sizer_input->Add(input       , 1, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, FromDIP(5));
     sizer_input->Add(second_title, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(2));
 
     input->GetTextCtrl()->Bind(wxEVT_TEXT_ENTER, [this, param, input, onchange](wxCommandEvent &e) {
@@ -1332,19 +1334,19 @@ void PreferencesDialog::create_items()
     g_sizer->Add(create_item_title(_L("Settings")), 1, wxEXPAND);
 
     auto item_language         = create_item_language_combobox(_L("Language"), "");
-    g_sizer->Add(item_language);
+    g_sizer->Add(item_language, 0, wxEXPAND);
 
     std::vector<wxString>Units = {_L("Metric") + " (mm, g)", _L("Imperial") + " (in, oz)"};
     auto item_currency         = create_item_combobox(_L("Units"), "", "use_inches", Units);
-    g_sizer->Add(item_currency);
+    g_sizer->Add(item_currency, 0, wxEXPAND);
 
     std::vector<wxString> DefaultPage = {_L("Home"), _L("Prepare")};
     auto item_default_page     = create_item_combobox(_L("Default page"), _L("Set the page opened on startup."), "default_page", DefaultPage);
-    g_sizer->Add(item_default_page);
+    g_sizer->Add(item_default_page, 0, wxEXPAND);
 
 #ifdef _WIN32
     auto item_darkmode         = create_item_darkmode(_L("Enable dark mode"), "", "dark_color_mode");
-    g_sizer->Add(item_darkmode);
+    g_sizer->Add(item_darkmode, 0, wxEXPAND);
 #endif
 
     auto item_single_instance  = create_item_checkbox(_L("Allow only one OrcaSlicer instance"),
@@ -1355,16 +1357,19 @@ void PreferencesDialog::create_items()
             _L("If this is enabled, when starting OrcaSlicer and another instance of the same OrcaSlicer is already running, that instance will be reactivated instead."),
     #endif
             "single_instance");
-    g_sizer->Add(item_single_instance);
+    g_sizer->Add(item_single_instance, 0, wxEXPAND);
 
     auto item_show_splash_scr  = create_item_checkbox(_L("Show splash screen"), _L("Show the splash screen during startup."), "show_splash_screen");
-    g_sizer->Add(item_show_splash_scr);
+    g_sizer->Add(item_show_splash_scr, 0, wxEXPAND);
+
+    // xyz fork: auto-start camera moved to Online > Interface section
+    // xyz fork: OpenBambu dropdown moved to Online > Connection section
 
     //auto item_hints            = create_item_checkbox(_L("Show \"Daily Tips\" after start"), page, _L("If enabled, useful hints are displayed at startup."), "show_daily_tips");
-    //g_sizer->Add(item_hints);
+    //g_sizer->Add(item_hints, 0, wxEXPAND);
 
     auto item_downloads        = create_item_downloads(_L("Downloads folder") + ": ", _L("Target folder for downloaded items"));
-    g_sizer->Add(item_downloads);
+    g_sizer->Add(item_downloads, 0, wxEXPAND);
 
     //// GENERAL > Project
     g_sizer->Add(create_item_title(_L("Project")), 1, wxEXPAND);
@@ -1372,36 +1377,36 @@ void PreferencesDialog::create_items()
     std::vector<wxString> projectLoadSettingsBehaviourOptions = {_L("Load All"), _L("Ask When Relevant"), _L("Always Ask"), _L("Load Geometry Only")};
     std::vector<string>   projectLoadSettingsConfigOptions    = { OPTION_PROJECT_LOAD_BEHAVIOUR_LOAD_ALL, OPTION_PROJECT_LOAD_BEHAVIOUR_ASK_WHEN_RELEVANT, OPTION_PROJECT_LOAD_BEHAVIOUR_ALWAYS_ASK, OPTION_PROJECT_LOAD_BEHAVIOUR_LOAD_GEOMETRY };
     auto item_project_load     = create_item_combobox(_L("Load behaviour"), _L("Should printer/filament/process settings be loaded when opening a 3MF file?"), SETTING_PROJECT_LOAD_BEHAVIOUR, projectLoadSettingsBehaviourOptions, projectLoadSettingsConfigOptions);
-    g_sizer->Add(item_project_load);
+    g_sizer->Add(item_project_load, 0, wxEXPAND);
 
     auto item_max_recent_count = create_item_input(_L("Maximum recent files"), "", _L("Maximum count of recent files"), "max_recent_count", [](wxString value) {
         long max = 0;
         if (value.ToLong(&max))
             wxGetApp().mainframe->set_max_recent_count(max);
     });
-    g_sizer->Add(item_max_recent_count);
+    g_sizer->Add(item_max_recent_count, 0, wxEXPAND);
 
     auto item_recent_models    = create_item_checkbox(_L("Add STL/STEP files to recent files list"), "", "recent_models");
-    g_sizer->Add(item_recent_models);
+    g_sizer->Add(item_recent_models, 0, wxEXPAND);
 
     auto item_gcodes_warning   = create_item_checkbox(_L("Don't warn when loading 3MF with modified G-code"), "", "no_warn_when_modified_gcodes");
-    g_sizer->Add(item_gcodes_warning);
+    g_sizer->Add(item_gcodes_warning, 0, wxEXPAND);
 
     auto item_step_dialog      = create_item_checkbox(_L("Show options when importing STEP file"), _L("If enabled, a parameter settings dialog will appear during STEP file import."), "enable_step_mesh_setting");
-    g_sizer->Add(item_step_dialog);
+    g_sizer->Add(item_step_dialog, 0, wxEXPAND);
 
     auto item_backup           = create_item_backup(_L("Auto backup"), _L("Backup your project periodically for restoring from the occasional crash."));
-    g_sizer->Add(item_backup); 
+    g_sizer->Add(item_backup, 0, wxEXPAND); 
 
     //// GENERAL > Preset
     g_sizer->Add(create_item_title(_L("Preset")), 1, wxEXPAND);
 
     auto item_remember_printer = create_item_checkbox(_L("Remember printer configuration"), _L("If enabled, Orca will remember and switch filament/process configuration for each printer automatically."), "remember_printer_config");
-    g_sizer->Add(item_remember_printer);
+    g_sizer->Add(item_remember_printer, 0, wxEXPAND);
 
     auto item_filament_preset_grouping = create_item_combobox(_L("Group user filament presets"), _L("Group user filament presets based on selection"),
         "group_filament_presets", {_L("All"), _L("None"), _L("By type"), _L("By vendor")}, [](wxString value) {wxGetApp().plater()->sidebar().update_presets(Preset::TYPE_FILAMENT);});
-    g_sizer->Add(item_filament_preset_grouping);
+    g_sizer->Add(item_filament_preset_grouping, 0, wxEXPAND);
 
     // prevent burst calling on keyboard / spin events
     m_filament_height_timer.Bind(wxEVT_TIMER, [this](wxTimerEvent&) {
@@ -1410,20 +1415,20 @@ void PreferencesDialog::create_items()
     });
     auto item_filament_area_height = create_item_spinctrl(_L("Optimize filaments area height for..."), "", _L("filaments"), _L("Optimizes filament area maximum height by chosen filament count."),
         "filaments_area_preferred_count", 8, 99, [this](int value) {m_filament_height_timer.StartOnce(500);});
-    g_sizer->Add(item_filament_area_height); 
+    g_sizer->Add(item_filament_area_height, 0, wxEXPAND); 
 
     //// GENERAL > Features
     g_sizer->Add(create_item_title(_L("Features")), 1, wxEXPAND);
 
     auto item_multi_machine    = create_item_checkbox(_L("Multi device management"), _L("With this option enabled, you can send a task to multiple devices at the same time and manage multiple devices."), "enable_multi_machine", _L("(Requires restart)"));
-    g_sizer->Add(item_multi_machine);
+    g_sizer->Add(item_multi_machine, 0, wxEXPAND);
 
 #if 0
     g_sizer->Add(create_item_title(_L("Filament Grouping")), 1, wxEXPAND);
     //temporarily disable it
     //auto item_ignore_ext_filament = create_item_checkbox(_L("Ignore ext filament when auto grouping"), _L("Ignore ext filament when auto grouping"), 50, "ignore_ext_filament_when_group");
     auto item_pop_up_filament_map_dialog = create_item_checkbox(_L("Pop up to select filament grouping mode"), _L("Pop up to select filament grouping mode"), 50, "pop_up_filament_map_dialog");
-    g_sizer->Add(item_pop_up_filament_map_dialog);
+    g_sizer->Add(item_pop_up_filament_map_dialog, 0, wxEXPAND);
 #endif
 
     auto item_draco_bits = create_item_draco(_L("Quality level for Draco export"),
@@ -1431,7 +1436,7 @@ void PreferencesDialog::create_items()
         _L("Controls the quantization bit depth used when compressing the mesh to Draco format.\n"
            "0 = lossless compression (geometry is preserved at full precision). Valid lossy values range from 8 to 30.\n"
            "Lower values produce smaller files but lose more geometric detail; higher values preserve more detail at the cost of larger files."));
-    g_sizer->Add(item_draco_bits);
+    g_sizer->Add(item_draco_bits, 0, wxEXPAND);
 
     g_sizer->AddSpacer(FromDIP(10));
     sizer_page->Add(g_sizer, 0, wxEXPAND);
@@ -1450,10 +1455,10 @@ void PreferencesDialog::create_items()
     std::vector<wxString> FlushOptionLabels = {_L("All"),_L("Color"),_L("None")};
     std::vector<std::string> FlushOptionValues = { "all","color change","disabled" };
     auto item_auto_flush = create_item_combobox(_L("Auto flush after changing..."), _L("Auto calculate flushing volumes when selected values changed"), "auto_calculate_flush", FlushOptionLabels, FlushOptionValues);
-    g_sizer->Add(item_auto_flush);
+    g_sizer->Add(item_auto_flush, 0, wxEXPAND);
 
     auto item_auto_arrange     = create_item_checkbox(_L("Auto arrange plate after cloning"), "", "auto_arrange");
-    g_sizer->Add(item_auto_arrange);
+    g_sizer->Add(item_auto_arrange, 0, wxEXPAND);
 
     //// CONTROL > Slicing
     g_sizer->Add(create_item_title(_L("Slicing")), 1, wxEXPAND);
@@ -1462,26 +1467,26 @@ void PreferencesDialog::create_items()
         _L("Auto slice after changes"),
         _L("If enabled, OrcaSlicer will re-slice automatically whenever slicing-related settings change."),
         _L("Delay in seconds before auto slicing starts, allowing multiple edits to be grouped. Use 0 to slice immediately."));
-    g_sizer->Add(item_auto_reslice);
+    g_sizer->Add(item_auto_reslice, 0, wxEXPAND);
 
     auto item_mix_print_high_low_temperature = create_item_checkbox(_L("Remove mixed temperature restriction"), _L("With this option enabled, you can print materials with a large temperature difference together."), "enable_high_low_temp_mixed_printing");
-    g_sizer->Add(item_mix_print_high_low_temperature);
+    g_sizer->Add(item_mix_print_high_low_temperature, 0, wxEXPAND);
  
     //// CONTROL > Camera
     g_sizer->Add(create_item_title(_L("Camera")), 1, wxEXPAND);
 
     std::vector<wxString> CameraNavStyle = {_L("Default"), _L("Touchpad")};
     auto item_camera_nav_style = create_item_combobox(_L("Camera style"), _L("Select camera navigation style.\nDefault: LMB+move for rotation, RMB/MMB+move for panning.\nTouchpad: Alt+move for rotation, Shift+move for panning."), "camera_navigation_style", CameraNavStyle);
-    g_sizer->Add(item_camera_nav_style);
+    g_sizer->Add(item_camera_nav_style, 0, wxEXPAND);
 
     auto camera_orbit_mult     = create_camera_orbit_mult_input(_L("Orbit speed multiplier"), _L("Multiplies the orbit speed for finer or coarser camera movement."));
-    g_sizer->Add(camera_orbit_mult);
+    g_sizer->Add(camera_orbit_mult, 0, wxEXPAND);
 
     auto item_zoom_to_mouse    = create_item_checkbox(_L("Zoom to mouse position"), _L("Zoom in towards the mouse pointer's position in the 3D view, rather than the 2D window center."), "zoom_to_mouse");
-    g_sizer->Add(item_zoom_to_mouse);
+    g_sizer->Add(item_zoom_to_mouse, 0, wxEXPAND);
 
     auto item_use_free_camera  = create_item_checkbox(_L("Use free camera"), _L("If enabled, use free camera. If not enabled, use constrained camera."), "use_free_camera");
-    g_sizer->Add(item_use_free_camera);
+    g_sizer->Add(item_use_free_camera, 0, wxEXPAND);
 
     auto swap_pan_rotate       = create_item_checkbox(_L("Swap pan and rotate mouse buttons"), _L("If enabled, swaps the left and right mouse buttons pan and rotate functions."), "swap_mouse_buttons");
     g_sizer->Add(swap_pan_rotate);
@@ -1495,17 +1500,17 @@ void PreferencesDialog::create_items()
     auto item_save_choise      = create_item_button(_L("Unsaved projects"), _L("Clear"), "", _L("Clear my choice on the unsaved projects."), []() {
         wxGetApp().app_config->set("save_project_choise", "");
     });
-    g_sizer->Add(item_save_choise);
+    g_sizer->Add(item_save_choise, 0, wxEXPAND);
 
     auto item_save_presets     = create_item_button(_L("Unsaved presets"), _L("Clear"), "", _L("Clear my choice on the unsaved presets."), []() {
         wxGetApp().app_config->set("save_preset_choise", "");
     });
-    g_sizer->Add(item_save_presets);
+    g_sizer->Add(item_save_presets, 0, wxEXPAND);
 
     auto item_restore_hide_pop_ups = create_item_button(_L("Synchronizing printer preset"), _L("Clear"), L"", _L("Clear my choice for synchronizing printer preset after loading the file."), []() {
         wxGetApp().app_config->erase("app", "sync_after_load_file_show_flag");
     });
-    g_sizer->Add(item_restore_hide_pop_ups);
+    g_sizer->Add(item_restore_hide_pop_ups, 0, wxEXPAND);
 
     g_sizer->AddSpacer(FromDIP(10));
     sizer_page->Add(g_sizer, 0, wxEXPAND);
@@ -1521,34 +1526,55 @@ void PreferencesDialog::create_items()
     //// ONLINE > Connection
     g_sizer->Add(create_item_title(_L("Connection")), 1, wxEXPAND);
 
-    auto item_region           = create_item_region_combobox(_L("Login region"), "");
-    g_sizer->Add(item_region);
- 
-    auto item_stealth_mode     = create_item_checkbox(_L("Stealth mode"), _L("This stops the transmission of data to Bambu's cloud services. Users who don't use BBL machines or use LAN mode only can safely turn on this function."), "stealth_mode");
-    g_sizer->Add(item_stealth_mode);
+    // xyz fork: Bambu Labs Integration dropdown — replaces separate stealth_mode
+    // and use_bambu_network_plugin checkboxes. Requires restart to take effect.
+    {
+        auto item_bbl_mode = create_item_combobox(
+            _L("Bambu Labs integration (requires restart)"),
+            _L("Choose how to connect to Bambu Lab printers.\n\n"
+               "OpenBambu (LAN Only) — Open-source protocol. No Bambu account needed. No data sent to Bambu cloud.\n\n"
+               "Bambu Lab Official (Stealth Mode) — Uses Bambu networking plugin with cloud transmission disabled.\n\n"
+               "Bambu Lab Official (Online Mode) — Full Bambu cloud integration with account login."),
+            "bambu_connection_mode",
+            {_L("OpenBambu (LAN Only)"),
+             _L("Bambu Lab Official (Stealth Mode)"),
+             _L("Bambu Lab Official (Online Mode)")},
+            {"openbambu", "bambu_stealth", "bambu_online"});
+        g_sizer->Add(item_bbl_mode, 0, wxEXPAND);
+    }
+
+    // Show login region, stealth mode, and network test only when using Bambu official plugin
+    bool using_bambu_plugin = app_config->get_bool("use_bambu_network_plugin");
+    if (using_bambu_plugin) {
+        auto item_region           = create_item_region_combobox(_L("Login region"), "");
+        g_sizer->Add(item_region, 0, wxEXPAND);
+
+        auto item_stealth_mode     = create_item_checkbox(_L("Stealth mode"), _L("This stops the transmission of data to Bambu's cloud services. Users who don't use BBL machines or use LAN mode only can safely turn on this function."), "stealth_mode");
+        g_sizer->Add(item_stealth_mode, 0, wxEXPAND);
+    }
 
     auto item_network_test     = create_item_button(_L("Network test"), _L("Test") + " " + dots, "", _L("Open Network Test"), []() {
         NetworkTestDialog dlg(wxGetApp().mainframe);
         dlg.ShowModal();
     });
-    g_sizer->Add(item_network_test);
+    g_sizer->Add(item_network_test, 0, wxEXPAND);
 
     //// ONLINE > Update & sync
     g_sizer->Add(create_item_title(_L("Update & sync")), 1, wxEXPAND);
 
     auto item_stable_updates   = create_item_checkbox(_L("Check for stable updates only"), "", "check_stable_update_only");
-    g_sizer->Add(item_stable_updates);
+    g_sizer->Add(item_stable_updates, 0, wxEXPAND);
 
     auto item_user_sync        = create_item_checkbox(_L("Auto sync user presets (Printer/Filament/Process)"), "", "sync_user_preset");
-    g_sizer->Add(item_user_sync);
+    g_sizer->Add(item_user_sync, 0, wxEXPAND);
 
     auto item_system_sync      = create_item_checkbox(_L("Update built-in Presets automatically."), "", "sync_system_preset");
-    g_sizer->Add(item_system_sync);
+    g_sizer->Add(item_system_sync, 0, wxEXPAND);
 
     auto item_token_storage    = create_item_checkbox(_L("Use encrypted file for token storage"),
                                                       _L("Store authentication tokens in an encrypted file instead of the system keychain. (Requires restart)"),
                                                       SETTING_USE_ENCRYPTED_TOKEN_FILE);
-    g_sizer->Add(item_token_storage);
+    g_sizer->Add(item_token_storage, 0, wxEXPAND);
 
     //// ONLINE > Filament Sync Options
     g_sizer->Add(create_item_title(_L("Filament Sync Options")), 1, wxEXPAND);
@@ -1558,13 +1584,31 @@ void PreferencesDialog::create_items()
         _L("Choose whether sync updates both filament preset and color, or only color."),
         "sync_ams_filament_mode",
         {_L("Filament & Color"), _L("Color only")});
-    g_sizer->Add(item_filament_sync_mode);
+    g_sizer->Add(item_filament_sync_mode, 0, wxEXPAND);
 
-    //// ONLINE > Network plugin
+    // xyz fork: Interface section — items visible only in specific connection modes
+    {
+        bool is_openbambu = !app_config->get_bool("use_bambu_network_plugin");
+        bool has_interface_items = is_openbambu; // expand this condition as more items are added
+        if (has_interface_items) {
+            g_sizer->Add(create_item_title(_L("Interface")), 1, wxEXPAND);
+
+            if (is_openbambu) {
+                auto item_auto_camera = create_item_checkbox(_L("Auto-start camera"),
+                    _L("Automatically start the camera stream when viewing a printer with an active print job, or after sending a print."),
+                    "auto_start_camera");
+                g_sizer->Add(item_auto_camera, 0, wxEXPAND);
+            }
+        }
+    }
+
+    //// ONLINE > Network plugin (hidden in OpenBambu mode)
+    if (app_config->get_bool("use_bambu_network_plugin")) {
+
     g_sizer->Add(create_item_title(_L("Network plug-in")), 1, wxEXPAND);
 
     auto item_enable_plugin    = create_item_checkbox(_L("Enable network plug-in"), "", "installed_networking");
-    g_sizer->Add(item_enable_plugin);
+    g_sizer->Add(item_enable_plugin, 0, wxEXPAND);
 
     m_network_version_sizer = new wxBoxSizer(wxHORIZONTAL);
     m_network_version_sizer->AddSpacer(FromDIP(DESIGN_LEFT_MARGIN));
@@ -1608,7 +1652,7 @@ void PreferencesDialog::create_items()
     }
 
     m_network_version_combo->SetSelection(current_selection);
-    m_network_version_sizer->Add(m_network_version_combo, 0, wxALIGN_CENTER | wxLEFT, FromDIP(5));
+    m_network_version_sizer->Add(m_network_version_combo, 1, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, FromDIP(5));
 
     m_network_version_combo->GetDropDown().Bind(wxEVT_COMBOBOX, [this](wxCommandEvent& e) {
         int selection = e.GetSelection();
@@ -1671,7 +1715,9 @@ void PreferencesDialog::create_items()
         e.Skip();
     });
 
-    g_sizer->Add(m_network_version_sizer);
+    g_sizer->Add(m_network_version_sizer, 0, wxEXPAND);
+
+    } // end of "if (using_bambu_plugin)" block for Network plug-in section
 
     g_sizer->AddSpacer(FromDIP(10));
     sizer_page->Add(g_sizer, 0, wxEXPAND);
@@ -1689,16 +1735,16 @@ void PreferencesDialog::create_items()
     g_sizer->Add(create_item_title(_L("Associate files to OrcaSlicer")), 1, wxEXPAND);
 
     auto item_associate_3mf    = create_item_checkbox(_L("Associate 3MF files to OrcaSlicer"), _L("If enabled, sets OrcaSlicer as default application to open 3MF files.") , "associate_3mf");
-    g_sizer->Add(item_associate_3mf);
+    g_sizer->Add(item_associate_3mf, 0, wxEXPAND);
 
     auto item_associate_drc = create_item_checkbox(_L("Associate DRC files to OrcaSlicer"), _L("If enabled, sets OrcaSlicer as default application to open DRC files."), "associate_drc");
-    g_sizer->Add(item_associate_drc);
+    g_sizer->Add(item_associate_drc, 0, wxEXPAND);
 
     auto item_associate_stl    = create_item_checkbox(_L("Associate STL files to OrcaSlicer"), _L("If enabled, sets OrcaSlicer as default application to open STL files.") , "associate_stl");
-    g_sizer->Add(item_associate_stl);
+    g_sizer->Add(item_associate_stl, 0, wxEXPAND);
 
     auto item_associate_step   = create_item_checkbox(_L("Associate STEP files to OrcaSlicer"), _L("If enabled, sets OrcaSlicer as default application to open STEP files."), "associate_step");
-    g_sizer->Add(item_associate_step);
+    g_sizer->Add(item_associate_step, 0, wxEXPAND);
 
     //// ASSOCIATE > WebLinks
     g_sizer->Add(create_item_title(_L("Associate web links to OrcaSlicer")), 1, wxEXPAND);
@@ -1728,19 +1774,19 @@ void PreferencesDialog::create_items()
     g_sizer->Add(create_item_title(_L("Settings")), 1, wxEXPAND);
 
     auto item_develop_mode     = create_item_checkbox(_L("Develop mode"), "", "developer_mode");
-    g_sizer->Add(item_develop_mode);
+    g_sizer->Add(item_develop_mode, 0, wxEXPAND);
 
     auto item_ams_blacklist    = create_item_checkbox(_L("Skip AMS blacklist check"), "", "skip_ams_blacklist_check");
-    g_sizer->Add(item_ams_blacklist);
+    g_sizer->Add(item_ams_blacklist, 0, wxEXPAND);
 
     g_sizer->Add(create_item_title(_L("Storage")), 1, wxEXPAND);
     auto item_allow_abnormal_storage = create_item_checkbox(_L("Allow Abnormal Storage"), _L("This allows the use of Storage that is marked as abnormal by the Printer.\nUse at your own risk, can cause issues!"), "allow_abnormal_storage");
-    g_sizer->Add(item_allow_abnormal_storage);
+    g_sizer->Add(item_allow_abnormal_storage, 0, wxEXPAND);
 
     g_sizer->Add(create_item_title(_L("Log Level")), 1, wxEXPAND);
     auto log_level_list  = std::vector<wxString>{_L("fatal"), _L("error"), _L("warning"), _L("info"), _L("debug"), _L("trace")};
     auto loglevel_combox = create_item_loglevel_combobox(_L("Log Level"), _L("Log Level"), log_level_list);
-    g_sizer->Add(loglevel_combox);
+    g_sizer->Add(loglevel_combox, 0, wxEXPAND);
 
     g_sizer->Add(create_item_title(_L("Network plug-in")), 1, wxEXPAND);
     auto item_reload_plugin = create_item_button(_L("Network plug-in"), _L("Reload"), _L("Reload the network plug-in without restarting the application"), "", [this]() {
@@ -1752,7 +1798,7 @@ void PreferencesDialog::create_items()
             dlg.ShowModal();
         }
     });
-    g_sizer->Add(item_reload_plugin);
+    g_sizer->Add(item_reload_plugin, 0, wxEXPAND);
 
     //// DEVELOPER > Debug
 #if !BBL_RELEASE_TO_PUBLIC

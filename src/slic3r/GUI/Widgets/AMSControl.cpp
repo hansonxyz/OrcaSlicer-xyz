@@ -98,6 +98,13 @@ AMSControl::AMSControl(wxWindow *parent, wxWindowID id, const wxPoint &pos, cons
     //m_sizer_ams_area_right->Add(m_simplebook_ams_right, 0, wxLEFT | wxRIGHT, FromDIP(5));
     m_sizer_ams_area_right->Add(m_simplebook_ams_right, 0, wxALIGN_CENTER, 0);
 
+    // Grid panel for multi-AMS simultaneous display (hidden by default)
+    m_grid_panel = new wxPanel(m_amswin, wxID_ANY);
+    m_grid_panel->SetBackgroundColour(AMS_CONTROL_DEF_BLOCK_BK_COLOUR);
+    m_grid_sizer = new wxFlexGridSizer(2, FromDIP(10), FromDIP(10));
+    m_grid_panel->SetSizer(m_grid_sizer);
+    m_grid_panel->Hide();
+
     m_panel_down_road = new wxPanel(m_amswin, wxID_ANY, wxDefaultPosition, AMS_DOWN_ROAD_SIZE, 0);
     m_panel_down_road->SetBackgroundColour(AMS_CONTROL_DEF_BLOCK_BK_COLOUR);
 
@@ -206,6 +213,7 @@ AMSControl::AMSControl(wxWindow *parent, wxWindowID id, const wxPoint &pos, cons
     m_sizer_body->Add(m_sizer_ams_items, 0, wxALIGN_CENTER, 0);
     m_sizer_body->Add(0, 0, 1, wxEXPAND | wxTOP, FromDIP(10));
     m_sizer_body->Add(m_sizer_ams_body, 0, wxALIGN_CENTER, 0);
+    m_sizer_body->Add(m_grid_panel, 0, wxALIGN_CENTER, 0);
     m_sizer_body->Add(m_sizer_down_road, 0, wxALIGN_CENTER, 0);
     m_sizer_body->Add(m_sizer_ams_option, 0, wxEXPAND, 0);
 
@@ -542,6 +550,23 @@ void AMSControl::CreateAms()
 
 
 void AMSControl::ClearAms() {
+    // Clean up grid mode
+    if (m_grid_panel) {
+        m_grid_panel->DestroyChildren();
+        m_grid_sizer->Clear();
+        m_grid_panel->Hide();
+    }
+    m_grid_mode = false;
+    if (m_down_road) {
+        m_down_road->SetGridMode(false, -1);
+        m_down_road->SetSize(AMS_DOWN_ROAD_SIZE);
+        m_down_road->SetMinSize(AMS_DOWN_ROAD_SIZE);
+    }
+    if (m_panel_down_road) {
+        m_panel_down_road->SetSize(AMS_DOWN_ROAD_SIZE);
+        m_panel_down_road->SetMinSize(AMS_DOWN_ROAD_SIZE);
+    }
+
     m_simplebook_ams_right->DeleteAllPages();
     m_simplebook_ams_left->DeleteAllPages();
     m_simplebook_ams_right->DestroyChildren();
@@ -691,7 +716,67 @@ void AMSControl::CreateAmsSingleNozzle(const std::string &series_name, const std
     std::vector<int>m_item_nums{0,0};
     std::vector<AMSinfo> single_info;
 
-    //Freeze();
+    // Grid mode: 2+ AMS units shown simultaneously in a 2x2 grid
+    if (m_ams_info.size() >= 2) {
+        m_grid_mode = true;
+        m_grid_sizer->SetCols(2);
+
+        // Hide simplebook and preview picker — not needed in grid mode
+        m_simplebook_ams_left->Hide();
+        m_simplebook_ams_right->Hide();
+        m_panel_prv_left->Hide();
+        m_panel_prv_right->Hide();
+
+        // Add each AMS unit to the grid
+        for (auto &info : m_ams_info) {
+            m_item_ids[DEPUTY_EXTRUDER_ID].push_back(info.ams_id);
+            AddAmsToGrid(info);
+        }
+
+        m_grid_panel->Show();
+        m_grid_panel->Layout();
+        m_grid_panel->Fit();
+
+        // Resize road widget taller for grid routing
+        wxSize grid_road_size(FromDIP(566), FromDIP(40));
+        m_down_road->SetSize(grid_road_size);
+        m_down_road->SetMinSize(grid_road_size);
+        m_panel_down_road->SetSize(grid_road_size);
+        m_panel_down_road->SetMinSize(grid_road_size);
+
+        m_current_show_ams_left = m_item_ids[DEPUTY_EXTRUDER_ID].size() > 0 ? m_item_ids[DEPUTY_EXTRUDER_ID][0] : "";
+        m_current_show_ams_right = "";
+        m_current_ams = "";
+
+        m_down_road->UpdatePassRoad(AMSPanelPos::LEFT_PANEL, -1, AMSPassRoadSTEP::AMS_ROAD_STEP_NONE);
+        m_down_road->UpdatePassRoad(AMSPanelPos::RIGHT_PANEL, -1, AMSPassRoadSTEP::AMS_ROAD_STEP_NONE);
+        m_extruder->updateNozzleNum(1);
+        m_extruder->OnAmsLoading(false, MAIN_EXTRUDER_ID);
+
+        m_amswin->Layout();
+        m_amswin->Fit();
+
+        m_single_ams_centered = false;
+        UpdateGridRoad();
+
+        // Deferred layout kick — after the grid is built, walk up the parent
+        // chain and send synthetic size events to force the full layout
+        // recalculation (same as a manual window resize).
+        CallAfter([this]() {
+            // Force layout recalculation from StatusPanel up through MonitorPanel
+            wxWindow *w = GetParent(); // StatusPanel
+            for (int i = 0; i < 4 && w; i++) {
+                wxSizeEvent evt(w->GetSize());
+                evt.SetEventObject(w);
+                w->GetEventHandler()->ProcessEvent(evt);
+                w = w->GetParent();
+            }
+            UpdateGridRoad();
+        });
+        return;
+    }
+
+    // === Original single-AMS / no-AMS path below ===
 
     //add ams data
     for (auto ams_info = m_ams_info.begin(); ams_info != m_ams_info.end(); ams_info++) {
@@ -699,23 +784,11 @@ void AMSControl::CreateAmsSingleNozzle(const std::string &series_name, const std
             m_item_ids[DEPUTY_EXTRUDER_ID].push_back(ams_info->ams_id);
             AddAmsPreview(*ams_info, ams_info->ams_type);
             AddAms(*ams_info, AMSPanelPos::LEFT_PANEL);
-            //AddExtraAms(*ams_info);
         }
         else if (ams_info->cans.size() == 1) {
             m_item_ids[DEPUTY_EXTRUDER_ID].push_back(ams_info->ams_id);
             AddAmsPreview(*ams_info, ams_info->ams_type);
             AddAms(*ams_info, AMSPanelPos::LEFT_PANEL);
-
-            /*single_info.push_back(*ams_info);
-            if (single_info.size() == MAX_AMS_NUM_IN_PANEL) {
-                m_item_ids[DEPUTY_NOZZLE_ID].push_back(single_info[0].ams_id);
-                m_item_ids[DEPUTY_NOZZLE_ID].push_back(single_info[1].ams_id);
-                m_item_nums[DEPUTY_NOZZLE_ID]++;
-                pair_id.push_back(std::make_pair(single_info[0].ams_id, single_info[1].ams_id));
-                AddAmsPreview(single_info, AMSPanelPos::LEFT_PANEL);
-                AddAms(single_info, AMSPanelPos::LEFT_PANEL);
-                single_info.clear();
-            }*/
         }
     }
     if (single_info.size() > 0){
@@ -726,39 +799,29 @@ void AMSControl::CreateAmsSingleNozzle(const std::string &series_name, const std
         single_info.clear();
     }
 
-    // data ext data
-    if (m_ext_info.size() <= 0){
-        BOOST_LOG_TRIVIAL(trace) << "vt_slot empty!";
-        return;
+    // data ext data — add external spool only when no AMS units are present
+    if (m_ext_info.size() > 0 && m_ams_info.empty()) {
+        single_info.push_back(m_ext_info[0]);
+        m_item_ids[MAIN_EXTRUDER_ID].push_back(single_info[0].ams_id);
+        AddAms(single_info, series_name, printer_type, AMSPanelPos::RIGHT_PANEL);
     }
-
-    single_info.push_back(m_ext_info[0]);
-    m_item_ids[MAIN_EXTRUDER_ID].push_back(single_info[0].ams_id);
-    AddAms(single_info, series_name, printer_type, AMSPanelPos::RIGHT_PANEL);
     auto left_init_mode = findFirstMode(AMSPanelPos::LEFT_PANEL);
     auto right_init_mode = findFirstMode(AMSPanelPos::RIGHT_PANEL);
 
     m_panel_prv_right->Hide();
     m_panel_prv_left->Hide();
+    m_grid_panel->Hide();
     if (m_ams_info.size() > 0){
         m_simplebook_ams_left->Show();
-        m_simplebook_ams_right->Show();
+        m_simplebook_ams_right->Hide();
         m_simplebook_ams_left->SetSelection(0);
-        m_simplebook_ams_right->SetSelection(0);
 
-        if (m_ams_info.size() > 1){
-            m_sizer_prv_right->Layout();
-            m_panel_prv_right->Show();
-        }
         m_down_road->UpdateLeft(1, left_init_mode);
         m_down_road->UpdateRight(1, right_init_mode);
     }
     else {
-        m_panel_prv_left->Hide();
-        m_panel_prv_right->Hide();
         m_simplebook_ams_left->Hide();
         m_simplebook_ams_right->Show();
-
         m_simplebook_ams_right->SetSelection(0);
         m_down_road->UpdateLeft(1, left_init_mode);
         m_down_road->UpdateRight(1, right_init_mode);
@@ -775,8 +838,23 @@ void AMSControl::CreateAmsSingleNozzle(const std::string &series_name, const std
     m_amswin->Layout();
     m_amswin->Fit();
 
-    //Refresh();
-    //Thaw();
+    // Flag single-AMS-centered mode for deferred card exit X computation.
+    m_single_ams_centered = (m_ams_info.size() > 0 && m_simplebook_ams_left->IsShown() && !m_simplebook_ams_right->IsShown());
+    m_down_road->SetCardExitX(-1);
+    UpdateCardExitX();
+
+    // Deferred layout kick — same as the grid path. Forces the parent chain
+    // to recalculate sizes so the road/extruder widgets render correctly.
+    CallAfter([this]() {
+        wxWindow *w = GetParent();
+        for (int i = 0; i < 4 && w; i++) {
+            wxSizeEvent evt(w->GetSize());
+            evt.SetEventObject(w);
+            w->GetEventHandler()->ProcessEvent(evt);
+            w = w->GetParent();
+        }
+        if (m_single_ams_centered) UpdateCardExitX();
+    });
 }
 
 void AMSControl::Reset()
@@ -787,6 +865,91 @@ void AMSControl::Reset()
     ClearAms();
 
     Layout();
+}
+
+void AMSControl::UpdateCardExitX()
+{
+    if (!m_down_road) return;
+    if (!m_single_ams_centered || !m_simplebook_ams_left) {
+        m_down_road->SetCardExitX(-1);
+        return;
+    }
+    // Use positions relative to the common parent (m_amswin)
+    wxPoint card_pos = m_simplebook_ams_left->GetPosition();
+    wxWindow *card_parent = m_simplebook_ams_left->GetParent();
+    // Walk up to m_amswin to get the card position in m_amswin coords
+    while (card_parent && card_parent != m_amswin) {
+        wxPoint pp = card_parent->GetPosition();
+        card_pos.x += pp.x;
+        card_pos.y += pp.y;
+        card_parent = card_parent->GetParent();
+    }
+    int card_center_x = card_pos.x + m_simplebook_ams_left->GetSize().x / 2;
+
+    wxPoint road_pos = m_down_road->GetPosition();
+    wxWindow *road_parent = m_down_road->GetParent();
+    while (road_parent && road_parent != m_amswin) {
+        wxPoint pp = road_parent->GetPosition();
+        road_pos.x += pp.x;
+        road_pos.y += pp.y;
+        road_parent = road_parent->GetParent();
+    }
+
+    int card_exit_x = card_center_x - road_pos.x;
+    if (card_exit_x > 0 && card_exit_x < m_down_road->GetSize().x) {
+        m_down_road->SetCardExitX(card_exit_x);
+    }
+}
+
+void AMSControl::AddAmsToGrid(AMSinfo& info)
+{
+    auto ams_item = new AmsItem(m_grid_panel, info, info.ams_type, AMSPanelPos::LEFT_PANEL);
+    m_grid_sizer->Add(ams_item, 0, wxALIGN_CENTER, 0);
+    m_ams_item_list[info.ams_id] = ams_item;
+}
+
+void AMSControl::UpdateGridRoad()
+{
+    if (!m_grid_mode || !m_down_road || m_ams_item_list.empty()) return;
+
+    // Compute each card's bottom-center X in road widget coordinates
+    std::vector<AMSRoadDownPart::GridCardExit> exits;
+
+    wxPoint road_pos = m_down_road->GetPosition();
+    wxWindow *road_parent = m_down_road->GetParent();
+    while (road_parent && road_parent != m_amswin) {
+        wxPoint pp = road_parent->GetPosition();
+        road_pos.x += pp.x;
+        road_parent = road_parent->GetParent();
+    }
+
+    int min_x = INT_MAX, max_x = INT_MIN;
+    for (auto &pair : m_ams_item_list) {
+        wxWindow *item = pair.second;
+        wxPoint item_pos = item->GetPosition();
+        wxWindow *p = item->GetParent();
+        while (p && p != m_amswin) {
+            wxPoint pp = p->GetPosition();
+            item_pos.x += pp.x;
+            p = p->GetParent();
+        }
+        int card_center_x = item_pos.x + item->GetSize().x / 2;
+        int exit_x = card_center_x - road_pos.x;
+
+        AMSRoadDownPart::GridCardExit ge;
+        ge.x = exit_x;
+        ge.ams_id = pair.first;
+        exits.push_back(ge);
+
+        if (exit_x < min_x) min_x = exit_x;
+        if (exit_x > max_x) max_x = exit_x;
+    }
+
+    // Merge point: midpoint between leftmost and rightmost card centers
+    int merge_x = (min_x + max_x) / 2;
+
+    m_down_road->SetGridMode(true, merge_x);
+    m_down_road->SetGridExits(exits);
 }
 
 void AMSControl::show_noams_mode()
@@ -914,6 +1077,8 @@ void AMSControl::UpdateAms(const std::string   &series_name,
             SetSize(wxSize(FromDIP(578), -1));
             SetMinSize(wxSize(FromDIP(578), -1));
             Layout();
+            if (m_grid_mode) UpdateGridRoad();
+            else UpdateCardExitX();
         }
         // update cans
 
@@ -1237,6 +1402,12 @@ void AMSControl::AddAmsPreview(std::vector<AMSinfo>single_info, AMSPanelPos pos)
 
 void AMSControl::SwitchAms(std::string ams_id)
 {
+    // In grid mode, all cards are always visible — no page switching needed
+    if (m_grid_mode) {
+        m_current_show_ams_left = ams_id;
+        return;
+    }
+
     if(ams_id == m_current_show_ams_left || ams_id == m_current_show_ams_right){return;}
 
     bool is_in_right = IsAmsInRightPanel(ams_id);
@@ -1393,6 +1564,29 @@ void AMSControl::SetAmsStep(std::string ams_id, std::string canid, AMSPassRoadTy
     if (amsit != m_ams_item_list.end()) {ams = amsit->second;}
     else {return;}
     if (ams == nullptr) return;
+
+    // Grid mode: all cards visible, highlight active card's road
+    if (m_grid_mode) {
+        ams->SetAmsStep(ams_id, canid, type, step);
+        if (step == AMSPassRoadSTEP::AMS_ROAD_STEP_NONE) {
+            m_down_road->ClearGridActiveCard();
+            m_extruder->OnAmsLoading(false, MAIN_EXTRUDER_ID);
+        } else {
+            int can_index = atoi(canid.c_str());
+            AMSinfo info = ams->get_ams_info();
+            wxColour col = (can_index >= 0 && can_index < (int)info.cans.size())
+                           ? info.cans[can_index].material_colour : *wxWHITE;
+            m_down_road->SetGridActiveCard(ams_id, col);
+            if (step == AMSPassRoadSTEP::AMS_ROAD_STEP_COMBO_LOAD_STEP2 ||
+                step == AMSPassRoadSTEP::AMS_ROAD_STEP_COMBO_LOAD_STEP3) {
+                m_extruder->OnAmsLoading(true, MAIN_EXTRUDER_ID, col);
+            }
+        }
+        m_down_road->Refresh();
+        m_last_ams_id = ams_id;
+        m_last_tray_id = canid;
+        return;
+    }
 
     m_last_ams_id = ams_id;
     m_last_tray_id = canid;

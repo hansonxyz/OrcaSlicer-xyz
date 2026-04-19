@@ -62,6 +62,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Calibration.hpp
     GUI/CalibrationPanel.cpp
     GUI/CalibrationPanel.hpp
+    GUI/DebugConsolePanel.cpp
+    GUI/DebugConsolePanel.hpp
     GUI/CalibrationWizardCaliPage.cpp
     GUI/CalibrationWizardCaliPage.hpp
     GUI/CalibrationWizard.cpp
@@ -154,6 +156,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/Gizmos/GLGizmoMove.hpp
     GUI/Gizmos/GLGizmoPainterBase.cpp
     GUI/Gizmos/GLGizmoPainterBase.hpp
+    GUI/Gizmos/PaintToolBoundary.cpp
+    GUI/Gizmos/PaintToolBoundary.hpp
     GUI/Gizmos/GLGizmoRotate.cpp
     GUI/Gizmos/GLGizmoRotate.hpp
     GUI/Gizmos/GLGizmoScale.cpp
@@ -320,6 +324,10 @@ set(SLIC3R_GUI_SOURCES
     GUI/Monitor.cpp
     GUI/Monitor.hpp
     GUI/MonitorPage.cpp
+    GUI/OpenBambuMonitor/OpenBambuMonitorPanel.cpp
+    GUI/OpenBambuMonitor/OpenBambuMonitorPanel.hpp
+    GUI/OpenBambuMonitor/OpenBambuStatus.cpp
+    GUI/OpenBambuMonitor/OpenBambuStatus.hpp
     GUI/MonitorPage.hpp
     GUI/Mouse3DController.cpp
     GUI/Mouse3DController.hpp
@@ -551,6 +559,12 @@ set(SLIC3R_GUI_SOURCES
     GUI/Widgets/WebView.cpp
     GUI/Widgets/WebView.hpp
     GUI/WipeTowerDialog.cpp
+    GUI/PurgeCalibrationDialog.cpp
+    GUI/PurgeCalibrationDialog.hpp
+    GUI/PurgeCalibrationGenerator.cpp
+    GUI/PurgeCalibrationGenerator.hpp
+    GUI/CalibrationStrokeFont.cpp
+    GUI/CalibrationStrokeFont.hpp
     GUI/wxExtensions.cpp
     GUI/wxExtensions.hpp
     pchheader.cpp
@@ -618,8 +632,23 @@ set(SLIC3R_GUI_SOURCES
     Utils/BBLCloudServiceAgent.hpp
     Utils/BBLPrinterAgent.cpp
     Utils/BBLPrinterAgent.hpp
+    Utils/BambuCrashGuard.cpp
+    Utils/BambuCrashGuard.hpp
     Utils/BBLNetworkPlugin.cpp
     Utils/BBLNetworkPlugin.hpp
+    Utils/OpenBambu/OpenBambuAgent.cpp
+    Utils/OpenBambu/OpenBambuAgent.hpp
+    Utils/OpenBambu/OpenBambuCommands.hpp
+    Utils/OpenBambu/OpenBambuDiscovery.cpp
+    Utils/OpenBambu/OpenBambuDiscovery.hpp
+    Utils/OpenBambu/OpenBambuFileSystem.cpp
+    Utils/OpenBambu/OpenBambuFileSystem.hpp
+    Utils/OpenBambu/OpenBambuFtp.cpp
+    Utils/OpenBambu/OpenBambuFtp.hpp
+    Utils/OpenBambu/OpenBambuMqtt.cpp
+    Utils/OpenBambu/OpenBambuMqtt.hpp
+    Utils/OpenBambu/OpenBambuPrinterAgent.cpp
+    Utils/OpenBambu/OpenBambuPrinterAgent.hpp
     Utils/Obico.cpp
     Utils/Obico.hpp
     Utils/OctoPrint.cpp

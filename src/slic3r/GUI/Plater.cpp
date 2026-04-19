@@ -787,16 +787,16 @@ struct DynamicFilamentList : DynamicList
             cb->Append(label);
         }
 
-        if (old_index >= 0 && (unsigned int) old_index < cb->GetCount()) {
-            cb->SetSelection(old_index);
-            return;
-        }
-
+        // xyz fork: restore selection by string label first (not index),
+        // because the list contents may have changed (e.g., PLA removed, PETG added)
+        // and the same index now points to a different item.
         int new_index = cb->FindString(old_selection);
-        if (old_index == cb->GetCount()) {
-            cb->SetSelection(old_index - 1);
-        } else if (new_index != wxNOT_FOUND) {
+        if (new_index != wxNOT_FOUND) {
             cb->SetSelection(new_index);
+        } else if (old_index >= 0 && (unsigned int) old_index < cb->GetCount()) {
+            cb->SetSelection(old_index);
+        } else if (old_index == (int)cb->GetCount()) {
+            cb->SetSelection(old_index - 1);
         } else {
             cb->SetSelection(0);
         }
@@ -9964,7 +9964,10 @@ void Plater::priv::on_tab_selection_changing(wxBookCtrlEvent& e)
     update_sidebar();
     int old_sel = e.GetOldSelection();
     if (wxGetApp().preset_bundle && wxGetApp().preset_bundle->use_bbl_device_tab() && new_sel == MainFrame::tpMonitor) {
-        if (!Slic3r::NetworkAgent::is_network_module_loaded()) {
+        // xyz fork: OpenBambu mode doesn't load the DLL but still has a working printer agent
+        bool has_networking = Slic3r::NetworkAgent::is_network_module_loaded()
+                              || !wxGetApp().app_config->get_bool("use_bambu_network_plugin");
+        if (!has_networking) {
             e.Veto();
             BOOST_LOG_TRIVIAL(info) << boost::format("skipped tab switch from %1% to %2%, lack of network plugins") % old_sel % new_sel;
             if (q) {
@@ -15981,9 +15984,11 @@ void Plater::print_job_finished(wxCommandEvent &evt)
     dev->set_selected_machine(evt.GetString().ToStdString());
     p->main_frame->request_select_tab(MainFrame::TabPosition::tpMonitor);
     //jump to monitor and select device status panel
-    MonitorPanel* curr_monitor = p->main_frame->m_monitor;
-    if(curr_monitor)
-       curr_monitor->get_tabpanel()->ChangeSelection(MonitorPanel::PrinterTab::PT_STATUS);
+    if (p->main_frame->m_openbambu_monitor) {
+        p->main_frame->m_openbambu_monitor->get_tabpanel()->ChangeSelection(OpenBambuMonitorPanel::PrinterTab::PT_STATUS);
+    } else if (p->main_frame->m_monitor) {
+        p->main_frame->m_monitor->get_tabpanel()->ChangeSelection(MonitorPanel::PrinterTab::PT_STATUS);
+    }
 }
 
 void Plater::send_job_finished(wxCommandEvent& evt)
@@ -16856,7 +16861,9 @@ void Plater::pop_warning_and_go_to_device_page(wxString printer_name, PrinterWar
 {
     printer_name.Replace("Bambu Lab", "", false);
     wxString content;
-    bool device_page = (wxGetApp().mainframe == nullptr) && (wxGetApp().mainframe->m_monitor->IsShown());
+    bool device_page = (wxGetApp().mainframe != nullptr) &&
+        ((wxGetApp().mainframe->m_monitor && wxGetApp().mainframe->m_monitor->IsShown()) ||
+         (wxGetApp().mainframe->m_openbambu_monitor && wxGetApp().mainframe->m_openbambu_monitor->IsShown()));
     if (type == PrinterWarningType::NOT_CONNECTED) {
         if (device_page) {
             content = wxString::Format(_L("Printer not connected. Please go to the device page to connect %s before syncing."),
@@ -18005,6 +18012,18 @@ void Plater::reset_gcode_toolpaths()
     //BBS: add some logs
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": reset the gcode viewer's toolpaths");
     p->reset_gcode_toolpaths();
+}
+
+// xyz fork: public wrapper to fully reset the background slicing process
+// and clear the Print's object list to prevent stale pointer access
+void Plater::reset_background_process()
+{
+    p->background_process.reset();
+    // Also clear the Print's object list — background_process.reset() only
+    // invalidates steps but doesn't clear m_objects (by design), leaving
+    // stale pointers that crash in Print::support_material_extruders
+    if (auto *print = p->background_process.fff_print())
+        print->clear();
 }
 
 const Mouse3DController& Plater::get_mouse3d_controller() const
