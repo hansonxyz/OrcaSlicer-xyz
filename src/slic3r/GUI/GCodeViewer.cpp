@@ -1773,6 +1773,8 @@ void GCodeViewer::set_layers_z_range(const std::array<unsigned int, 2>& layers_z
 {
     m_viewer.set_layers_view_range(static_cast<uint32_t>(layers_z_range[0]), static_cast<uint32_t>(layers_z_range[1]));
     update_moves_slider(true);
+    // xyz fork: lookahead zones are filtered by visible layer range, rebuild on change
+    m_lookahead_zones_dirty = true;
 }
 
 class ToolpathsObjExporter
@@ -3634,6 +3636,17 @@ void GCodeViewer::render_legend(float &legend_height, int canvas_width, int canv
             append_option_item_with_type(type, libvgcode::convert(m_viewer.get_option_color(libvgcode::EOptionType::Wipes)), _u8L("Wipe"), visible);
     };
 
+    // xyz fork: Travel Exclusion Zones toggle (only appears if zones exist)
+    auto append_lookahead_zones_item = [this, append_item](std::vector<float> offsets) {
+        if (!m_gcode_result || m_gcode_result->lookahead_exclusion_zones.empty())
+            return;
+        append_item(EItemType::Rect, ColorRGBA(1.0f, 0.9f, 0.0f, 0.3f),
+            {{ _u8L("Travel Exclusion Zones"), offsets[0] }}, true, offsets.back(),
+            m_lookahead_zones_visible, [this]() {
+                m_lookahead_zones_visible = !m_lookahead_zones_visible;
+            });
+    };
+
     const libvgcode::EViewType new_view_type = curr_view_type;
 
     // extrusion paths section -> items
@@ -3677,14 +3690,8 @@ void GCodeViewer::render_legend(float &legend_height, int canvas_width, int canv
                     });
             }
         }
-        // xyz fork: Lookahead Zones toggle (only show if zones exist)
-        if (m_gcode_result && !m_gcode_result->lookahead_exclusion_zones.empty()) {
-            append_item(EItemType::Rect, ColorRGBA(1.0f, 0.9f, 0.0f, 0.3f),
-                {{ _u8L("Lookahead Zones"), offsets[0] }}, true, offsets.back(),
-                m_lookahead_zones_visible, [this]() {
-                    m_lookahead_zones_visible = !m_lookahead_zones_visible;
-                });
-        }
+        // xyz fork: Travel Exclusion Zones toggle (only appears if zones exist)
+        append_lookahead_zones_item(offsets);
         break;
     }
     case libvgcode::EViewType::Height:                   { append_range(m_viewer.get_color_range(libvgcode::EViewType::Height), 2); break; }
@@ -3703,6 +3710,8 @@ void GCodeViewer::render_legend(float &legend_height, int canvas_width, int canv
             // refresh(*m_gcode_result, wxGetApp().plater()->get_extruder_colors_from_plater_config(m_gcode_result));
             update_moves_slider();
             });
+        // xyz fork: Travel Exclusion Zones toggle
+        append_lookahead_zones_item(offsets);
         ImGui::PopStyleVar(1);
         break;
     }
@@ -3720,6 +3729,8 @@ void GCodeViewer::render_legend(float &legend_height, int canvas_width, int canv
             // refresh(*m_gcode_result, wxGetApp().plater()->get_extruder_colors_from_plater_config(m_gcode_result));
             update_moves_slider();
             });
+        // xyz fork: Travel Exclusion Zones toggle
+        append_lookahead_zones_item(offsets);
         ImGui::PopStyleVar(1);
         break;
     }
@@ -4445,6 +4456,8 @@ void GCodeViewer::render_slider(int canvas_width, int canvas_height) {
 }
 
 // xyz fork: Filament Lookahead exclusion zone rendering
+// Filters zones to only those whose layer_z falls within the currently visible
+// layer range from the vertical layer slider.
 void GCodeViewer::update_lookahead_zones()
 {
     m_lookahead_zones_model.reset();
@@ -4454,14 +4467,27 @@ void GCodeViewer::update_lookahead_zones()
 
     const auto &zones = m_gcode_result->lookahead_exclusion_zones;
 
+    // Determine the visible layer Z range from the layer slider.
+    // get_layers_view_range() returns indices into get_layers_zs().
+    const auto view_range = m_viewer.get_layers_view_range();
+    const std::vector<float> layer_zs = m_viewer.get_layers_zs();
+    float z_min = -std::numeric_limits<float>::infinity();
+    float z_max =  std::numeric_limits<float>::infinity();
+    if (!layer_zs.empty()) {
+        const uint32_t lo = std::min<uint32_t>(view_range[0], (uint32_t)layer_zs.size() - 1);
+        const uint32_t hi = std::min<uint32_t>(view_range[1], (uint32_t)layer_zs.size() - 1);
+        z_min = layer_zs[lo] - EPSILON;
+        z_max = layer_zs[hi] + EPSILON;
+    }
+
     GLModel::Geometry init_data;
     init_data.format = { GLModel::Geometry::EPrimitiveType::Lines, GLModel::Geometry::EVertexLayout::P3 };
-    init_data.reserve_vertices(zones.size() * 8); // 4 corners * 2 (top + bottom of each line)
-    init_data.reserve_indices(zones.size() * 8);  // 4 lines per zone
     init_data.color = ColorRGBA(1.0f, 0.9f, 0.0f, 0.3f); // yellow, 30% opacity
 
     unsigned int vcount = 0;
     for (const auto &zone : zones) {
+        if (zone.layer_z < z_min || zone.layer_z > z_max)
+            continue;
         float z = zone.layer_z + 0.05f; // slight offset to avoid z-fighting
         // 4 corners of the rectangle
         init_data.add_vertex(Vec3f(zone.x_min, zone.y_min, z));
