@@ -1,7 +1,7 @@
 # Filament Lookahead — Multi-Layer Batched Printing for Multi-Material
 
 Branch: `filament-lookahead`
-Status: Phases 1, 2, 3a, 3c, 5a complete. Analysis produces chained towers with max-envelope zones and a complete Any-Type support override map. Preview renders zones on base + extra layers. Any-Type support colors in the preview now reflect the override map (Phase 5a). Actual gcode reordering / batching (Phases 5b, 5c, 6) not yet implemented — towers remain informational and no extrusions are moved between layers yet.
+Status: Phases 1, 2, 3a, 3b, 3c, 5a complete. Analysis produces chained towers with max-envelope zones, gated by Rule 4 filament-completeness, and a complete Any-Type support override map. Preview renders zones on base + extra layers. Any-Type support colors in the preview now reflect the override map (Phase 5a). Actual gcode reordering / batching (Phases 5b, 5c, 6) not yet implemented — towers remain informational and no extrusions are moved between layers yet.
 
 ## Goal
 
@@ -510,6 +510,12 @@ Upgrade bbox isolation checks to polygon offset + intersect. Deferred unless bbo
 
 ---
 
+### Phase 3b ✅ — Filament-completeness (Rule 4)
+
+Completed 2026-04-21. Precomputes per (layer, filament) whether the filament is fully contained in isolated clusters on that layer. A layer is incomplete if stray filament entities exist outside all isolated clusters — batching can't save anything on such a layer (a tool change to the filament is still needed for the stray). Phase 3c now rejects tower bases on incomplete layers and truncates cascades at the first incomplete layer. Typical results: ~40% of (layer, filament) pairs flagged incomplete, tower count reduced ~25% vs pre-3b.
+
+**Verifiable by**: log shows `[FLA] Phase 3b filament-completeness: N complete, M incomplete` summary plus `REJECT: base layer not filament-complete` and `cascade truncate at k=N: not filament-complete` lines per decision.
+
 ### Phase 3a ✅ — Any-Type support filament resolution
 
 Walk support layers collects "Any (Type)" buckets (keyed by object × layer × role with their material type name). After the tower cascade, Phase A claims compatible intersecting buckets for each tower's filament; Phase B assigns remaining buckets via the default resolver but restricted to non-lookahead-active filaments (Rule 5). Produces `m_any_support_overrides: {object, layer_idx, is_interface} -> extruder_id`, accessed via `override_for_support()`. Granularity is per-(object, layer, role) to match the existing resolver — finer per-entity would require a gcode-emitter refactor. Consumer is Phase 5a.
@@ -923,3 +929,5 @@ These are known simplifications that can be revisited once the feature is functi
 - **2026-04 Phase 2**: added support-layer walk classifying `support_fills` entities by role (base vs interface) and mapping to object layers by `print_z`. Added per-layer cascade truncation in the disappearing branch. Gated off bbox-isolated-but-continuing strategy for v1. Skips "Any [Type]" supports with a known-limitation note (addressed in Phase 3a).
 - **2026-04 Phase 3a**: Any-Type support bucketing + Phase A (zone claim) + Phase B (leftover assignment) building the `m_any_support_overrides` map. Consumer (Phase 5a) not yet implemented — map is produced and logged only.
 - **2026-04 Phase 3c**: replaced disappearing-only strategy with greedy chained towers. Per-extruder while-loop accepts the tallest possible tower then advances past its top. Added self-content check in cascade (prevents "empty but clear" layers from extending towers), base-layer zone registration (Rule 8), and max-envelope zone sizing (closes under-coverage on widening towers). Added verbose `[FLA]`-tagged logging at warning/info per the development-logging mandate.
+- **2026-04 Phase 5a**: consume Any-Type override map in `GCode.cpp:4699` (short-circuits the default resolver); inject overridden extruders into `tool_ordering`'s per-layer extruder lists (safeguard for cases where the override extruder isn't already active on the layer). Plan key refactored from `(object, layer_idx, is_interface)` to `(SupportLayer*, is_interface)` for cleaner consumer access. Preview now reflects Any-Type overrides.
+- **2026-04-21 Phase 3b**: filament-completeness precomputation. Towers now gated by Rule 4 — rejected at bases where stray extrusion exists outside isolated clusters, truncated in cascades when a subsequent layer is incomplete. Caught the "turquoise tower with stray turquoise elsewhere on layer" class of invalid plan.

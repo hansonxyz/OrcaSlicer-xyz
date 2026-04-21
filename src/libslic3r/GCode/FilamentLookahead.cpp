@@ -325,6 +325,44 @@ void FilamentLookaheadPlan::build(const Print &print,
                 << " type=" << b.type_name << " entities=" << b.entity_bboxes.size();
     }
 
+    // Phase 3b: filament-completeness precomputation (Rule 4).
+    // A (layer, filament) pair is "filament-complete" iff every entity of that
+    // filament on that layer falls inside some ISOLATED cluster of that filament
+    // on that layer. If stray extrusion exists outside all isolated clusters, a
+    // tower for that filament cannot effectively batch this layer — a tool change
+    // to the filament is still required for the stray region, erasing the savings.
+    // Towers must not cross an incomplete layer for their filament.
+    std::vector<std::map<unsigned int, bool>> layer_ext_complete(num_layers);
+    size_t complete_count = 0, incomplete_count = 0;
+    for (size_t li = 0; li < num_layers; ++li) {
+        for (const auto &[ext_id, ents] : layer_extruder_entity_bboxes[li]) {
+            auto clusters = cluster_bboxes(ents, clearance_scaled);
+            std::vector<BoundingBox> isolated_clusters;
+            for (const auto &cb : clusters) {
+                bool iso = true;
+                for (const auto &[other_id, other_ents] : layer_extruder_entity_bboxes[li]) {
+                    if (other_id == ext_id) continue;
+                    for (const auto &ob : other_ents)
+                        if (bboxes_too_close(cb, ob, clearance_scaled)) { iso = false; break; }
+                    if (!iso) break;
+                }
+                if (iso) isolated_clusters.push_back(cb);
+            }
+            bool complete = true;
+            for (const auto &e : ents) {
+                bool inside_iso = false;
+                for (const auto &ic : isolated_clusters)
+                    if (ic.overlap(e)) { inside_iso = true; break; }
+                if (!inside_iso) { complete = false; break; }
+            }
+            layer_ext_complete[li][ext_id] = complete;
+            if (complete) ++complete_count; else ++incomplete_count;
+        }
+    }
+    BOOST_LOG_TRIVIAL(warning) << "[FLA] Phase 3b filament-completeness: "
+        << complete_count << " complete, " << incomplete_count
+        << " incomplete (layer, filament) pairs";
+
     // Phase 3c: greedy chained-tower planning. For each extruder, walk upward
     // from the first layer it appears on and greedily build as-tall-as-possible
     // towers (bounded by max_lookahead_height, cascade-truncated by collisions
@@ -367,6 +405,21 @@ void FilamentLookaheadPlan::build(const Print &print,
                 continue;
             }
 
+            // Phase 3b (Rule 4): base layer must be filament-complete for ext_id.
+            // Stray extrusion outside the zone on the base layer means a tool
+            // change to this filament is still required for the stray — no
+            // saving is possible, so reject the base.
+            {
+                auto &lmap = layer_ext_complete[li];
+                auto it = lmap.find(ext_id);
+                if (it == lmap.end() || !it->second) {
+                    BOOST_LOG_TRIVIAL(info) << "[FLA] layer=" << li << " ext=" << ext_id
+                        << " REJECT: base layer not filament-complete for this extruder (stray extrusion outside isolated clusters)";
+                    ++li;
+                    continue;
+                }
+            }
+
             const auto &ext_bbox = extruder_bboxes.at(ext_id);
             auto ent_it = layer_extruder_entity_bboxes[li].find(ext_id);
             if (ent_it == layer_extruder_entity_bboxes[li].end()) {
@@ -407,13 +460,29 @@ void FilamentLookaheadPlan::build(const Print &print,
                 }
 
                 // Cascade truncate: how many layers ahead can this tower continue?
-                // Two conditions must hold on each layer li+k:
+                // Three conditions must hold on each layer li+k:
                 //   (a) Tower's own filament must have entities INSIDE the cluster's
                 //       zone — otherwise the tower has nothing to batch on this layer.
                 //   (b) Other filaments' entities must stay clear of the inflated zone.
-                // Either failure truncates the tower at the last valid layer.
+                //   (c) The layer must be filament-complete for ext_id (Rule 4/3b) —
+                //       every extrusion of ext_id on li+k must fall inside some
+                //       isolated cluster of ext_id. Stray extrusion forces a tool
+                //       change to ext_id anyway, defeating the tower's savings.
+                // Any failure truncates the tower at the last valid layer.
                 size_t cluster_extra = truncated_extra;
                 for (size_t k = 1; k <= truncated_extra; ++k) {
+                    // (c) filament-completeness check (Rule 4 / Phase 3b)
+                    {
+                        auto &lmap = layer_ext_complete[li + k];
+                        auto it = lmap.find(ext_id);
+                        if (it == lmap.end() || !it->second) {
+                            cluster_extra = k - 1;
+                            BOOST_LOG_TRIVIAL(info) << "[FLA]   cascade truncate at k=" << k
+                                << " (layer " << (li + k) << "): not filament-complete for ext=" << ext_id;
+                            break;
+                        }
+                    }
+
                     // (a) self-content check — containment per Rule 3 (bbox v1)
                     bool self_has_content = false;
                     auto self_it = layer_extruder_entity_bboxes[li + k].find(ext_id);
