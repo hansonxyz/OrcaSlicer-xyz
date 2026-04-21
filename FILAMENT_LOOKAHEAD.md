@@ -1,7 +1,7 @@
 # Filament Lookahead — Multi-Layer Batched Printing for Multi-Material
 
 Branch: `filament-lookahead`
-Status: Phases 1, 2, 3a, 3b, 3c, 5a, 5c complete; 5b skipped. Gcode emission now embeds `LOOKAHEAD_LAYER_INFO` / `LOOKAHEAD_BLOCK_BEGIN/END` markers around each tower's extrusion span — the post-processor (Phase 6) can walk them directly to identify relocatable blocks. Analysis correctness gated by Rule 4 filament-completeness. Any-Type support overrides visible in preview (5a). Actual batching (Phase 6) not yet implemented — markers are present but no extrusions are moved between layers yet.
+Status: Phases 1, 2, 3a, 3b, 3c, 5a, 5c, 6a complete; 5b skipped. Post-processor infrastructure stood up — parses `LOOKAHEAD_*` markers into structured TowerBlock + LayerInfo, hooks in `GCode.cpp` just before temp→final rename. 6a round-trips the file unchanged; actual relocation/batching lands in 6b-6d. Analysis correctness gated by Rule 4 filament-completeness. Any-Type support overrides visible in preview (5a).
 
 ## Goal
 
@@ -770,7 +770,13 @@ Completed 2026-04-21. Emits `LOOKAHEAD_LAYER_INFO layer=L tower_filaments=<csv>`
 
 The actual semantic change. Takes the Phase-5 gcode (which has correct markers and travel but original extrusion order), rewrites it into the lookahead-reordered final form. Gated behind a config flag.
 
-#### 6a — Marker parser
+#### 6a ✅ — Marker parser
+
+Completed 2026-04-21. New files `src/libslic3r/GCode/FilamentLookaheadPostProcessor.hpp/cpp` define `FilamentLookaheadPostProcessor` with `process(path)` that reads the gcode, parses `LOOKAHEAD_BLOCK_BEGIN/END` into paired `TowerBlock` records and `LOOKAHEAD_LAYER_INFO` into `LayerInfo` records, and writes the file back. 6a is a pure round-trip — no transform applied — so the foundation can be validated before 6b/6c layer semantic changes on top. Hooked in `GCode.cpp::_do_export()` just before the `path_tmp → path` rename; runs only when `filament_lookahead` is enabled.
+
+**Verified by**: slice of 4-filament model produced 511,855-line gcode; parser reported `77 tower blocks, 392 layer-info markers` matching Phase 5c emission exactly; post-processed gcode has byte-identical line positions for marker locations vs pre-6a. Log shows `[FLA-PP] parsed N lines, M tower blocks, K layer-info markers` at warning level.
+
+#### 6a (original spec) — Marker parser
 
 **Technical details:**
 - New files: `src/libslic3r/GCode/FilamentLookaheadPostProcessor.hpp/cpp`.
@@ -952,3 +958,4 @@ These are known simplifications that can be revisited once the feature is functi
 - **2026-04-21 Phase 3b**: filament-completeness precomputation. Towers now gated by Rule 4 — rejected at bases where stray extrusion exists outside isolated clusters, truncated in cascades when a subsequent layer is incomplete. Caught the "turquoise tower with stray turquoise elsewhere on layer" class of invalid plan.
 - **2026-04-21 Phase 5b skipped**: initial attempt to stable-partition `layer_tools.extruders` caused wipe tower generation failure (pre-gen tool-change array overflow). Reverted. Phase 5c markers will serve as Phase 6's insertion anchor without needing the reorder. Kept the `tower_filaments_on_layer()` accessor and per-layer tracking populated during build for Phase 5c's use.
 - **2026-04-21 Phase 5c**: emit `LOOKAHEAD_LAYER_INFO` + `LOOKAHEAD_BLOCK_BEGIN/END` markers in `process_layer()`. 77 balanced BLOCK pairs on test model match exactly the sum of tower-layer counts from 9 accepted towers. Added `tower_info_for(layer_idx, ext_id)` accessor returning `{base_layer, stack_index, extra_layers, extruder_id}` for the wrapping logic.
+- **2026-04-21 Phase 6a**: post-processor module `FilamentLookaheadPostProcessor` with marker parser. Hooked in `_do_export()` before temp→final rename; gated by `filament_lookahead` config flag. Parser produces `TowerBlock`/`LayerInfo` records; 6a transform is no-op (round-trip). Verified marker counts and line positions preserved across process().

@@ -6,6 +6,7 @@
 #include "I18N.hpp"
 #include "GCode.hpp"
 #include "GCode/FilamentLookahead.hpp"
+#include "GCode/FilamentLookaheadPostProcessor.hpp"
 #include "Exception.hpp"
 #include "ExtrusionEntity.hpp"
 #include "EdgeGrid.hpp"
@@ -2146,6 +2147,18 @@ void GCode::do_export(Print* print, const char* path, GCodeProcessorResult* resu
 
     //BBS: add some log for error output
     BOOST_LOG_TRIVIAL(debug) << boost::format("Finished processing gcode to %1% ") % path_tmp;
+
+    // Phase 6a: run the filament lookahead post-processor on the temp gcode
+    // before it gets renamed to the final output. The post-processor parses
+    // LOOKAHEAD markers and (eventually) relocates tower blocks for batched
+    // printing. 6a only round-trips the file; semantic changes land in 6b-6d.
+    if (m_print->config().filament_lookahead.value) {
+        FilamentLookaheadPostProcessor pp;
+        if (!pp.process(path_tmp)) {
+            BOOST_LOG_TRIVIAL(warning) << "[FLA-PP] post-processor failed; "
+                << "continuing with un-post-processed gcode.";
+        }
+    }
 
     std::error_code ret = rename_file(path_tmp, path);
     if (ret) {
