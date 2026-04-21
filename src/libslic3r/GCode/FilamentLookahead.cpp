@@ -2,12 +2,29 @@
 #include "../Print.hpp"
 #include "../Layer.hpp"
 #include "../PrintConfig.hpp"
+#include "../ExtrusionEntity.hpp"
+#include "../ExtrusionEntityCollection.hpp"
 
 #include <boost/log/trivial.hpp>
 #include <queue>
 #include <numeric>
+#include <functional>
 
 namespace Slic3r {
+
+// Resolve a support_filament config value to a concrete 0-based extruder ID.
+// Returns (unsigned int)-1 for Default (0) or Any Type values — those cases are
+// context-dependent (resolved per-layer at gcode export time) and during our
+// pre-gcode analysis we don't know which extruder will print them. Phase 2 skips
+// such support geometry rather than attributing it incorrectly.
+static unsigned int resolve_static_support_extruder(int support_filament_value)
+{
+    if (support_filament_value <= 0)
+        return (unsigned int)-1;
+    if (is_support_filament_any_type(support_filament_value))
+        return (unsigned int)-1;
+    return (unsigned int)(support_filament_value - 1);
+}
 
 // Check if bbox_a inflated by clearance_scaled overlaps bbox_b.
 static bool bboxes_too_close(const BoundingBox &a, const BoundingBox &b, coord_t clearance_scaled)
@@ -116,6 +133,31 @@ void FilamentLookaheadPlan::build(const Print &print,
     // We check isolation on the single-object level since all instances share the same geometry
     std::vector<std::map<unsigned int, BoundingBox>> layer_extruder_bboxes_single(num_layers);
 
+    // Helper to append entity bboxes for a given extruder into both storage buckets.
+    auto ingest_entity_bboxes = [&](size_t li, unsigned int extruder_id,
+                                    const std::vector<BoundingBox> &entity_bboxes,
+                                    const PrintObject *pobj) {
+        if (entity_bboxes.empty()) return;
+        BoundingBox region_bbox = entity_bboxes.front();
+        for (size_t i = 1; i < entity_bboxes.size(); ++i)
+            region_bbox.merge(entity_bboxes[i]);
+
+        auto it = layer_extruder_bboxes_single[li].find(extruder_id);
+        if (it != layer_extruder_bboxes_single[li].end())
+            it->second.merge(region_bbox);
+        else
+            layer_extruder_bboxes_single[li][extruder_id] = region_bbox;
+
+        auto &plate_bboxes = layer_extruder_entity_bboxes[li][extruder_id];
+        for (const PrintInstance &inst : pobj->instances()) {
+            for (const auto &eb : entity_bboxes) {
+                BoundingBox pb = eb;
+                pb.translate(inst.shift);
+                plate_bboxes.push_back(pb);
+            }
+        }
+    };
+
     for (const PrintObject *pobj : print.objects()) {
         const auto &obj_layers = pobj->layers();
         for (size_t li = 0; li < std::min(obj_layers.size(), num_layers); ++li) {
@@ -127,45 +169,78 @@ void FilamentLookaheadPlan::build(const Print &print,
 
                 unsigned int extruder_id = region->region().config().wall_filament.value - 1;
 
-                // Collect individual entity bboxes
                 std::vector<BoundingBox> entity_bboxes;
                 for (const ExtrusionEntity *ee : region->perimeters.entities)
                     collect_bboxes(ee, entity_bboxes);
                 for (const ExtrusionEntity *ee : region->fills.entities)
                     collect_bboxes(ee, entity_bboxes);
 
-                if (!entity_bboxes.empty()) {
-                    // Single-object merged bbox (for isolation check)
-                    BoundingBox region_bbox = entity_bboxes.front();
-                    for (size_t i = 1; i < entity_bboxes.size(); ++i)
-                        region_bbox.merge(entity_bboxes[i]);
+                ingest_entity_bboxes(li, extruder_id, entity_bboxes, pobj);
+            }
+        }
 
-                    auto it = layer_extruder_bboxes_single[li].find(extruder_id);
-                    if (it != layer_extruder_bboxes_single[li].end())
-                        it->second.merge(region_bbox);
-                    else
-                        layer_extruder_bboxes_single[li][extruder_id] = region_bbox;
+        // Support extrusions: walk support_layers and bucket each leaf entity by its
+        // role (base vs interface) to look up the correct support_filament config.
+        // Match support layer to its corresponding object layer by print_z. Support-only
+        // layers that don't align with any object layer are ignored — they contribute no
+        // model extrusion and can't host lookahead on their own.
+        const unsigned int base_extruder = resolve_static_support_extruder(
+            pobj->config().support_filament.value);
+        const unsigned int iface_extruder = resolve_static_support_extruder(
+            pobj->config().support_interface_filament.value);
 
-                    // Per-entity bboxes in plate coordinates (for clustering)
-                    auto &plate_bboxes = layer_extruder_entity_bboxes[li][extruder_id];
-                    for (const PrintInstance &inst : pobj->instances()) {
-                        for (const auto &eb : entity_bboxes) {
-                            BoundingBox pb = eb;
-                            pb.translate(inst.shift);
-                            plate_bboxes.push_back(pb);
-                        }
-                    }
+        std::function<void(const ExtrusionEntity*, std::vector<BoundingBox>&, std::vector<BoundingBox>&)> walk_support;
+        walk_support = [&](const ExtrusionEntity *ee,
+                           std::vector<BoundingBox> &base_out,
+                           std::vector<BoundingBox> &iface_out) {
+            if (!ee) return;
+            if (auto *coll = dynamic_cast<const ExtrusionEntityCollection*>(ee)) {
+                for (const ExtrusionEntity *child : coll->entities)
+                    walk_support(child, base_out, iface_out);
+            } else {
+                const ExtrusionRole r = ee->role();
+                if (r == erSupportMaterialInterface)
+                    iface_out.push_back(get_extents(ee->as_polyline()));
+                else if (r == erSupportMaterial || r == erSupportTransition)
+                    base_out.push_back(get_extents(ee->as_polyline()));
+                // Other roles shouldn't appear in support_fills, silently ignored.
+            }
+        };
+
+        for (const SupportLayer *slayer : pobj->support_layers()) {
+            if (!slayer || slayer->support_fills.empty())
+                continue;
+            // Find matching object layer by print_z
+            size_t matched_li = SIZE_MAX;
+            for (size_t li = 0; li < num_layers; ++li) {
+                if (std::abs(obj_layers[li]->print_z - slayer->print_z) < EPSILON) {
+                    matched_li = li;
+                    break;
                 }
             }
+            if (matched_li == SIZE_MAX)
+                continue;
+
+            std::vector<BoundingBox> base_boxes, iface_boxes;
+            for (const ExtrusionEntity *ee : slayer->support_fills.entities)
+                walk_support(ee, base_boxes, iface_boxes);
+
+            if (base_extruder != (unsigned int)-1)
+                ingest_entity_bboxes(matched_li, base_extruder, base_boxes, pobj);
+            if (iface_extruder != (unsigned int)-1)
+                ingest_entity_bboxes(matched_li, iface_extruder, iface_boxes, pobj);
         }
     }
 
-    // For each layer and each extruder, check if lookahead is possible.
-    // Two strategies:
-    // 1. BBox isolation: extruder's bbox is far from all others (works for separate objects)
-    // 2. Disappearing extruder: extruder exists on this layer but disappears within max_height
-    //    above (we can batch its remaining layers). This is the most common case for painted
-    //    models where gold nubs etc. end before the main body.
+    // Phase 2 restricts the analysis to the "disappearing extruder" case only:
+    // a candidate extruder E exists on layer L (and possibly earlier layers),
+    // stops existing within the lookahead window above L, and other extruders
+    // continue above — meaning batching all of E's remaining layers eliminates
+    // every subsequent tool change for E.
+    //
+    // The bbox-isolated-but-continuing strategy (extruder present on every layer
+    // but spatially far from others) is intentionally disabled for v1 — it's
+    // retained conceptually for future work once the disappearing case is proven.
     for (size_t li = 0; li < num_layers; ++li) {
         const auto &extruder_bboxes = layer_extruder_bboxes_single[li];
 
@@ -174,222 +249,127 @@ void FilamentLookaheadPlan::build(const Print &print,
             continue;
 
         for (const auto &[ext_id, ext_bbox] : extruder_bboxes) {
-            // Strategy 1: BBox isolation
-            bool bbox_isolated = true;
-            for (const auto &[other_id, other_bbox] : extruder_bboxes) {
-                if (other_id == ext_id)
-                    continue;
-                if (bboxes_too_close(ext_bbox, other_bbox, clearance_scaled)) {
-                    bbox_isolated = false;
+            double layer_height = (li + 1 < num_layers)
+                ? (layers[li + 1]->print_z - layers[li]->print_z) : layers[li]->height;
+            size_t max_look = (size_t)(max_lookahead_height_mm / layer_height);
+            if (max_look == 0)
+                continue;
+
+            // Find this extruder's last contiguous layer (must be present every layer
+            // from li onward, disappearing at some point within max_look).
+            size_t last_present = li;
+            for (size_t k = 1; k <= max_look && li + k < num_layers; ++k) {
+                if (layer_extruder_bboxes_single[li + k].count(ext_id))
+                    last_present = li + k;
+                else
+                    break;
+            }
+            if (last_present == li)
+                continue; // extruder only exists on this layer — no runway to batch
+            if (last_present >= li + max_look)
+                continue; // still present at end of window — not a disappearing case
+            if (last_present + 1 >= num_layers)
+                continue; // print ends with this extruder — no subsequent tool changes to save
+            if (layer_extruder_bboxes_single[last_present + 1].count(ext_id))
+                continue; // safety check: extruder must be absent on the next layer
+
+            // Verify other extruders continue above last_present — otherwise there are
+            // no future tool changes to eliminate (the whole print is ending).
+            bool others_continue = false;
+            for (size_t k = last_present + 1; k < num_layers && k <= last_present + 3; ++k) {
+                if (!layer_extruder_bboxes_single[k].empty()) {
+                    others_continue = true;
                     break;
                 }
             }
+            if (!others_continue)
+                continue;
 
-            // Strategy 2: Disappearing extruder - this extruder's last layer is within
-            // max_height above the current layer, and it has continuous presence until then
-            bool disappearing = false;
-            if (!bbox_isolated) {
-                double layer_height = (li + 1 < num_layers)
-                    ? (layers[li + 1]->print_z - layers[li]->print_z) : layers[li]->height;
-                size_t max_look = (size_t)(max_lookahead_height_mm / layer_height);
+            // Cluster this extruder's plate-coord entity bboxes, filter to only clusters
+            // isolated from other extruders on the STARTING layer.
+            auto ent_it = layer_extruder_entity_bboxes[li].find(ext_id);
+            if (ent_it == layer_extruder_entity_bboxes[li].end())
+                continue;
+            auto clusters = cluster_bboxes(ent_it->second, clearance_scaled);
 
-                // Check: does this extruder disappear within max_look layers?
-                size_t last_present = li;
-                for (size_t k = 1; k <= max_look && li + k < num_layers; ++k) {
-                    if (layer_extruder_bboxes_single[li + k].count(ext_id))
-                        last_present = li + k;
-                    else
-                        break;
-                }
-                // If the extruder disappears within the lookahead window AND there are
-                // other extruders above it (meaning tool changes would otherwise be needed),
-                // it's a candidate
-                if (last_present < li + max_look && last_present > li &&
-                    last_present + 1 < num_layers && !layer_extruder_bboxes_single[last_present + 1].count(ext_id)) {
-                    // Check that OTHER extruders continue above (so there would be tool changes)
-                    bool others_continue = false;
-                    for (size_t k = last_present + 1; k < num_layers && k <= last_present + 3; ++k) {
-                        if (!layer_extruder_bboxes_single[k].empty()) {
-                            others_continue = true;
+            // For each cluster, apply per-layer cascade truncation: starting from extra=0,
+            // walk forward and check if the cluster's inflated zone is clear of other
+            // extruders' entities on each intermediate layer. Stop at the first violation.
+            std::vector<BoundingBox> accepted_zones;
+            size_t truncated_extra = last_present - li; // candidate max extra layers
+
+            for (const auto &cb : clusters) {
+                // Starting-layer isolation check (required even at k=0)
+                bool cluster_isolated = true;
+                for (const auto &[other_id, other_ents] : layer_extruder_entity_bboxes[li]) {
+                    if (other_id == ext_id) continue;
+                    for (const auto &ob : other_ents) {
+                        if (bboxes_too_close(cb, ob, clearance_scaled)) {
+                            cluster_isolated = false;
                             break;
                         }
                     }
-                    disappearing = others_continue;
+                    if (!cluster_isolated) break;
                 }
-            }
+                if (!cluster_isolated)
+                    continue; // this cluster fails isolation — skip it
 
-            if (!bbox_isolated && !disappearing)
-                continue;
-
-            // This extruder is isolated on this layer. Check how many future layers
-            // we can print ahead.
-            double layer_height = (li + 1 < num_layers)
-                ? (layers[li + 1]->print_z - layers[li]->print_z)
-                : layers[li]->height;
-            size_t max_extra = (size_t)(max_lookahead_height_mm / layer_height);
-            if (max_extra == 0)
-                continue;
-
-            // For disappearing extruders, we already know exactly how many layers
-            // ahead we can print (the extruder is present until last_present)
-            // Skip the forward bbox scan and go directly to recording the plan
-            if (disappearing) {
-                // Find last_present again (was computed in the heuristic above)
-                size_t last_pres = li;
-                for (size_t k = 1; k <= max_extra && li + k < num_layers; ++k) {
-                    if (layer_extruder_bboxes_single[li + k].count(ext_id))
-                        last_pres = li + k;
-                    else
-                        break;
-                }
-                size_t extra = last_pres - li;
-                if (extra > 0 && extra <= max_extra) {
-                    LookaheadEntry entry;
-                    entry.extra_layers = extra;
-                    entry.raised_z = layers[li + extra]->print_z;
-                    entry.raised_bbox = ext_bbox;
-                    // Cluster entity bboxes into spatially connected groups,
-                    // then filter: only keep clusters isolated from other extruders
-                    auto ent_it = layer_extruder_entity_bboxes[li].find(ext_id);
-                    if (ent_it != layer_extruder_entity_bboxes[li].end()) {
-                        auto clusters = cluster_bboxes(ent_it->second, clearance_scaled);
-                        for (auto &cb : clusters) {
-                            // Check this cluster against all other extruders' entities
-                            bool cluster_isolated = true;
-                            for (const auto &[other_id, other_ents] : layer_extruder_entity_bboxes[li]) {
-                                if (other_id == ext_id) continue;
-                                for (const auto &ob : other_ents) {
-                                    if (bboxes_too_close(cb, ob, clearance_scaled)) {
-                                        cluster_isolated = false;
-                                        break;
-                                    }
-                                }
-                                if (!cluster_isolated) break;
-                            }
-                            if (cluster_isolated) {
-                                cb.offset(clearance_scaled);
-                                entry.exclusion_bboxes.push_back(cb);
-                            }
-                        }
-                    }
-                    if (entry.exclusion_bboxes.empty()) {
-                        // No isolated clusters — skip this plan entry
-                        continue;
-                    }
-
-                    m_plan[{li, ext_id}] = entry;
-
-                    for (size_t k = 1; k <= extra; ++k) {
-                        size_t future_li = li + k;
-                        if (future_li < m_raised_per_layer.size()) {
-                            m_raised_per_layer[future_li].max_z = std::max(
-                                m_raised_per_layer[future_li].max_z, entry.raised_z);
-                            for (const auto &eb : entry.exclusion_bboxes)
-                                m_raised_per_layer[future_li].exclusion_bboxes.push_back(eb);
-                        }
-                    }
-
-                    m_enabled = true;
-                }
-                continue; // skip the bbox-based forward scan
-            }
-
-            BoundingBox accumulated_bbox = ext_bbox;
-            size_t extra = 0;
-
-            for (size_t k = 1; k <= max_extra && li + k < num_layers; ++k) {
-                const auto &future_bboxes = layer_extruder_bboxes_single[li + k];
-
-                // Check: does this extruder have extrusions on the future layer?
-                auto it = future_bboxes.find(ext_id);
-                if (it == future_bboxes.end())
-                    break; // No extrusions for this extruder on future layer
-
-                // Merge into accumulated bbox
-                BoundingBox merged = accumulated_bbox;
-                merged.merge(it->second);
-
-                // Check: is the merged region still isolated from all other extruders
-                // on the future layer?
-                bool still_isolated = true;
-                for (const auto &[other_id, other_bbox] : future_bboxes) {
-                    if (other_id == ext_id)
-                        continue;
-                    if (bboxes_too_close(merged, other_bbox, clearance_scaled)) {
-                        still_isolated = false;
-                        break;
-                    }
-                }
-
-                // Also check against other extruders on ALL intermediate layers
-                if (still_isolated) {
-                    for (size_t m = li; m <= li + k && still_isolated; ++m) {
-                        for (const auto &[other_id, other_bbox] : layer_extruder_bboxes_single[m]) {
-                            if (other_id == ext_id)
-                                continue;
-                            if (bboxes_too_close(merged, other_bbox, clearance_scaled)) {
-                                still_isolated = false;
+                // Cascade truncate: how many layers ahead remains clear for this cluster?
+                size_t cluster_extra = truncated_extra;
+                for (size_t k = 1; k <= truncated_extra; ++k) {
+                    bool clear_at_k = true;
+                    for (const auto &[other_id, other_ents] : layer_extruder_entity_bboxes[li + k]) {
+                        if (other_id == ext_id) continue;
+                        for (const auto &ob : other_ents) {
+                            if (bboxes_too_close(cb, ob, clearance_scaled)) {
+                                clear_at_k = false;
                                 break;
                             }
                         }
+                        if (!clear_at_k) break;
+                    }
+                    if (!clear_at_k) {
+                        cluster_extra = k - 1;
+                        break;
                     }
                 }
 
-                if (!still_isolated)
-                    break;
+                // Use the minimum cascade truncation across all clusters in this plan entry.
+                // All clusters must be valid for every layer they cover.
+                if (cluster_extra == 0)
+                    continue; // this cluster offers no lookahead runway
 
-                accumulated_bbox = merged;
-                extra = k;
+                truncated_extra = std::min(truncated_extra, cluster_extra);
+                BoundingBox inflated = cb;
+                inflated.offset(clearance_scaled);
+                accepted_zones.push_back(inflated);
             }
 
-            if (extra > 0) {
-                LookaheadEntry entry;
-                entry.extra_layers = extra;
-                entry.raised_z = layers[li + extra]->print_z;
-                entry.raised_bbox = accumulated_bbox;
-                // Cluster entity bboxes, filter to only isolated clusters
-                auto ent_it = layer_extruder_entity_bboxes[li].find(ext_id);
-                if (ent_it != layer_extruder_entity_bboxes[li].end()) {
-                    auto clusters = cluster_bboxes(ent_it->second, clearance_scaled);
-                    for (auto &cb : clusters) {
-                        bool cluster_isolated = true;
-                        for (const auto &[other_id, other_ents] : layer_extruder_entity_bboxes[li]) {
-                            if (other_id == ext_id) continue;
-                            for (const auto &ob : other_ents) {
-                                if (bboxes_too_close(cb, ob, clearance_scaled)) {
-                                    cluster_isolated = false;
-                                    break;
-                                }
-                            }
-                            if (!cluster_isolated) break;
-                        }
-                        if (cluster_isolated) {
-                            cb.offset(clearance_scaled);
-                            entry.exclusion_bboxes.push_back(cb);
-                        }
-                    }
+            if (accepted_zones.empty() || truncated_extra == 0)
+                continue;
+
+            LookaheadEntry entry;
+            entry.extra_layers = truncated_extra;
+            entry.raised_z = layers[li + truncated_extra]->print_z;
+            entry.raised_bbox = ext_bbox;
+            entry.exclusion_bboxes = std::move(accepted_zones);
+
+            m_plan[{li, ext_id}] = entry;
+
+            for (size_t k = 1; k <= truncated_extra; ++k) {
+                size_t future_li = li + k;
+                if (future_li < m_raised_per_layer.size()) {
+                    m_raised_per_layer[future_li].max_z = std::max(
+                        m_raised_per_layer[future_li].max_z, entry.raised_z);
+                    for (const auto &eb : entry.exclusion_bboxes)
+                        m_raised_per_layer[future_li].exclusion_bboxes.push_back(eb);
                 }
-                if (entry.exclusion_bboxes.empty())
-                    continue; // no isolated clusters
-
-                m_plan[{li, ext_id}] = entry;
-
-                // Record raised regions on future layers
-                for (size_t k = 1; k <= extra; ++k) {
-                    size_t future_li = li + k;
-                    if (future_li < m_raised_per_layer.size()) {
-                        m_raised_per_layer[future_li].max_z = std::max(
-                            m_raised_per_layer[future_li].max_z, entry.raised_z);
-                        for (const auto &eb : entry.exclusion_bboxes)
-                            m_raised_per_layer[future_li].exclusion_bboxes.push_back(eb);
-                    }
-                }
-
-                m_enabled = true;
-                BOOST_LOG_TRIVIAL(info) << "FilamentLookahead: layer " << li
-                    << " extruder " << ext_id << " can print " << extra << " layers ahead"
-                    << " (raised_z=" << entry.raised_z << ")";
             }
+
+            m_enabled = true;
+            BOOST_LOG_TRIVIAL(info) << "FilamentLookahead: layer " << li
+                << " extruder " << ext_id << " disappearing after " << truncated_extra
+                << " layers (raised_z=" << entry.raised_z << ")";
         }
     }
 
