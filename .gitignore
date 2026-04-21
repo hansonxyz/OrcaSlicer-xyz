@@ -46,3 +46,6 @@ test.js
 internal_docs/
 *.flatpak
 /flatpak-repo/
+# Test gcode exports (not tracked)
+test.gcode
+/*.gcode
