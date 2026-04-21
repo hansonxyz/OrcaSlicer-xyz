@@ -151,10 +151,10 @@ void FilamentLookaheadPlan::build(const Print &print,
     // defer their resolution to Phase A (zone-claiming) + Phase B (leftover assignment)
     // that run after the tower cascade.
     struct AnyTypeBucket {
-        const PrintObject *object       = nullptr;
-        size_t             layer_idx    = 0;
-        bool               is_interface = false;
-        std::string        type_name;
+        const SupportLayer *support_layer = nullptr; // used as override map key
+        size_t              layer_idx    = 0;         // index into first object's layers for lookahead-active lookup
+        bool                is_interface = false;
+        std::string         type_name;
         std::vector<BoundingBox> entity_bboxes; // plate coords, already instance-translated
     };
     std::vector<AnyTypeBucket> any_buckets;
@@ -265,10 +265,10 @@ void FilamentLookaheadPlan::build(const Print &print,
             const int base_val = pobj->config().support_filament.value;
             if (is_support_filament_any_type(base_val) && !base_boxes.empty()) {
                 AnyTypeBucket b;
-                b.object       = pobj;
-                b.layer_idx    = matched_li;
-                b.is_interface = false;
-                b.type_name    = support_filament_any_type_name(base_val);
+                b.support_layer = slayer;
+                b.layer_idx     = matched_li;
+                b.is_interface  = false;
+                b.type_name     = support_filament_any_type_name(base_val);
                 for (const PrintInstance &inst : pobj->instances())
                     for (const auto &eb : base_boxes) {
                         BoundingBox pb = eb;
@@ -281,10 +281,10 @@ void FilamentLookaheadPlan::build(const Print &print,
             const int iface_val = pobj->config().support_interface_filament.value;
             if (is_support_filament_any_type(iface_val) && !iface_boxes.empty()) {
                 AnyTypeBucket b;
-                b.object       = pobj;
-                b.layer_idx    = matched_li;
-                b.is_interface = true;
-                b.type_name    = support_filament_any_type_name(iface_val);
+                b.support_layer = slayer;
+                b.layer_idx     = matched_li;
+                b.is_interface  = true;
+                b.type_name     = support_filament_any_type_name(iface_val);
                 for (const PrintInstance &inst : pobj->instances())
                     for (const auto &eb : iface_boxes) {
                         BoundingBox pb = eb;
@@ -320,7 +320,7 @@ void FilamentLookaheadPlan::build(const Print &print,
         }
         BOOST_LOG_TRIVIAL(info) << "[FLA] any-type support buckets collected: " << any_buckets.size();
         for (const auto &b : any_buckets)
-            BOOST_LOG_TRIVIAL(info) << "[FLA]   any-bucket obj=" << b.object << " layer=" << b.layer_idx
+            BOOST_LOG_TRIVIAL(info) << "[FLA]   any-bucket layer=" << b.layer_idx
                 << " role=" << (b.is_interface ? "interface" : "base")
                 << " type=" << b.type_name << " entities=" << b.entity_bboxes.size();
     }
@@ -573,7 +573,7 @@ void FilamentLookaheadPlan::build(const Print &print,
             for (const auto &b : any_buckets) {
                 if (b.type_name != tower_type) continue;
                 if (b.layer_idx < base_li || b.layer_idx > tower_top) continue;
-                auto k = std::make_tuple(b.object, b.layer_idx, b.is_interface);
+                auto k = std::make_pair(b.support_layer, b.is_interface);
                 if (m_any_support_overrides.count(k)) continue;
                 if (bbox_intersects_any(b.entity_bboxes, entry.exclusion_bboxes)) {
                     m_any_support_overrides[k] = ext_id;
@@ -596,7 +596,7 @@ void FilamentLookaheadPlan::build(const Print &print,
         };
 
         for (const auto &b : any_buckets) {
-            auto k = std::make_tuple(b.object, b.layer_idx, b.is_interface);
+            auto k = std::make_pair(b.support_layer, b.is_interface);
             if (m_any_support_overrides.count(k)) continue;
 
             std::set<unsigned int> active_set;
@@ -614,7 +614,7 @@ void FilamentLookaheadPlan::build(const Print &print,
             unsigned int resolved = resolve_any_type_support_filament(
                 any_val, print.config(), candidates);
             if (resolved == (unsigned int)-1) {
-                BOOST_LOG_TRIVIAL(info) << "[FLA] Phase B SKIP: obj=" << b.object << " layer=" << b.layer_idx
+                BOOST_LOG_TRIVIAL(info) << "[FLA] Phase B SKIP: layer=" << b.layer_idx
                     << " role=" << (b.is_interface ? "interface" : "base")
                     << " - no compatible non-lookahead-active filament found for type=" << b.type_name;
                 continue;
@@ -624,20 +624,20 @@ void FilamentLookaheadPlan::build(const Print &print,
                 continue;
             }
             m_any_support_overrides[k] = resolved;
-            BOOST_LOG_TRIVIAL(info) << "[FLA] Phase B ASSIGN: obj=" << b.object << " layer=" << b.layer_idx
+            BOOST_LOG_TRIVIAL(info) << "[FLA] Phase B ASSIGN: layer=" << b.layer_idx
                 << " role=" << (b.is_interface ? "interface" : "base")
                 << " type=" << b.type_name << " -> extruder=" << resolved
                 << " (candidates=" << candidates.size() << " lookahead_active=" << active_set.size() << ")";
         }
 
-        BOOST_LOG_TRIVIAL(info) << "[FLA] Phase 3a complete: "
+        BOOST_LOG_TRIVIAL(warning) << "[FLA] Phase 3a complete: "
             << m_any_support_overrides.size() << " Any-Type overrides (of "
             << any_buckets.size() << " candidate buckets)";
     } else {
-        BOOST_LOG_TRIVIAL(info) << "[FLA] Phase 3a skipped: no Any-Type supports in this slice";
+        BOOST_LOG_TRIVIAL(warning) << "[FLA] Phase 3a skipped: no Any-Type supports in this slice";
     }
 
-    BOOST_LOG_TRIVIAL(info) << "[FLA] build() final: enabled=" << m_enabled
+    BOOST_LOG_TRIVIAL(warning) << "[FLA] build() final: enabled=" << m_enabled
         << " towers=" << m_plan.size()
         << " any_overrides=" << m_any_support_overrides.size();
 }
@@ -673,9 +673,9 @@ std::vector<BoundingBox> FilamentLookaheadPlan::exclusion_zones(size_t layer_idx
 }
 
 std::optional<unsigned int> FilamentLookaheadPlan::override_for_support(
-    const PrintObject *object, size_t layer_idx, bool is_interface) const
+    const SupportLayer *support_layer, bool is_interface) const
 {
-    auto it = m_any_support_overrides.find(std::make_tuple(object, layer_idx, is_interface));
+    auto it = m_any_support_overrides.find(std::make_pair(support_layer, is_interface));
     if (it == m_any_support_overrides.end())
         return std::nullopt;
     return it->second;

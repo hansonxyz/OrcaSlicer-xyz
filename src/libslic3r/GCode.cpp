@@ -3342,6 +3342,35 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
                     m_lookahead_plan = &lookahead_plan;
             }
 
+            // Phase 5a: inject overridden support extruders into tool_ordering's
+            // per-layer extruder lists. ToolOrdering was built before the plan
+            // existed, so its per-layer `extruders` may not include extruders we
+            // overrode supports onto. Without this, the per-extruder emission loop
+            // would skip those extruders and the overridden supports would not be
+            // printed. v1 just appends without re-sorting — the existing tool-change
+            // optimization is thus slightly suboptimal for affected layers, but
+            // gcode correctness is preserved.
+            if (m_lookahead_plan && m_lookahead_plan->enabled()) {
+                // After ToolOrdering::reorder_extruders() runs (inside
+                // sort_and_build_data), lt.extruders stores 0-based filament ids.
+                size_t injected = 0;
+                for (const auto &[key, ext_id] : m_lookahead_plan->any_support_overrides()) {
+                    const SupportLayer *slayer = key.first;
+                    if (!slayer) continue;
+                    for (LayerTools &lt : tool_ordering.layer_tools()) {
+                        if (std::abs(lt.print_z - slayer->print_z) > EPSILON) continue;
+                        if (std::find(lt.extruders.begin(), lt.extruders.end(), ext_id)
+                            == lt.extruders.end()) {
+                            lt.extruders.push_back(ext_id);
+                            ++injected;
+                        }
+                        break;
+                    }
+                }
+                BOOST_LOG_TRIVIAL(warning) << "[FLA] Phase 5a: injected " << injected
+                    << " overridden extruder(s) into tool_ordering";
+            }
+
             // Process all layers of all objects (non-sequential mode) with a parallel pipeline:
             // Generate G-code, run the filters (vase mode, cooling buffer), run the G-code analyser
             // and export G-code into file.
@@ -4695,22 +4724,38 @@ LayerResult GCode::process_layer(
                 // Resolve support filament values, handling "Any (Type)" dynamic selection.
                 int             support_filament_val  = object.config().support_filament.value;
                 int             interface_filament_val = object.config().support_interface_filament.value;
-                // For "Any (Type)", resolve to the best extruder on this layer.
+                // Phase 5a: consult the Filament Lookahead override map first. If an
+                // override exists for this (support_layer, role), use it. Otherwise
+                // fall through to the existing per-layer resolver.
                 if (is_support_filament_any_type(support_filament_val)) {
-                    std::vector<unsigned int> layer_obj_extruders;
-                    for (unsigned int e : layer_tools.extruders)
-                        layer_obj_extruders.push_back(e); // already 0-based in layer_tools
-                    unsigned int resolved = resolve_any_type_support_filament(
-                        support_filament_val, print.config(), layer_obj_extruders);
-                    support_filament_val = (resolved != (unsigned int)-1) ? (int)resolved + 1 : 0;
+                    std::optional<unsigned int> fla_override;
+                    if (m_lookahead_plan && m_lookahead_plan->enabled())
+                        fla_override = m_lookahead_plan->override_for_support(&support_layer, false);
+                    if (fla_override) {
+                        support_filament_val = (int)*fla_override + 1;
+                    } else {
+                        std::vector<unsigned int> layer_obj_extruders;
+                        for (unsigned int e : layer_tools.extruders)
+                            layer_obj_extruders.push_back(e); // already 0-based in layer_tools
+                        unsigned int resolved = resolve_any_type_support_filament(
+                            support_filament_val, print.config(), layer_obj_extruders);
+                        support_filament_val = (resolved != (unsigned int)-1) ? (int)resolved + 1 : 0;
+                    }
                 }
                 if (is_support_filament_any_type(interface_filament_val)) {
-                    std::vector<unsigned int> layer_obj_extruders;
-                    for (unsigned int e : layer_tools.extruders)
-                        layer_obj_extruders.push_back(e);
-                    unsigned int resolved = resolve_any_type_support_filament(
-                        interface_filament_val, print.config(), layer_obj_extruders);
-                    interface_filament_val = (resolved != (unsigned int)-1) ? (int)resolved + 1 : 0;
+                    std::optional<unsigned int> fla_override;
+                    if (m_lookahead_plan && m_lookahead_plan->enabled())
+                        fla_override = m_lookahead_plan->override_for_support(&support_layer, true);
+                    if (fla_override) {
+                        interface_filament_val = (int)*fla_override + 1;
+                    } else {
+                        std::vector<unsigned int> layer_obj_extruders;
+                        for (unsigned int e : layer_tools.extruders)
+                            layer_obj_extruders.push_back(e);
+                        unsigned int resolved = resolve_any_type_support_filament(
+                            interface_filament_val, print.config(), layer_obj_extruders);
+                        interface_filament_val = (resolved != (unsigned int)-1) ? (int)resolved + 1 : 0;
+                    }
                 }
                 // Extruder ID of the support base. -1 if "don't care".
                 unsigned int    support_extruder   = support_filament_val - 1;

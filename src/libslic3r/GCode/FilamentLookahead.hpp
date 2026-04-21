@@ -5,13 +5,14 @@
 #include <vector>
 #include <map>
 #include <set>
-#include <tuple>
+#include <utility>
 #include <optional>
 
 namespace Slic3r {
 
 class Print;
 class PrintObject;
+class SupportLayer;
 class Layer;
 
 // Filament Lookahead: pre-analysis of which extruder regions on which layers
@@ -48,12 +49,18 @@ public:
     std::vector<BoundingBox> exclusion_zones(size_t layer_idx) const;
 
     // Phase 3a: Any-Type support filament override.
-    // Key: (object, support_layer_idx_matched_to_object_layer, is_interface).
+    // Key: (support_layer_ptr, is_interface). SupportLayer pointers are stable
+    // between Phase A analysis and gcode emission since Print state isn't mutated.
     // Value: 0-based extruder id the "Any (Type)" support should be resolved to.
-    // Consumed by Phase 5a in GCode.cpp and ToolOrdering.cpp to short-circuit the
-    // default resolver. Returns empty optional if no override applies.
+    // Consumed by Phase 5a in GCode.cpp to short-circuit the default resolver.
+    // Returns empty optional if no override applies.
     std::optional<unsigned int> override_for_support(
-        const PrintObject *object, size_t layer_idx, bool is_interface) const;
+        const SupportLayer *support_layer, bool is_interface) const;
+
+    // Enumerate all override keys so callers (e.g. GCode.cpp) can inject the
+    // overridden extruders into tool_ordering's per-layer extruder list.
+    const std::map<std::pair<const SupportLayer*, bool>, unsigned int>&
+        any_support_overrides() const { return m_any_support_overrides; }
 
 private:
     bool m_enabled = false;
@@ -72,9 +79,8 @@ private:
     std::vector<RaisedInfo> m_raised_per_layer;
 
     // Phase 3a: resolved overrides for "Any (Type)" supports.
-    // Keyed by (object, layer_idx, is_interface). Gcode emitters consult this map
-    // before calling the default resolver.
-    std::map<std::tuple<const PrintObject*, size_t, bool>, unsigned int> m_any_support_overrides;
+    // Keyed by (support_layer_ptr, is_interface).
+    std::map<std::pair<const SupportLayer*, bool>, unsigned int> m_any_support_overrides;
 };
 
 } // namespace Slic3r

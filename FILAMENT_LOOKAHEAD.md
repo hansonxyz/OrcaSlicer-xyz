@@ -1,7 +1,7 @@
 # Filament Lookahead — Multi-Layer Batched Printing for Multi-Material
 
 Branch: `filament-lookahead`
-Status: Phases 1, 2, 3a, 3c complete. Analysis produces chained towers with max-envelope zones and a complete Any-Type support override map. Preview renders zones on base + extra layers. Gcode emission / reordering (Phases 5, 6) not yet implemented — override map is dormant, support colors in preview still follow the pre-lookahead resolver.
+Status: Phases 1, 2, 3a, 3c, 5a complete. Analysis produces chained towers with max-envelope zones and a complete Any-Type support override map. Preview renders zones on base + extra layers. Any-Type support colors in the preview now reflect the override map (Phase 5a). Actual gcode reordering / batching (Phases 5b, 5c, 6) not yet implemented — towers remain informational and no extrusions are moved between layers yet.
 
 ## Goal
 
@@ -647,7 +647,13 @@ Small phase. Can be done any time relative to Phase 3; keeping it separate for c
 
 Emits markers and consults the plan. No reordering. Should produce gcode that's byte-identical to baseline except for comment lines and (where applicable) adjusted travel paths.
 
-#### 5a — Consume Any-Type override map *(Rule 2 obey-side)*
+#### 5a ✅ — Consume Any-Type override map *(Rule 2 obey-side)*
+
+Completed 2026-04-21. `GCode.cpp:4699` now consults `m_lookahead_plan->override_for_support(&support_layer, role)` first and only falls through to `resolve_any_type_support_filament()` when no override exists. Plan key was changed from `(object, layer_idx, role)` to `(SupportLayer*, role)` for cleaner consumer-side access. Also injects overridden extruders into the local `tool_ordering.layer_tools()[...].extruders` list after plan construction, so the per-extruder gcode emission loop actually iterates for the overridden extruder. In practice `injected=0` is common because the overridden extruder is typically already active on that layer for model extrusion. `ToolOrdering.cpp:746` resolver was NOT modified — wipe-tower scheduling still uses the default resolver's choice, which means occasional purge-band mismatch but no correctness issue for the preview.
+
+**Verified by**: user testing confirmed support colors in preview now match the override map (Any supports adjacent to a tower get the tower's filament; leftover supports use a non-lookahead-active on-layer filament).
+
+#### 5a (original spec) — Consume Any-Type override map *(Rule 2 obey-side)*
 
 **Technical details:**
 - In `_do_export` around line 4699 where Any-Type support filament resolution happens, consult `m_plan.override_for_support(entity_id)` first.
