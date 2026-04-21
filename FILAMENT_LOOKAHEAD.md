@@ -673,7 +673,20 @@ Completed 2026-04-21. `GCode.cpp:4699` now consults `m_lookahead_plan->override_
 
 **Testable by**: slice with lookahead, inspect tool change order, confirm the Any supports adjacent to candidate zones use the zone's filament.
 
-#### 5b — Normal-first print order within a layer *(Rule 8 steps 1–3)*
+#### 5b ⏸ — Normal-first print order within a layer *(Rule 8 steps 1–3)* — SKIPPED FOR V1
+
+Skipped 2026-04-21 after initial attempt caused wipe tower generation failure. Root cause: the wipe tower pre-generates exactly N tool-change entries per layer based on the original `tool_ordering`; stable-partitioning the extruder list to put tower-mode last can introduce an extra tool change when the previous layer's final extruder is not first in the reordered list, overflowing the pre-gen array.
+
+Revisited rationale for why 5b isn't needed in v1:
+- **Flush-into-infill discharge ordering**: moot because Rule 9 Option 1 globally disables flush-into-infill when lookahead is on.
+- **Travel predictability**: Phase 5d travel avoidance handles the active-zone-after-tower-printed case regardless of order.
+- **Phase 6 insertion anchor**: `LOOKAHEAD_BLOCK_BEGIN/END` markers from Phase 5c give Phase 6 exactly the anchor it needs without depending on a specific extruder order.
+
+Tower-mode tracking (`m_tower_filaments_per_layer` + `tower_filaments_on_layer()` accessor) was kept — it's used by Phase 5c to decide which spans to wrap with markers.
+
+If Phase 6's post-processor rewrite ends up needing strict normal-first ordering anyway (e.g., for flush-into-infill conditional re-enable, Option 2 of Rule 9), revisit 5b by either (a) regenerating the wipe tower after reorder, or (b) doing the reorder inside `process_layer()` at emission time without mutating `tool_ordering`.
+
+#### 5b (original spec) — Normal-first print order within a layer *(Rule 8 steps 1–3)*
 
 **Technical details:**
 - Modify the extruder loop in `process_layer()` to emit extrusions in two passes:
@@ -931,3 +944,4 @@ These are known simplifications that can be revisited once the feature is functi
 - **2026-04 Phase 3c**: replaced disappearing-only strategy with greedy chained towers. Per-extruder while-loop accepts the tallest possible tower then advances past its top. Added self-content check in cascade (prevents "empty but clear" layers from extending towers), base-layer zone registration (Rule 8), and max-envelope zone sizing (closes under-coverage on widening towers). Added verbose `[FLA]`-tagged logging at warning/info per the development-logging mandate.
 - **2026-04 Phase 5a**: consume Any-Type override map in `GCode.cpp:4699` (short-circuits the default resolver); inject overridden extruders into `tool_ordering`'s per-layer extruder lists (safeguard for cases where the override extruder isn't already active on the layer). Plan key refactored from `(object, layer_idx, is_interface)` to `(SupportLayer*, is_interface)` for cleaner consumer access. Preview now reflects Any-Type overrides.
 - **2026-04-21 Phase 3b**: filament-completeness precomputation. Towers now gated by Rule 4 — rejected at bases where stray extrusion exists outside isolated clusters, truncated in cascades when a subsequent layer is incomplete. Caught the "turquoise tower with stray turquoise elsewhere on layer" class of invalid plan.
+- **2026-04-21 Phase 5b skipped**: initial attempt to stable-partition `layer_tools.extruders` caused wipe tower generation failure (pre-gen tool-change array overflow). Reverted. Phase 5c markers will serve as Phase 6's insertion anchor without needing the reorder. Kept the `tower_filaments_on_layer()` accessor and per-layer tracking populated during build for Phase 5c's use.

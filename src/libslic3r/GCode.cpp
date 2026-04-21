@@ -3369,6 +3369,18 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
                 }
                 BOOST_LOG_TRIVIAL(warning) << "[FLA] Phase 5a: injected " << injected
                     << " overridden extruder(s) into tool_ordering";
+
+                // Phase 5b NOTE: normal-first ordering by stable-partitioning
+                // layer_tools.extruders was tried but caused wipe tower generation
+                // to fail. The wipe tower pre-generates exactly N tool-change
+                // entries per layer based on the original ordering; reordering can
+                // introduce an extra tool change on layers where the previous
+                // layer's final extruder is not the first entry of the reordered
+                // list, which overflows the pre-generated tool-change array.
+                // Normal-first ordering is deferred to Phase 6's post-processor
+                // which rewrites the wipe tower per Rule 10 anyway. The
+                // `tower_filaments_on_layer()` accessor remains available for
+                // Phase 5c (markers) and Phase 6 to consume.
             }
 
             // Process all layers of all objects (non-sequential mode) with a parallel pipeline:

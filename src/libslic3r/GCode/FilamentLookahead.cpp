@@ -43,6 +43,7 @@ void FilamentLookaheadPlan::build(const Print &print,
     m_already_printed.clear();
     m_raised_per_layer.clear();
     m_any_support_overrides.clear();
+    m_tower_filaments_per_layer.clear();
 
     // Always-visible entry log so we can see whether analysis even started.
     BOOST_LOG_TRIVIAL(info) << "[FLA] build() entry: max_height=" << max_lookahead_height_mm
@@ -77,6 +78,7 @@ void FilamentLookaheadPlan::build(const Print &print,
 
     const size_t num_layers = layers.size();
     m_raised_per_layer.resize(num_layers);
+    m_tower_filaments_per_layer.assign(num_layers, std::set<unsigned int>{});
 
     size_t total_instances = 0;
     for (const PrintObject *pobj : print.objects())
@@ -576,6 +578,8 @@ void FilamentLookaheadPlan::build(const Print &print,
             // including the base layer. Per Rule 8, once the tower is printed on the base
             // layer, any subsequent travel on that same layer must avoid its XY footprint
             // because the tower will already be sticking up above current-layer Z.
+            // Phase 5b: also mark the tower's filament as "tower-mode" on each covered
+            // layer so emission can defer it to the tower pass (normal-first ordering).
             for (size_t k = 0; k <= truncated_extra; ++k) {
                 size_t future_li = li + k;
                 if (future_li < m_raised_per_layer.size()) {
@@ -583,6 +587,7 @@ void FilamentLookaheadPlan::build(const Print &print,
                         m_raised_per_layer[future_li].max_z, entry.raised_z);
                     for (const auto &eb : entry.exclusion_bboxes)
                         m_raised_per_layer[future_li].exclusion_bboxes.push_back(eb);
+                    m_tower_filaments_per_layer[future_li].insert(ext_id);
                 }
             }
 
@@ -739,6 +744,13 @@ std::vector<BoundingBox> FilamentLookaheadPlan::exclusion_zones(size_t layer_idx
     if (layer_idx < m_raised_per_layer.size())
         return m_raised_per_layer[layer_idx].exclusion_bboxes;
     return {};
+}
+
+const std::set<unsigned int>& FilamentLookaheadPlan::tower_filaments_on_layer(size_t layer_idx) const
+{
+    if (layer_idx < m_tower_filaments_per_layer.size())
+        return m_tower_filaments_per_layer[layer_idx];
+    return m_empty_filaments;
 }
 
 std::optional<unsigned int> FilamentLookaheadPlan::override_for_support(

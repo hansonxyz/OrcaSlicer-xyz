@@ -48,6 +48,13 @@ public:
     // Get all exclusion zone bboxes active on a given layer.
     std::vector<BoundingBox> exclusion_zones(size_t layer_idx) const;
 
+    // Phase 5b: set of filament (extruder) ids whose tower covers this layer
+    // (either as base layer or as an extra-layer of a tower rooted below).
+    // Used to partition the per-layer extruder list into normal-mode first,
+    // tower-mode last, so that by the time tower emission begins the normal
+    // regions for this layer are already printed (Rule 8).
+    const std::set<unsigned int>& tower_filaments_on_layer(size_t layer_idx) const;
+
     // Phase 3a: Any-Type support filament override.
     // Key: (support_layer_ptr, is_interface). SupportLayer pointers are stable
     // between Phase A analysis and gcode emission since Print state isn't mutated.
@@ -77,6 +84,11 @@ private:
         std::vector<BoundingBox> exclusion_bboxes;
     };
     std::vector<RaisedInfo> m_raised_per_layer;
+
+    // Phase 5b: per-layer set of filaments whose tower covers this layer
+    // (base or extra). Populated when each tower is accepted during build().
+    std::vector<std::set<unsigned int>> m_tower_filaments_per_layer;
+    std::set<unsigned int>              m_empty_filaments; // for out-of-range returns
 
     // Phase 3a: resolved overrides for "Any (Type)" supports.
     // Keyed by (support_layer_ptr, is_interface).
