@@ -753,6 +753,23 @@ const std::set<unsigned int>& FilamentLookaheadPlan::tower_filaments_on_layer(si
     return m_empty_filaments;
 }
 
+std::optional<FilamentLookaheadPlan::TowerInfo>
+FilamentLookaheadPlan::tower_info_for(size_t layer_idx, unsigned int ext_id) const
+{
+    for (const auto &[key, entry] : m_plan) {
+        const auto &[base_li, eid] = key;
+        if (eid != ext_id) continue;
+        if (layer_idx < base_li || layer_idx > base_li + entry.extra_layers) continue;
+        TowerInfo t;
+        t.base_layer   = base_li;
+        t.stack_index  = layer_idx - base_li;
+        t.extra_layers = entry.extra_layers;
+        t.extruder_id  = ext_id;
+        return t;
+    }
+    return std::nullopt;
+}
+
 std::optional<unsigned int> FilamentLookaheadPlan::override_for_support(
     const SupportLayer *support_layer, bool is_interface) const
 {

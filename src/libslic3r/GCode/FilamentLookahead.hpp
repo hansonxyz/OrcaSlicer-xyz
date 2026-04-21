@@ -55,6 +55,17 @@ public:
     // regions for this layer are already printed (Rule 8).
     const std::set<unsigned int>& tower_filaments_on_layer(size_t layer_idx) const;
 
+    // Phase 5c: info for wrapping an extruder's extrusion span with
+    // LOOKAHEAD_BLOCK_BEGIN/END comments. Returns the matching tower if
+    // (layer_idx, ext_id) belongs to one (base or extra), nullopt otherwise.
+    struct TowerInfo {
+        size_t      base_layer   = 0;
+        size_t      stack_index  = 0; // 0=base, 1..=extra layer k
+        size_t      extra_layers = 0; // tower height above base
+        unsigned int extruder_id = 0;
+    };
+    std::optional<TowerInfo> tower_info_for(size_t layer_idx, unsigned int ext_id) const;
+
     // Phase 3a: Any-Type support filament override.
     // Key: (support_layer_ptr, is_interface). SupportLayer pointers are stable
     // between Phase A analysis and gcode emission since Print state isn't mutated.

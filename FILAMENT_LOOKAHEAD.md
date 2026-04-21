@@ -1,7 +1,7 @@
 # Filament Lookahead — Multi-Layer Batched Printing for Multi-Material
 
 Branch: `filament-lookahead`
-Status: Phases 1, 2, 3a, 3b, 3c, 5a complete. Analysis produces chained towers with max-envelope zones, gated by Rule 4 filament-completeness, and a complete Any-Type support override map. Preview renders zones on base + extra layers. Any-Type support colors in the preview now reflect the override map (Phase 5a). Actual gcode reordering / batching (Phases 5b, 5c, 6) not yet implemented — towers remain informational and no extrusions are moved between layers yet.
+Status: Phases 1, 2, 3a, 3b, 3c, 5a, 5c complete; 5b skipped. Gcode emission now embeds `LOOKAHEAD_LAYER_INFO` / `LOOKAHEAD_BLOCK_BEGIN/END` markers around each tower's extrusion span — the post-processor (Phase 6) can walk them directly to identify relocatable blocks. Analysis correctness gated by Rule 4 filament-completeness. Any-Type support overrides visible in preview (5a). Actual batching (Phase 6) not yet implemented — markers are present but no extrusions are moved between layers yet.
 
 ## Goal
 
@@ -702,7 +702,13 @@ If Phase 6's post-processor rewrite ends up needing strict normal-first ordering
 
 **Testable by**: slice with towers, scan `T<n>` commands in the output, verify ordering.
 
-#### 5c — Emit LOOKAHEAD_BLOCK markers *(step 8)*
+#### 5c ✅ — Emit LOOKAHEAD_BLOCK markers *(step 8)*
+
+Completed 2026-04-21. Emits `LOOKAHEAD_LAYER_INFO layer=L tower_filaments=<csv>` at the top of each layer, then wraps each extruder's iteration in the extruder loop with `LOOKAHEAD_BLOCK_BEGIN layer=L extruder=E base_layer=B stack_index=K extra_layers=N role=base|extra` and a matching `LOOKAHEAD_BLOCK_END`. Markers are emitted only when `m_lookahead_plan->tower_info_for(layer, ext_id)` returns a match, so layers without towers are unchanged.
+
+**Verified by**: user tested on 4-filament model; gcode contains 392 LAYER_INFO lines (one per layer), 77 balanced BLOCK_BEGIN/END pairs matching the 77 tower layers across 9 accepted towers. Overlapping-towers-on-same-layer case (layer 244 has ext 3 base + ext 0 stack_index=2 extra) correctly produces two distinct BLOCK pairs.
+
+#### 5c (original spec) — Emit LOOKAHEAD_BLOCK markers *(step 8)*
 
 **Technical details:**
 - Wrap each tower's extrusion span (base or extra-layer zone) with:
@@ -945,3 +951,4 @@ These are known simplifications that can be revisited once the feature is functi
 - **2026-04 Phase 5a**: consume Any-Type override map in `GCode.cpp:4699` (short-circuits the default resolver); inject overridden extruders into `tool_ordering`'s per-layer extruder lists (safeguard for cases where the override extruder isn't already active on the layer). Plan key refactored from `(object, layer_idx, is_interface)` to `(SupportLayer*, is_interface)` for cleaner consumer access. Preview now reflects Any-Type overrides.
 - **2026-04-21 Phase 3b**: filament-completeness precomputation. Towers now gated by Rule 4 — rejected at bases where stray extrusion exists outside isolated clusters, truncated in cascades when a subsequent layer is incomplete. Caught the "turquoise tower with stray turquoise elsewhere on layer" class of invalid plan.
 - **2026-04-21 Phase 5b skipped**: initial attempt to stable-partition `layer_tools.extruders` caused wipe tower generation failure (pre-gen tool-change array overflow). Reverted. Phase 5c markers will serve as Phase 6's insertion anchor without needing the reorder. Kept the `tower_filaments_on_layer()` accessor and per-layer tracking populated during build for Phase 5c's use.
+- **2026-04-21 Phase 5c**: emit `LOOKAHEAD_LAYER_INFO` + `LOOKAHEAD_BLOCK_BEGIN/END` markers in `process_layer()`. 77 balanced BLOCK pairs on test model match exactly the sum of tower-layer counts from 9 accepted towers. Added `tower_info_for(layer_idx, ext_id)` accessor returning `{base_layer, stack_index, extra_layers, extruder_id}` for the wrapping logic.

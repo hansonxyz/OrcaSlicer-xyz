@@ -5119,11 +5119,43 @@ LayerResult GCode::process_layer(
                 " z_max=" + std::to_string(raised_z) +
                 "\n";
         }
+
+        // Phase 5c: LOOKAHEAD_LAYER_INFO comment lists which filaments are
+        // tower-mode on this layer. Post-processor (Phase 6) uses this to know
+        // which extruders' extrusion blocks should be eligible for relocation.
+        const auto &tower_set = m_lookahead_plan->tower_filaments_on_layer(m_current_layer_idx);
+        std::string tower_csv;
+        for (auto it = tower_set.begin(); it != tower_set.end(); ++it) {
+            if (it != tower_set.begin()) tower_csv += ",";
+            tower_csv += std::to_string(*it);
+        }
+        gcode += "; LOOKAHEAD_LAYER_INFO layer=" + std::to_string(m_current_layer_idx)
+              + " tower_filaments=" + (tower_csv.empty() ? std::string("-") : tower_csv)
+              + "\n";
     }
 
     // Extrude the skirt, brim, support, perimeters, infill ordered by the extruders.
     for (unsigned int extruder_id : layer_tools.extruders)
     {
+        // Phase 5c: if this extruder has a tower covering this layer, wrap its
+        // emission span with LOOKAHEAD_BLOCK_BEGIN/END so the post-processor
+        // (Phase 6) can identify it for relocation. Skirt/brim emission happens
+        // within the loop body but is always on the first layer where towers
+        // don't exist, so this wrapping doesn't disturb skirt/brim gcode.
+        std::optional<FilamentLookaheadPlan::TowerInfo> tower_info;
+        if (m_lookahead_plan && m_lookahead_plan->enabled())
+            tower_info = m_lookahead_plan->tower_info_for(m_current_layer_idx, extruder_id);
+        if (tower_info) {
+            gcode += "; LOOKAHEAD_BLOCK_BEGIN"
+                   " layer=" + std::to_string(m_current_layer_idx)
+                 + " extruder=" + std::to_string(extruder_id)
+                 + " base_layer=" + std::to_string(tower_info->base_layer)
+                 + " stack_index=" + std::to_string(tower_info->stack_index)
+                 + " extra_layers=" + std::to_string(tower_info->extra_layers)
+                 + " role=" + (tower_info->stack_index == 0 ? "base" : "extra")
+                 + "\n";
+        }
+
         if (print.config().skirt_type == stCombined && !print.skirt().empty())
             gcode += generate_skirt(print, print.skirt(), Point(0, 0), layer.object()->config().skirt_start_angle, layer_tools, layer,
                                     extruder_id);
@@ -5425,6 +5457,16 @@ LayerResult GCode::process_layer(
             }
         }
 
+        // Phase 5c: close the LOOKAHEAD_BLOCK wrapper if we opened one for this
+        // extruder at the top of the iteration.
+        if (tower_info) {
+            gcode += "; LOOKAHEAD_BLOCK_END"
+                   " layer=" + std::to_string(m_current_layer_idx)
+                 + " extruder=" + std::to_string(extruder_id)
+                 + " base_layer=" + std::to_string(tower_info->base_layer)
+                 + " stack_index=" + std::to_string(tower_info->stack_index)
+                 + "\n";
+        }
     }
     if (first_layer) {
         for (auto iter = by_extruder.begin(); iter != by_extruder.end(); ++iter) {
