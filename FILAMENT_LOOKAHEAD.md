@@ -1,11 +1,30 @@
 # Filament Lookahead — Multi-Layer Batched Printing for Multi-Material
 
 Branch: `filament-lookahead`
-Status: analysis + visualization working (Phase 2); gcode reorder not yet implemented (Phase 4–5 pending).
+Status: Phases 1, 2, 3a, 3c complete. Analysis produces chained towers with max-envelope zones and a complete Any-Type support override map. Preview renders zones on base + extra layers. Gcode emission / reordering (Phases 5, 6) not yet implemented — override map is dormant, support colors in preview still follow the pre-lookahead resolver.
 
 ## Goal
 
 On single-nozzle multi-material printers (e.g. X1C / A1 with AMS), when a region printed with one filament is spatially isolated from other filaments on the plate, print multiple consecutive layers of that region before switching filaments — instead of switching on every layer. Each skipped filament change saves purge material and ~30–60 seconds of tool-change time. On typical MMU painted models, a "disappearing extruder" case (e.g. a gold nub on top of a body) can eliminate *all* subsequent tool changes for that filament, saving hours and 50%+ of its purge.
+
+## Development mandate — verbose logging
+
+During development of this feature, every non-trivial decision point in the analysis, planning, and emission code **must** emit a log entry at `info` level or above, tagged with `[FLA]`, describing:
+
+- What the step received as input (layer range, filament ids, cluster sizes, support buckets, etc.)
+- What decision was made (ACCEPT / REJECT / CLAIM / ASSIGN / SKIP) and the reason
+- The resulting state (counts, chosen extruder ids, truncation heights, etc.)
+
+Rationale: the user's test feedback will usually be "it didn't work" or "the color's wrong" without precise detail about layer numbers or filament ids. The log is the authoritative record. Key facts:
+
+- **Log file location**: `C:\Users\brian\AppData\Roaming\OrcaSlicer\log` — one file per slicer session, rotated per launch.
+- **After each user test**, read the relevant log file directly and trace the `[FLA]` entries to reconstruct what the analysis did. Do not rely on the user to paste log snippets — fetch them yourself.
+- **Use `info` or `warning` level**, never `debug`. The default log filter in OrcaSlicer may suppress `debug` depending on the user's `log_severity_level` preference.
+- **Log even "boring" successes** (e.g. "Phase 3a skipped: no Any-Type supports"). Silence is ambiguous — an absent log line can mean "skipped intentionally" or "code didn't run". Explicit skip lines are the only way to tell.
+- **Early-return logs are mandatory**. Each guard that exits `build()` early (no objects, single filament, etc.) must log its reason before returning.
+- **Keep verbose logging until the feature is production-validated**. Remove or demote to `debug` in a later cleanup phase once Phase 7 is complete.
+
+Typical log prefix pattern: `[FLA] <phase_name> <decision>: <key=value pairs explaining the decision>`.
 
 ## Terminology
 
@@ -491,7 +510,19 @@ Upgrade bbox isolation checks to polygon offset + intersect. Deferred unless bbo
 
 ---
 
-### Phase 3 — Complete analysis stage (location A)
+### Phase 3a ✅ — Any-Type support filament resolution
+
+Walk support layers collects "Any (Type)" buckets (keyed by object × layer × role with their material type name). After the tower cascade, Phase A claims compatible intersecting buckets for each tower's filament; Phase B assigns remaining buckets via the default resolver but restricted to non-lookahead-active filaments (Rule 5). Produces `m_any_support_overrides: {object, layer_idx, is_interface} -> extruder_id`, accessed via `override_for_support()`. Granularity is per-(object, layer, role) to match the existing resolver — finer per-entity would require a gcode-emitter refactor. Consumer is Phase 5a.
+
+**Verifiable by**: log shows `[FLA] Phase A CLAIM` / `[FLA] Phase B ASSIGN` lines; final summary shows override count equal to bucket count in practice.
+
+### Phase 3c ✅ — Chained towers (greedy)
+
+Replaced the v1 disappearing-extruder-only strategy. Per-extruder while-loop walks all layers; accepts the tallest possible tower (bounded by `max_lookahead_height` and cascade collisions); advances past its top; starts a new tower above. Cascade also checks that the tower's own filament has entities inside the zone on each layer (truncates otherwise — previously empty-but-clear layers incorrectly extended towers). Per Rule 8, exclusion zones register on the base layer in addition to extras so travel avoidance activates once the tower is printed. Zone shape is now the **max XY envelope** (union of the tower's filament entities across all its layers), not just the base cluster bbox — closes under-coverage when the model widens along Z.
+
+**Verifiable by**: log shows `[FLA] TOWER ACCEPTED` lines per tower; preview shows multiple stacked zones where a single zone existed before; zone XY now covers the widest point of the tower.
+
+### Phase 3 — Remaining analysis stage work (location A)
 
 Produces the plan consumed by locations B, C, D, E. Sub-phases build it up; 3e exposes the final interface.
 
@@ -854,6 +885,15 @@ Target: total slicing overhead from lookahead should be <10% of baseline slicing
 - **GCodeProcessor parsing**: comments parsed back into the struct for file-loaded gcode.
 - **GCodeViewer rendering**: zones drawn as yellow translucent rectangles, filtered by the vertical layer slider's visible range, toggleable via "Travel Exclusion Zones" in FeatureType / Speed / ActualSpeed legends.
 
+## Future polish (post-v1)
+
+These are known simplifications that can be revisited once the feature is functionally complete:
+
+- **Per-layer contour exclusion zones.** Currently each tower has a single XY footprint (max envelope across all its layers). Cleaner visual + tighter travel routing would come from a per-layer polygon that contours the actual extrusion on that layer. Touches the `LookaheadEntry` struct (add `std::vector<BoundingBox>` or `std::vector<ExPolygons>` per layer), the renderer (`GCodeViewer`'s zone geometry currently uses a single `z_max` + single bbox per layer — would need varying XY per Z slab), and Phase 5d travel avoidance (layer-specific lookup). Defer to after Phase 7 polish.
+- **Envelope-vs-clearance gap.** When the envelope grows beyond the base cluster bbox, another filament could theoretically sit within `min_clearance_distance` of the envelope but not of the base cluster — the cascade check wouldn't catch it. In practice this is rare since envelope growth is usually small relative to clearance. The per-layer contour fix above also resolves this.
+- **Polygon-based isolation** (Phase 2.5). Currently isolation uses inflated bboxes. Upgrade to polygon offset + intersect if bbox approximation causes false positives in real prints.
+- **Tower footprint auto-resize after lookahead planning.** With fewer tool changes, the wipe tower could be narrower. V1 accepts the over-sized tower.
+
 ## Open design questions
 
 - **Layer adhesion timing**: printing multiple layers of one region while others wait could affect inter-layer bonding if the delay is too long. Cap max lookahead layers accordingly — unclear what the right ceiling is.
@@ -875,3 +915,5 @@ Target: total slicing overhead from lookahead should be <10% of baseline slicing
 
 - **2026-04 Phase 1**: deleted ~120-line dead inline-printing block, removed debug `fprintf` spam. ~150-line net reduction. Analysis and visualization behavior unchanged.
 - **2026-04 Phase 2**: added support-layer walk classifying `support_fills` entities by role (base vs interface) and mapping to object layers by `print_z`. Added per-layer cascade truncation in the disappearing branch. Gated off bbox-isolated-but-continuing strategy for v1. Skips "Any [Type]" supports with a known-limitation note (addressed in Phase 3a).
+- **2026-04 Phase 3a**: Any-Type support bucketing + Phase A (zone claim) + Phase B (leftover assignment) building the `m_any_support_overrides` map. Consumer (Phase 5a) not yet implemented — map is produced and logged only.
+- **2026-04 Phase 3c**: replaced disappearing-only strategy with greedy chained towers. Per-extruder while-loop accepts the tallest possible tower then advances past its top. Added self-content check in cascade (prevents "empty but clear" layers from extending towers), base-layer zone registration (Rule 8), and max-envelope zone sizing (closes under-coverage on widening towers). Added verbose `[FLA]`-tagged logging at warning/info per the development-logging mandate.

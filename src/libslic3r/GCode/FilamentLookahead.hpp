@@ -5,10 +5,13 @@
 #include <vector>
 #include <map>
 #include <set>
+#include <tuple>
+#include <optional>
 
 namespace Slic3r {
 
 class Print;
+class PrintObject;
 class Layer;
 
 // Filament Lookahead: pre-analysis of which extruder regions on which layers
@@ -44,6 +47,14 @@ public:
     // Get all exclusion zone bboxes active on a given layer.
     std::vector<BoundingBox> exclusion_zones(size_t layer_idx) const;
 
+    // Phase 3a: Any-Type support filament override.
+    // Key: (object, support_layer_idx_matched_to_object_layer, is_interface).
+    // Value: 0-based extruder id the "Any (Type)" support should be resolved to.
+    // Consumed by Phase 5a in GCode.cpp and ToolOrdering.cpp to short-circuit the
+    // default resolver. Returns empty optional if no override applies.
+    std::optional<unsigned int> override_for_support(
+        const PrintObject *object, size_t layer_idx, bool is_interface) const;
+
 private:
     bool m_enabled = false;
 
@@ -59,6 +70,11 @@ private:
         std::vector<BoundingBox> exclusion_bboxes;
     };
     std::vector<RaisedInfo> m_raised_per_layer;
+
+    // Phase 3a: resolved overrides for "Any (Type)" supports.
+    // Keyed by (object, layer_idx, is_interface). Gcode emitters consult this map
+    // before calling the default resolver.
+    std::map<std::tuple<const PrintObject*, size_t, bool>, unsigned int> m_any_support_overrides;
 };
 
 } // namespace Slic3r

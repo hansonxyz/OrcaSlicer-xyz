@@ -42,25 +42,38 @@ void FilamentLookaheadPlan::build(const Print &print,
     m_plan.clear();
     m_already_printed.clear();
     m_raised_per_layer.clear();
+    m_any_support_overrides.clear();
+
+    // Always-visible entry log so we can see whether analysis even started.
+    BOOST_LOG_TRIVIAL(info) << "[FLA] build() entry: max_height=" << max_lookahead_height_mm
+        << "mm clearance=" << min_clearance_distance_mm << "mm"
+        << " num_filaments=" << print.config().filament_diameter.values.size()
+        << " num_objects=" << print.objects().size()
+        << " print_sequence=" << (print.config().print_sequence == PrintSequence::ByLayer ? "ByLayer" : "ByObject");
 
     // Only works in ByLayer mode with multiple extruders
-    if (print.config().print_sequence != PrintSequence::ByLayer)
+    if (print.config().print_sequence != PrintSequence::ByLayer) {
+        BOOST_LOG_TRIVIAL(info) << "[FLA] early-return: print_sequence != ByLayer — lookahead disabled for sequential print";
         return;
-    if (print.config().filament_diameter.values.size() <= 1)
+    }
+    if (print.config().filament_diameter.values.size() <= 1) {
+        BOOST_LOG_TRIVIAL(info) << "[FLA] early-return: only one filament configured, nothing to lookahead";
         return;
+    }
 
     const coord_t clearance_scaled = scaled<coord_t>(min_clearance_distance_mm);
 
-    if (print.objects().empty())
+    if (print.objects().empty()) {
+        BOOST_LOG_TRIVIAL(info) << "[FLA] early-return: no print objects";
         return;
+    }
 
-    // Analyze ALL print objects, not just the first
-    // For each object, compute per-extruder bboxes per layer using lslices
-    // and the actual MMU segmentation data (not just region config)
     const PrintObject *obj = print.objects().front();
     const auto &layers = obj->layers();
-    if (layers.empty())
+    if (layers.empty()) {
+        BOOST_LOG_TRIVIAL(info) << "[FLA] early-return: first object has zero layers";
         return;
+    }
 
     const size_t num_layers = layers.size();
     m_raised_per_layer.resize(num_layers);
@@ -133,6 +146,19 @@ void FilamentLookaheadPlan::build(const Print &print,
     // We check isolation on the single-object level since all instances share the same geometry
     std::vector<std::map<unsigned int, BoundingBox>> layer_extruder_bboxes_single(num_layers);
 
+    // Phase 3a: side-channel bucket for "Any (Type)" supports.
+    // These can't be attributed to a concrete extruder during Phase 2 analysis, so we
+    // defer their resolution to Phase A (zone-claiming) + Phase B (leftover assignment)
+    // that run after the tower cascade.
+    struct AnyTypeBucket {
+        const PrintObject *object       = nullptr;
+        size_t             layer_idx    = 0;
+        bool               is_interface = false;
+        std::string        type_name;
+        std::vector<BoundingBox> entity_bboxes; // plate coords, already instance-translated
+    };
+    std::vector<AnyTypeBucket> any_buckets;
+
     // Helper to append entity bboxes for a given extruder into both storage buckets.
     auto ingest_entity_bboxes = [&](size_t li, unsigned int extruder_id,
                                     const std::vector<BoundingBox> &entity_bboxes,
@@ -160,6 +186,11 @@ void FilamentLookaheadPlan::build(const Print &print,
 
     for (const PrintObject *pobj : print.objects()) {
         const auto &obj_layers = pobj->layers();
+        BOOST_LOG_TRIVIAL(info) << "[FLA] object=" << pobj << " layers=" << obj_layers.size()
+            << " support_layers=" << pobj->support_layers().size()
+            << " support_filament=" << pobj->config().support_filament.value
+            << " support_interface_filament=" << pobj->config().support_interface_filament.value
+            << " instances=" << pobj->instances().size();
         for (size_t li = 0; li < std::min(obj_layers.size(), num_layers); ++li) {
             const Layer &layer = *obj_layers[li];
             for (size_t ri = 0; ri < layer.regions().size(); ++ri) {
@@ -229,34 +260,99 @@ void FilamentLookaheadPlan::build(const Print &print,
                 ingest_entity_bboxes(matched_li, base_extruder, base_boxes, pobj);
             if (iface_extruder != (unsigned int)-1)
                 ingest_entity_bboxes(matched_li, iface_extruder, iface_boxes, pobj);
+
+            // Phase 3a: bucket "Any (Type)" supports for later claim/assign.
+            const int base_val = pobj->config().support_filament.value;
+            if (is_support_filament_any_type(base_val) && !base_boxes.empty()) {
+                AnyTypeBucket b;
+                b.object       = pobj;
+                b.layer_idx    = matched_li;
+                b.is_interface = false;
+                b.type_name    = support_filament_any_type_name(base_val);
+                for (const PrintInstance &inst : pobj->instances())
+                    for (const auto &eb : base_boxes) {
+                        BoundingBox pb = eb;
+                        pb.translate(inst.shift);
+                        b.entity_bboxes.push_back(pb);
+                    }
+                if (!b.type_name.empty())
+                    any_buckets.push_back(std::move(b));
+            }
+            const int iface_val = pobj->config().support_interface_filament.value;
+            if (is_support_filament_any_type(iface_val) && !iface_boxes.empty()) {
+                AnyTypeBucket b;
+                b.object       = pobj;
+                b.layer_idx    = matched_li;
+                b.is_interface = true;
+                b.type_name    = support_filament_any_type_name(iface_val);
+                for (const PrintInstance &inst : pobj->instances())
+                    for (const auto &eb : iface_boxes) {
+                        BoundingBox pb = eb;
+                        pb.translate(inst.shift);
+                        b.entity_bboxes.push_back(pb);
+                    }
+                if (!b.type_name.empty())
+                    any_buckets.push_back(std::move(b));
+            }
         }
     }
 
-    // Phase 2 restricts the analysis to the "disappearing extruder" case only:
-    // a candidate extruder E exists on layer L (and possibly earlier layers),
-    // stops existing within the lookahead window above L, and other extruders
-    // continue above — meaning batching all of E's remaining layers eliminates
-    // every subsequent tool change for E.
-    //
-    // The bbox-isolated-but-continuing strategy (extruder present on every layer
-    // but spatially far from others) is intentionally disabled for v1 — it's
-    // retained conceptually for future work once the disappearing case is proven.
-    for (size_t li = 0; li < num_layers; ++li) {
-        const auto &extruder_bboxes = layer_extruder_bboxes_single[li];
+    // Summary of per-layer extruder presence (first+last layer each extruder appears)
+    {
+        std::map<unsigned int, std::pair<size_t, size_t>> ext_first_last;
+        for (size_t li = 0; li < num_layers; ++li)
+            for (const auto &[eid, _] : layer_extruder_bboxes_single[li]) {
+                auto it = ext_first_last.find(eid);
+                if (it == ext_first_last.end())
+                    ext_first_last[eid] = {li, li};
+                else {
+                    it->second.first  = std::min(it->second.first, li);
+                    it->second.second = std::max(it->second.second, li);
+                }
+            }
+        BOOST_LOG_TRIVIAL(warning) << "[FLA] extruder span summary (0-based extruder id -> [first_layer, last_layer]):";
+        const auto &ftypes = print.config().filament_type.values;
+        for (const auto &[eid, span] : ext_first_last) {
+            const std::string ftype = (eid < ftypes.size()) ? ftypes[eid] : std::string("?");
+            BOOST_LOG_TRIVIAL(warning) << "[FLA]   extruder " << eid << " (type=" << ftype
+                << ") -> layers [" << span.first << ", " << span.second << "] of " << num_layers
+                << (span.second + 1 < num_layers ? " (disappears before end - CANDIDATE)" : " (CONTINUES to print end - not eligible in v1)");
+        }
+        BOOST_LOG_TRIVIAL(info) << "[FLA] any-type support buckets collected: " << any_buckets.size();
+        for (const auto &b : any_buckets)
+            BOOST_LOG_TRIVIAL(info) << "[FLA]   any-bucket obj=" << b.object << " layer=" << b.layer_idx
+                << " role=" << (b.is_interface ? "interface" : "base")
+                << " type=" << b.type_name << " entities=" << b.entity_bboxes.size();
+    }
 
-        // Need at least 2 extruders on this layer for a tool change to exist
-        if (extruder_bboxes.size() < 2)
-            continue;
+    // Phase 3c: greedy chained-tower planning. For each extruder, walk upward
+    // from the first layer it appears on and greedily build as-tall-as-possible
+    // towers (bounded by max_lookahead_height, cascade-truncated by collisions
+    // with other extruders' entities). After accepting a tower, skip the outer
+    // index past its top layer and start the next tower above it. This replaces
+    // the v1 disappearing-extruder-only strategy and produces chained towers
+    // through the full height of each isolated filament region.
+    std::set<unsigned int> all_extruders;
+    for (size_t li = 0; li < num_layers; ++li)
+        for (const auto &[eid, _] : layer_extruder_bboxes_single[li])
+            all_extruders.insert(eid);
 
-        for (const auto &[ext_id, ext_bbox] : extruder_bboxes) {
+    for (unsigned int ext_id : all_extruders) {
+        size_t li = 0;
+        while (li < num_layers) {
+            const auto &extruder_bboxes = layer_extruder_bboxes_single[li];
+            // Extruder must be present on this base layer
+            if (!extruder_bboxes.count(ext_id)) { ++li; continue; }
+            // Need at least 2 extruders on this layer for a tool change to exist
+            if (extruder_bboxes.size() < 2) { ++li; continue; }
+
             double layer_height = (li + 1 < num_layers)
                 ? (layers[li + 1]->print_z - layers[li]->print_z) : layers[li]->height;
             size_t max_look = (size_t)(max_lookahead_height_mm / layer_height);
-            if (max_look == 0)
-                continue;
+            if (max_look == 0) { ++li; continue; }
 
-            // Find this extruder's last contiguous layer (must be present every layer
-            // from li onward, disappearing at some point within max_look).
+            // Find the last contiguous layer where ext_id is present, bounded by window.
+            // Unlike v1, we TRUNCATE at window edge rather than rejecting the base.
             size_t last_present = li;
             for (size_t k = 1; k <= max_look && li + k < num_layers; ++k) {
                 if (layer_extruder_bboxes_single[li + k].count(ext_id))
@@ -264,33 +360,25 @@ void FilamentLookaheadPlan::build(const Print &print,
                 else
                     break;
             }
-            if (last_present == li)
-                continue; // extruder only exists on this layer — no runway to batch
-            if (last_present >= li + max_look)
-                continue; // still present at end of window — not a disappearing case
-            if (last_present + 1 >= num_layers)
-                continue; // print ends with this extruder — no subsequent tool changes to save
-            if (layer_extruder_bboxes_single[last_present + 1].count(ext_id))
-                continue; // safety check: extruder must be absent on the next layer
-
-            // Verify other extruders continue above last_present — otherwise there are
-            // no future tool changes to eliminate (the whole print is ending).
-            bool others_continue = false;
-            for (size_t k = last_present + 1; k < num_layers && k <= last_present + 3; ++k) {
-                if (!layer_extruder_bboxes_single[k].empty()) {
-                    others_continue = true;
-                    break;
-                }
+            if (last_present == li) {
+                BOOST_LOG_TRIVIAL(info) << "[FLA] layer=" << li << " ext=" << ext_id
+                    << " REJECT: extruder only on this layer (no runway)";
+                ++li;
+                continue;
             }
-            if (!others_continue)
-                continue;
 
-            // Cluster this extruder's plate-coord entity bboxes, filter to only clusters
-            // isolated from other extruders on the STARTING layer.
+            const auto &ext_bbox = extruder_bboxes.at(ext_id);
             auto ent_it = layer_extruder_entity_bboxes[li].find(ext_id);
-            if (ent_it == layer_extruder_entity_bboxes[li].end())
+            if (ent_it == layer_extruder_entity_bboxes[li].end()) {
+                BOOST_LOG_TRIVIAL(info) << "[FLA] layer=" << li << " ext=" << ext_id
+                    << " REJECT: no plate-coord entities (shouldn't happen if single-bbox existed)";
+                ++li;
                 continue;
+            }
             auto clusters = cluster_bboxes(ent_it->second, clearance_scaled);
+            BOOST_LOG_TRIVIAL(info) << "[FLA] layer=" << li << " ext=" << ext_id
+                << " last_present=" << last_present << " max_look=" << max_look
+                << " clusters=" << clusters.size() << " - evaluating...";
 
             // For each cluster, apply per-layer cascade truncation: starting from extra=0,
             // walk forward and check if the cluster's inflated zone is clear of other
@@ -311,12 +399,38 @@ void FilamentLookaheadPlan::build(const Print &print,
                     }
                     if (!cluster_isolated) break;
                 }
-                if (!cluster_isolated)
-                    continue; // this cluster fails isolation — skip it
+                if (!cluster_isolated) {
+                    BOOST_LOG_TRIVIAL(info) << "[FLA]   cluster at [" << cb.min.x() << "," << cb.min.y()
+                        << "]-[" << cb.max.x() << "," << cb.max.y()
+                        << "] REJECT: fails isolation on starting layer " << li;
+                    continue;
+                }
 
-                // Cascade truncate: how many layers ahead remains clear for this cluster?
+                // Cascade truncate: how many layers ahead can this tower continue?
+                // Two conditions must hold on each layer li+k:
+                //   (a) Tower's own filament must have entities INSIDE the cluster's
+                //       zone — otherwise the tower has nothing to batch on this layer.
+                //   (b) Other filaments' entities must stay clear of the inflated zone.
+                // Either failure truncates the tower at the last valid layer.
                 size_t cluster_extra = truncated_extra;
                 for (size_t k = 1; k <= truncated_extra; ++k) {
+                    // (a) self-content check — containment per Rule 3 (bbox v1)
+                    bool self_has_content = false;
+                    auto self_it = layer_extruder_entity_bboxes[li + k].find(ext_id);
+                    if (self_it != layer_extruder_entity_bboxes[li + k].end()) {
+                        for (const auto &sb : self_it->second) {
+                            if (cb.overlap(sb)) {
+                                self_has_content = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (!self_has_content) {
+                        cluster_extra = k - 1;
+                        break;
+                    }
+
+                    // (b) other-filament clearance check
                     bool clear_at_k = true;
                     for (const auto &[other_id, other_ents] : layer_extruder_entity_bboxes[li + k]) {
                         if (other_id == ext_id) continue;
@@ -336,17 +450,50 @@ void FilamentLookaheadPlan::build(const Print &print,
 
                 // Use the minimum cascade truncation across all clusters in this plan entry.
                 // All clusters must be valid for every layer they cover.
-                if (cluster_extra == 0)
-                    continue; // this cluster offers no lookahead runway
+                if (cluster_extra == 0) {
+                    BOOST_LOG_TRIVIAL(info) << "[FLA]   cluster at [" << cb.min.x() << "," << cb.min.y()
+                        << "]-[" << cb.max.x() << "," << cb.max.y()
+                        << "] REJECT: truncated to zero extra layers - another extruder intrudes immediately above";
+                    continue;
+                }
 
                 truncated_extra = std::min(truncated_extra, cluster_extra);
-                BoundingBox inflated = cb;
+
+                // Grow the zone to the max XY envelope of this filament's
+                // extrusion across every layer the tower covers (base..base+extra).
+                // Only entities connected to the base cluster (overlapping cb) are
+                // counted, so we don't accidentally annex an unrelated region.
+                // This ensures the zone covers the widest point of the tower, not
+                // just the base layer's footprint. Known v1 limitation: if the
+                // envelope grows beyond `cb` and another filament sits within
+                // `clearance` of the envelope (but not of `cb`), the cascade above
+                // won't have caught it — per-layer contour avoidance (Phase 5d /
+                // per-layer contour polish) would be the proper fix.
+                BoundingBox envelope = cb;
+                for (size_t k = 0; k <= cluster_extra; ++k) {
+                    auto self_it = layer_extruder_entity_bboxes[li + k].find(ext_id);
+                    if (self_it == layer_extruder_entity_bboxes[li + k].end()) continue;
+                    for (const auto &sb : self_it->second)
+                        if (cb.overlap(sb))
+                            envelope.merge(sb);
+                }
+
+                BoundingBox inflated = envelope;
                 inflated.offset(clearance_scaled);
                 accepted_zones.push_back(inflated);
+                BOOST_LOG_TRIVIAL(info) << "[FLA]   cluster base=[" << cb.min.x() << "," << cb.min.y()
+                    << "]-[" << cb.max.x() << "," << cb.max.y() << "]"
+                    << " envelope=[" << envelope.min.x() << "," << envelope.min.y()
+                    << "]-[" << envelope.max.x() << "," << envelope.max.y() << "]"
+                    << " ACCEPT: extra_layers=" << cluster_extra;
             }
 
-            if (accepted_zones.empty() || truncated_extra == 0)
+            if (accepted_zones.empty() || truncated_extra == 0) {
+                BOOST_LOG_TRIVIAL(info) << "[FLA] layer=" << li << " ext=" << ext_id
+                    << " REJECT: no clusters survived after cascade/isolation";
+                ++li;
                 continue;
+            }
 
             LookaheadEntry entry;
             entry.extra_layers = truncated_extra;
@@ -356,7 +503,11 @@ void FilamentLookaheadPlan::build(const Print &print,
 
             m_plan[{li, ext_id}] = entry;
 
-            for (size_t k = 1; k <= truncated_extra; ++k) {
+            // Register the exclusion zone on every layer the tower physically exists on,
+            // including the base layer. Per Rule 8, once the tower is printed on the base
+            // layer, any subsequent travel on that same layer must avoid its XY footprint
+            // because the tower will already be sticking up above current-layer Z.
+            for (size_t k = 0; k <= truncated_extra; ++k) {
                 size_t future_li = li + k;
                 if (future_li < m_raised_per_layer.size()) {
                     m_raised_per_layer[future_li].max_z = std::max(
@@ -367,14 +518,128 @@ void FilamentLookaheadPlan::build(const Print &print,
             }
 
             m_enabled = true;
-            BOOST_LOG_TRIVIAL(info) << "FilamentLookahead: layer " << li
-                << " extruder " << ext_id << " disappearing after " << truncated_extra
-                << " layers (raised_z=" << entry.raised_z << ")";
+            const auto &ftypes = print.config().filament_type.values;
+            const std::string ftype = (ext_id < ftypes.size()) ? ftypes[ext_id] : std::string("?");
+            BOOST_LOG_TRIVIAL(warning) << "[FLA] TOWER ACCEPTED: base_layer=" << li
+                << " extruder=" << ext_id << " (type=" << ftype << ")"
+                << " extra_layers=" << truncated_extra
+                << " covers layers [" << li << ".." << (li + truncated_extra) << "]"
+                << " raised_z=" << entry.raised_z << "mm"
+                << " clusters=" << entry.exclusion_bboxes.size();
+
+            // Chain: advance past this tower's top layer so the next iteration
+            // can start a new tower immediately above it if eligible.
+            li = li + truncated_extra + 1;
         }
     }
 
     if (m_enabled)
         BOOST_LOG_TRIVIAL(info) << "FilamentLookahead: " << m_plan.size() << " lookahead opportunities found";
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Phase 3a: "Any (Type)" support filament resolution (Rules 2, 5, 6).
+    //
+    // Phase A (zone-claim): for each tower's exclusion zone, claim compatible
+    //   Any-Type supports that intersect. Records override → tower's filament.
+    // Phase B (leftover):   for remaining Any-Type supports, assign a filament
+    //   using the default resolver but restricted to non-lookahead-active
+    //   filaments on the layer (Rule 5).
+    //
+    // This pass only produces `m_any_support_overrides`. Phase 5a will consult
+    // it during gcode emission to short-circuit the existing per-layer resolver.
+    // Zones are not re-expanded and isolation is not re-validated in v1 — a
+    // known simplification versus Rule 2's full recursive extension.
+    // ─────────────────────────────────────────────────────────────────────────
+    if (!any_buckets.empty()) {
+        const auto &filament_types = print.config().filament_type.values;
+
+        auto bbox_intersects_any = [](const std::vector<BoundingBox> &a,
+                                       const std::vector<BoundingBox> &b) {
+            for (const auto &x : a)
+                for (const auto &y : b)
+                    if (x.overlap(y))
+                        return true;
+            return false;
+        };
+
+        // Phase A: tower zones claim compatible Any-Type supports.
+        for (const auto &[key, entry] : m_plan) {
+            const auto [base_li, ext_id] = key;
+            if (ext_id >= filament_types.size())
+                continue;
+            const std::string &tower_type = filament_types[ext_id];
+            const size_t tower_top = base_li + entry.extra_layers;
+
+            for (const auto &b : any_buckets) {
+                if (b.type_name != tower_type) continue;
+                if (b.layer_idx < base_li || b.layer_idx > tower_top) continue;
+                auto k = std::make_tuple(b.object, b.layer_idx, b.is_interface);
+                if (m_any_support_overrides.count(k)) continue;
+                if (bbox_intersects_any(b.entity_bboxes, entry.exclusion_bboxes)) {
+                    m_any_support_overrides[k] = ext_id;
+                    BOOST_LOG_TRIVIAL(warning) << "[FLA] Phase A CLAIM: tower (base_layer=" << base_li
+                        << ", ext=" << ext_id << ", type=" << tower_type
+                        << ") claims Any support layer=" << b.layer_idx
+                        << " role=" << (b.is_interface ? "interface" : "base");
+                }
+            }
+        }
+
+        // Phase B: assign any remaining Any-Type supports using the default resolver
+        // restricted to non-lookahead-active filaments on that layer (Rule 5).
+        auto lookahead_active_on_layer = [&](size_t layer_idx, std::set<unsigned int> &out) {
+            for (const auto &[key, entry] : m_plan) {
+                const auto [base_li, ext_id] = key;
+                if (layer_idx > base_li && layer_idx <= base_li + entry.extra_layers)
+                    out.insert(ext_id);
+            }
+        };
+
+        for (const auto &b : any_buckets) {
+            auto k = std::make_tuple(b.object, b.layer_idx, b.is_interface);
+            if (m_any_support_overrides.count(k)) continue;
+
+            std::set<unsigned int> active_set;
+            lookahead_active_on_layer(b.layer_idx, active_set);
+
+            std::vector<unsigned int> candidates;
+            if (b.layer_idx < layer_extruder_bboxes_single.size()) {
+                for (const auto &[eid, _] : layer_extruder_bboxes_single[b.layer_idx])
+                    if (!active_set.count(eid))
+                        candidates.push_back(eid);
+            }
+
+            const int any_val = support_filament_any_type_value_for_name(b.type_name);
+            if (any_val < 0) continue;
+            unsigned int resolved = resolve_any_type_support_filament(
+                any_val, print.config(), candidates);
+            if (resolved == (unsigned int)-1) {
+                BOOST_LOG_TRIVIAL(info) << "[FLA] Phase B SKIP: obj=" << b.object << " layer=" << b.layer_idx
+                    << " role=" << (b.is_interface ? "interface" : "base")
+                    << " - no compatible non-lookahead-active filament found for type=" << b.type_name;
+                continue;
+            }
+            if (active_set.count(resolved)) {
+                BOOST_LOG_TRIVIAL(info) << "[FLA] Phase B SAFETY: resolver returned a lookahead-active extruder - ignored";
+                continue;
+            }
+            m_any_support_overrides[k] = resolved;
+            BOOST_LOG_TRIVIAL(info) << "[FLA] Phase B ASSIGN: obj=" << b.object << " layer=" << b.layer_idx
+                << " role=" << (b.is_interface ? "interface" : "base")
+                << " type=" << b.type_name << " -> extruder=" << resolved
+                << " (candidates=" << candidates.size() << " lookahead_active=" << active_set.size() << ")";
+        }
+
+        BOOST_LOG_TRIVIAL(info) << "[FLA] Phase 3a complete: "
+            << m_any_support_overrides.size() << " Any-Type overrides (of "
+            << any_buckets.size() << " candidate buckets)";
+    } else {
+        BOOST_LOG_TRIVIAL(info) << "[FLA] Phase 3a skipped: no Any-Type supports in this slice";
+    }
+
+    BOOST_LOG_TRIVIAL(info) << "[FLA] build() final: enabled=" << m_enabled
+        << " towers=" << m_plan.size()
+        << " any_overrides=" << m_any_support_overrides.size();
 }
 
 size_t FilamentLookaheadPlan::extra_layers(size_t layer_idx, unsigned int extruder_id) const
@@ -405,6 +670,15 @@ std::vector<BoundingBox> FilamentLookaheadPlan::exclusion_zones(size_t layer_idx
     if (layer_idx < m_raised_per_layer.size())
         return m_raised_per_layer[layer_idx].exclusion_bboxes;
     return {};
+}
+
+std::optional<unsigned int> FilamentLookaheadPlan::override_for_support(
+    const PrintObject *object, size_t layer_idx, bool is_interface) const
+{
+    auto it = m_any_support_overrides.find(std::make_tuple(object, layer_idx, is_interface));
+    if (it == m_any_support_overrides.end())
+        return std::nullopt;
+    return it->second;
 }
 
 } // namespace Slic3r
