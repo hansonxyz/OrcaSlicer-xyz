@@ -56,8 +56,6 @@ void FilamentLookaheadPlan::build(const Print &print,
         << " clearance=" << min_clearance_distance_mm << "mm"
         << " num_objects=" << print.objects().size()
         << " total_instances=" << total_instances;
-    fprintf(stderr, "FilamentLookahead: analyzing %zu layers, max_height=%.1fmm, clearance=%.1fmm, objects=%zu, instances=%zu\n",
-        num_layers, max_lookahead_height_mm, min_clearance_distance_mm, print.objects().size(), total_instances);
 
     // Pre-compute per-extruder bboxes for all layers.
     // Key insight: check isolation PER INSTANCE, not across all instances merged.
@@ -162,22 +160,6 @@ void FilamentLookaheadPlan::build(const Print &print,
         }
     }
 
-    // Debug: log per-extruder bboxes - every layer from 270-298, plus every 50th before that
-    for (size_t li = 0; li < num_layers; ++li) {
-        if (li < 270 && li % 50 != 0) continue;
-        // Debug: show single-object bboxes (the ones used for isolation check)
-        const auto &eb = layer_extruder_bboxes_single[li];
-        if (!eb.empty()) {
-            fprintf(stderr, "  L%zu z=%.2f extruders=%zu:", li, layers[li]->print_z, eb.size());
-            for (auto &[eid, bbox] : eb) {
-                fprintf(stderr, " E%u[%.1f,%.1f-%.1f,%.1f]", eid,
-                    unscale<double>(bbox.min.x()), unscale<double>(bbox.min.y()),
-                    unscale<double>(bbox.max.x()), unscale<double>(bbox.max.y()));
-            }
-            fprintf(stderr, "\n");
-        }
-    }
-
     // For each layer and each extruder, check if lookahead is possible.
     // Two strategies:
     // 1. BBox isolation: extruder's bbox is far from all others (works for separate objects)
@@ -233,9 +215,6 @@ void FilamentLookaheadPlan::build(const Print &print,
                         }
                     }
                     disappearing = others_continue;
-                    if (disappearing) {
-                        fprintf(stderr, "  DISAPPEARING: L%zu ext=%u last_present=L%zu\n", li, ext_id, last_present);
-                    }
                 }
             }
 
@@ -311,8 +290,6 @@ void FilamentLookaheadPlan::build(const Print &print,
                     }
 
                     m_enabled = true;
-                    fprintf(stderr, "  PLAN: L%zu ext=%u extra=%zu raised_z=%.2f zones=%zu\n",
-                        li, ext_id, extra, entry.raised_z, entry.exclusion_bboxes.size());
                 }
                 continue; // skip the bbox-based forward scan
             }

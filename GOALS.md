@@ -123,70 +123,96 @@ This is much faster than the current add-cube-then-move-and-scale workflow for s
 
 Wishlist item. When holding down the Ctrl key, objects under the mouse cursor get a light green glow/outline to indicate they would be added to the selection on click. This provides visual feedback before clicking, making multi-select operations more precise - the user can see exactly which object will be selected before committing to the click.
 
-## Future Goal (Stretch/Low Priority): Multi-Layer Batched Printing for Multi-Material (not yet implementing)
+## Active Feature: Filament Lookahead — Multi-Layer Batched Printing for Multi-Material
 
-Wishlist item. **Complex feature, low priority stretch goal.** On single-nozzle multi-material printers (e.g., X1C with AMS), when a material region is spatially isolated from other materials on the plate, print multiple consecutive layers of that region before switching filaments, instead of switching on every layer. This reduces tool changes - each skipped change saves purge material and ~30-60 seconds.
+On single-nozzle multi-material printers (e.g., X1C with AMS), when a material region is spatially isolated from other materials, print multiple consecutive layers of that region before switching filaments, instead of switching on every layer. Each skipped change saves purge material and ~30-60 seconds. Lives on the `filament-lookahead` branch.
 
-**How it would work:**
-- Identify regions where one material spans multiple layers and is far enough from other material regions that the printhead can safely print 2-3 layers ahead without collision
-- Only batch extra layers when at least one of those extra layers would require a different material (otherwise there's no tool change savings)
-- Travel moves must be adjusted to completely avoid the exclusion region created by the batched structure
+### What's done (retained from earlier work)
 
-**Nozzle clearance model (per-printer setting, two tiers):**
+- **Config options:** `filament_lookahead`, `filament_lookahead_max_height`, `filament_lookahead_clearance` are wired through `PrintConfig` and appear in the UI.
+- **Analysis stage (`src/libslic3r/GCode/FilamentLookahead.cpp`):** `FilamentLookaheadPlan::build()` runs in `GCode::_do_export()` before layer iteration. It walks `PrintObject::layers()` per extruder, clusters individual entity bboxes into spatially connected groups, and emits candidate plan entries. Implements two strategies: bbox-isolated-but-continuing and disappearing-extruder. **Not yet aware of supports.**
+- **Cluster isolation filter:** each cluster is checked against every other extruder's entities on the same layer; only isolated clusters become exclusion zones.
+- **Gcode comment emission:** `; LOOKAHEAD_EXCLUSION_ZONE x_min=... y_min=... x_max=... y_max=... z_max=...` emitted per affected layer from `GCode.cpp`, also populated directly into `m_processor.result().lookahead_exclusion_zones` for the in-memory GUI preview path.
+- **GCodeProcessor parsing:** comments parsed back into the struct for file-loaded gcode.
+- **GCodeViewer rendering:** exclusion zones drawn as yellow translucent rectangles, filtered by the vertical layer slider's visible range, toggleable via "Travel Exclusion Zones" in FeatureType / Speed / ActualSpeed legends.
+- **Inline reordering attempt: reverted.** The code that tried to emit lookahead extrusions mid-generation has been kept behind `if (false && ...)` guards but will be removed in Phase 1. The approach is replaced by post-processing (see Phase 5).
 
-Each printer defines two clearance tiers:
-- **Tier 1 (small clearance):** Max extra height with a minimum XY gap to other materials
-- **Tier 2 (large clearance):** Max extra height with a larger minimum XY gap
+### Design — nozzle clearance model
 
-**Default values (reasonable for nearly all FDM printers):**
-- Tier 1: 1mm extra height, 5mm XY clearance (the nozzle tip protrudes at least 1mm on virtually every printer)
-- Tier 2: disabled by default (0mm = not used). Users who know their printhead geometry can configure this.
+Per-printer setting, two tiers. Each printer defines:
+- **Tier 1 (small clearance):** max extra height with a minimum XY gap. Default: 1mm extra height, 5mm XY clearance (the nozzle tip protrudes at least 1mm on virtually every printer).
+- **Tier 2 (large clearance):** max extra height with a larger minimum XY gap. Default: disabled (0mm). Users who know their printhead geometry can configure this.
 
-**Per-printer override examples:**
 | Printer | Tier 1 Height | Tier 1 XY Gap | Tier 2 Height | Tier 2 XY Gap |
 |---------|---------------|---------------|---------------|---------------|
 | Default | 1mm           | 5mm           | 0 (disabled)  | 0 (disabled)  |
 | A1M     | 2mm           | 5mm           | 4mm           | 20mm          |
 | X1C     | 1mm           | 5mm           | 3mm           | 18mm          |
 
-**Clearance validation rules:**
-- For each candidate "extra" layer being printed ahead, at every point in the maximum XY footprint those extra layers would occupy, the nearest other material on any of those layers must be at least the tier gap distance away in both X and Y dimensions
-- After printing the batched layers, the printhead is completely banned from entering the exclusion zone defined by the batched structure for the remainder of those layers - it must route around the perimeter using at least the smaller clearance gap if only at the smaller tier height, or the larger clearance gap if at the larger tier height
-- When calculating subsequent layers after creating an exclusion, if any required print move becomes impossible due to the exclusion zone, the slicer must return an error directing the user to file a bug report at https://github.com/hansonxyz/OrcaSlicer-xyz (this would indicate a logic/implementation bug, not a user error)
+### Design — clearance validation rules
 
-**Toolhead move modifications (requires research and design):**
-- Filament change sequences (purge, cut, possible re-home) currently assume a flat layer. With batched layers creating raised regions, the toolhead must be raised above the maximum partially-printed layer height before any filament change move, then lowered back after the change completes.
-- This means the feature cannot be used on layers where the extra printed height plus the toolhead change Z clearance would exceed the printer's maximum Z travel. At minimum, the number of extra layers must be limited so the toolhead change Z lift stays within printable dimensions.
-- **Pause/resume handling:** If the user pauses mid-print on a layer with batched regions, the printer's built-in pause may not account for the raised regions and could cause collisions. Options to investigate:
-  - Modify OrcaSlicer's pause/resume to send direct commands that raise the toolhead above the max batched height before pausing, and inform the user that pause/resume must be handled through OrcaSlicer's GUI rather than the printer's controls
-  - Research whether any printers' firmware pause/resume already accounts for variable-height regions (unlikely but worth checking)
-  - Potentially disable the batching feature on layers near user-inserted pause points
-- All of this toolhead move design is part of the development work for this feature and needs thorough investigation before implementation begins.
+Every batched region, and the wipe tower, has its own *exclusion zone* — the region's XY footprint inflated outward by the relevant tier's clearance distance. Zones are a property of the region that creates them. Validation is about **extrusion vs zone**, not zone vs zone:
 
-**Pause/resume research findings (March 2026):**
-- **Bambu Lab:** Pause Z-raise is hardcoded in closed firmware, undocumented, not configurable. Pre-planned pauses (via slicer gcode) can prepend extra G91/G1 Z commands before M400 U1, but firmware still does its own raise. Ad-hoc pauses (touchscreen/network) cannot be modified at all.
-- **Marlin:** Fully controllable at runtime via `M600 Z<mm>`, `M125 Z<mm>`, or `G27 P2`. Default is 20mm (NOZZLE_PARK_POINT).
-- **Klipper:** Fully controllable via customizable PAUSE macro, supports `PAUSE Z=<mm>` runtime parameter. Default ~10mm.
-- **RepRapFirmware (Duet):** Controlled by editable `/sys/pause.g` macro file. Z raise is user-defined.
-- **Smoothieware:** Configured via `after_suspend_gcode` config option. No default Z raise.
+- **Zones may overlap freely** with each other. Two lookahead regions, or a lookahead region and the wipe tower zone, can overlap and both remain valid.
+- **No extrusion of another object may fall inside a zone** on any layer where that zone is active. If extrusion does fall inside, the zone is invalid.
+- **Wipe tower:** the zone is inflated around the tower's actual extrusion footprint (not any abstract placement rectangle). No other object's extrusion may fall inside on any layer the tower is printed. Slice-time violation → hard error, user must move the offending object or resize the tower. The zone should render in gcode preview as a rectangle identical in style to lookahead zones, so the user can see the clearance they need to respect.
+- **Lookahead regions (cascade invalidation):** a candidate is valid for layers `L..L+k` only if no other extrusion falls inside its zone on every layer in the range. If some layer `L+j` has an intrusion, the batch truncates to `L..L+j-1`; the intruded layer `L+j` prints normally with a full tool change. Batch grows forward only while zone integrity holds.
+- **Graceful fallback:** if truncation leaves zero extra layers, the region is simply not a lookahead candidate and prints normally. No slicer error — lookahead failing to apply is a non-event, not a failure mode.
 
-**BBL filament change Z clearance (from gcode analysis, March 2026):**
-- All BBL printers (except H2D): `G1 Z{max_layer_z + 3.0}` — **3mm above the highest printed point**
-- H2D/H2D Pro: **8mm** initial raise, 3mm on return (larger head geometry)
-- For batched layers, the filament change gcode must be modified to use `max_batched_z + 3.0` instead of `max_layer_z + 3.0` to clear the raised regions
-- Firmware-controlled pause (button/app) Z-raise is undocumented and reportedly insufficient in some cases — community reports of head collisions during resume on tall prints
+### Design — wipe tower backfill algorithm
 
-**Conclusion for implementation:** Pre-planned filament changes (our primary use case) work on all firmwares since we control the gcode. For ad-hoc pauses, Bambu printers are problematic — recommend warning the user in the UI that manual pause during batched-layer regions risks collisions, and to use slicer-inserted pause-at-layer instead.
+On MMU/AMS printers the wipe tower *is* the cost of tool changes. Moving extrusions forward in time only saves real material if the purge moves with them. The wipe tower is also a structural monolith: removing any layer's band leaves a gap. The algorithm:
 
-**Key challenges:**
-- Printhead collision detection requires 3D clearance modeling of the specific printer's head geometry
-- Travel path planning must account for the height difference between the current print region and adjacent regions
-- Toolhead change sequences (purge, cut, re-home) must be modified to clear raised regions
-- Layer adhesion timing - printing multiple layers of one region while others wait could affect inter-layer bonding if the delay is too long
-- Interaction with prime tower, wipe tower, and purge scheduling
-- Pause/resume safety across both software-initiated and printer-initiated pauses
+1. **Redistribute purge within a lookahead-active layer.** When a layer has tool changes eliminated by lookahead (those tools printed ahead on earlier layers), the purge bands for the eliminated tools are reassigned:
+   - The next remaining tool change on that layer absorbs the width of the eliminated band(s) immediately before it.
+   - If lookahead eliminates *all* tool changes except the first, that first change's purge fills the entire tower footprint for the layer (one continuous band instead of N stripes).
+   - Every layer still gets a full purge-height extrusion → tower structural continuity preserved.
 
-**Payoff:** On a typical multi-material print with 400 layers and 3+ filaments, even modest batching (2-3 layers) could eliminate 20-30% of tool changes, saving hours of print time and significant purge waste.
+2. **End-of-layer tower backfill for fully-skipped layers.** When lookahead prints extruder E for layers `L..L+k` in one go, layers `L+1..L+k` may have no extrusion on the tower from anyone:
+   - After the last tool that prints on physical layer `L` finishes its model extrusion, the tool travels to the tower, lowers to each skipped layer's Z in sequence, and extrudes a full-tower-footprint layer of the current filament.
+   - Happens once per physical layer, using whichever tool is already active → no extra tool changes incurred.
+   - Filament color/type of backfill is irrelevant (tower is discarded).
+
+3. **Wipe tower exclusion zone.** While the nozzle descends to tower Z for backfill, full travel-clearance rules apply. The tower gets its own exclusion zone inflated around its actual extrusion footprint. Per clearance validation above: no other object's extrusion may fall inside it. The zone may overlap lookahead zones freely.
+
+**Payoff:** With the tower included in the reorder, a "disappearing extruder" case (e.g. a small top decoration in a different filament) can eliminate *all* of that extruder's tool changes for the remainder of the print. On the typical MMU painted model this is the dominant savings — often hours of print time and 50%+ of the purge waste for that extruder.
+
+### Design — filament change Z clearance
+
+Filament change sequences (purge, cut, possible re-home) currently assume a flat layer. With batched layers creating raised regions, the toolhead must be raised above the maximum partially-printed layer height before any filament change, then lowered after. The feature cannot be used on layers where extra printed height + toolhead change Z clearance would exceed the printer's maximum Z travel.
+
+**Firmware behavior (researched March 2026):**
+- **Bambu Lab:** pause Z-raise is hardcoded in closed firmware, undocumented, not configurable. Pre-planned pauses via slicer gcode can prepend extra `G91/G1 Z` commands before `M400 U1`, but firmware still does its own raise. Ad-hoc pauses (touchscreen/network) cannot be modified at all.
+- **Marlin:** fully controllable at runtime via `M600 Z<mm>`, `M125 Z<mm>`, or `G27 P2`. Default 20mm.
+- **Klipper:** fully controllable via customizable `PAUSE` macro, supports `PAUSE Z=<mm>` runtime parameter. Default ~10mm.
+- **RepRapFirmware (Duet):** controlled by editable `/sys/pause.g` macro. User-defined.
+- **Smoothieware:** configured via `after_suspend_gcode`. No default Z raise.
+
+**BBL filament change Z clearance (from gcode analysis):**
+- All BBL printers (except H2D): `G1 Z{max_layer_z + 3.0}` — 3mm above the highest printed point
+- H2D/H2D Pro: 8mm initial raise, 3mm on return (larger head geometry)
+- For batched layers, the filament change gcode must use `max_batched_z + 3.0` instead of `max_layer_z + 3.0`.
+
+**Conclusion:** pre-planned filament changes (our primary use case) work on all firmwares since we control the gcode. For ad-hoc pauses on Bambu printers, recommend warning the user that manual pause during batched-layer regions risks collisions, and to use slicer-inserted pause-at-layer instead.
+
+### Implementation phases
+
+| Phase | Scope | Risk | Verifiable by |
+|-------|-------|------|---------------|
+| 1 | **Cleanup** — delete dead inline-printing code, remove debug `fprintf` spam, gate bbox-isolated strategy off (disappearing-only for v1) | Zero | Build passes, zones still render, gcode byte-identical to baseline |
+| 2 | **Analysis expansion** — include `support_layers()` extrusions in per-extruder polygon collection; replace bbox isolation with polygon offset+intersect; add per-layer cascade truncation in the forward scan | Low | Zones match intuition on test model with tree supports; forward-scan stops on intermediate-layer violations |
+| 3 | **Wipe tower zone validation** — compute inflated tower extrusion footprint; slice-time check rejects objects that intrude; render the tower's zone in gcode preview as a rectangle identical to lookahead zones | Low | Deliberate bad placement triggers slicer error; rendered preview shows a tower zone alongside lookahead zones |
+| 4 | **Gcode annotation markers** — emit `; LOOKAHEAD_BLOCK_BEGIN plan_id=N layer=L extruder=E layers_ahead=K` and `; LOOKAHEAD_BLOCK_END plan_id=N` around eligible extrusion spans. No reordering yet. | Zero | Byte-diff vs pre-phase gcode: only comment-line differences |
+| 5 | **Post-processor (the real work)** — new `src/libslic3r/GCode/FilamentLookaheadPostProcessor.cpp`. Parses markers, extracts blocks, reassembles with Z travel moves, implements purge redistribution and end-of-layer tower backfill. Disappearing-extruder case only for v1. Config flag to disable the pass (falls back to Phase-4 annotation-only output). | High | Printed part shows reduced tool changes and intact wipe tower; A/B diff with post-processor disabled produces Phase-4 output unchanged |
+
+Phases 1–4 each leave the slicer functional and A/B-comparable to baseline at every step. Phase 5 is the one that can actually go wrong.
+
+### Remaining open questions (Phase 5 design)
+
+- Travel path planning must route around raised regions using the correct tier's clearance gap. May need to plug into OrcaSlicer's existing avoid-crossing-perimeter logic.
+- Layer adhesion timing — printing multiple layers of one region while others wait could affect inter-layer bonding if the delay is too long. Cap max lookahead layers accordingly.
+- Pause/resume safety across software-initiated and printer-initiated pauses, especially on Bambu firmware.
+- Interaction with "Any Type" support filament resolution when the support's assigned extruder has a lookahead plan entry.
 
 ## Future Goal: GUI Editor for Basic Settings Field List (not yet implementing)
 
