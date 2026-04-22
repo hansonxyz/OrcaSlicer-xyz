@@ -7,6 +7,10 @@
 #include "GCode.hpp"
 #include "GCode/FilamentLookahead.hpp"
 #include "GCode/FilamentLookaheadPostProcessor.hpp"
+
+// Forward-declare the helper - definition appears further down in this file.
+// (Out-of-line so the extruder loop body can call it without needing the full
+// definition inline.)
 #include "Exception.hpp"
 #include "ExtrusionEntity.hpp"
 #include "EdgeGrid.hpp"
@@ -700,8 +704,14 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
 
     std::string WipeTowerIntegration::append_tcr(GCode& gcodegen, const WipeTower::ToolChangeResult& tcr, int new_filament_id, double z) const
     {
-        if (new_filament_id != -1 && new_filament_id != tcr.new_tool)
+        if (new_filament_id != -1 && new_filament_id != tcr.new_tool) {
+            BOOST_LOG_TRIVIAL(error) << "[FLA-B] append_tcr MISMATCH: layer_idx=" << m_layer_idx
+                << " tool_change_idx=" << m_tool_change_idx
+                << " requested_new_filament=" << new_filament_id
+                << " tcr.new_tool=" << tcr.new_tool
+                << " tcr.initial_tool=" << tcr.initial_tool;
             throw Slic3r::InvalidArgument("Error: WipeTowerIntegration::append_tcr was asked to do a toolchange it didn't expect.");
+        }
 
         int new_extruder_id = get_extruder_index(*m_print_config, new_filament_id);
 
@@ -1098,8 +1108,14 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
                                                   int                                new_extruder_id,
                                                   double                             z) const
     {
-        if (new_extruder_id != -1 && new_extruder_id != tcr.new_tool)
+        if (new_extruder_id != -1 && new_extruder_id != tcr.new_tool) {
+            BOOST_LOG_TRIVIAL(error) << "[FLA-B] append_tcr2 MISMATCH: layer_idx=" << m_layer_idx
+                << " tool_change_idx=" << m_tool_change_idx
+                << " requested_new_extruder=" << new_extruder_id
+                << " tcr.new_tool=" << tcr.new_tool
+                << " tcr.initial_tool=" << tcr.initial_tool;
             throw Slic3r::InvalidArgument("Error: WipeTowerIntegration::append_tcr was asked to do a toolchange it didn't expect.");
+        }
 
         std::string gcode;
 
@@ -1523,6 +1539,10 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
                     throw Slic3r::RuntimeError("Wipe tower generation failed, possibly due to empty first layer.");
 
                 if (!ignore_sparse) {
+                    BOOST_LOG_TRIVIAL(warning) << "[FLA-B] tool_change CONSUME (type1) layer_idx=" << m_layer_idx
+                        << " idx=" << m_tool_change_idx << " extruder_id=" << extruder_id
+                        << " tcr.new_tool=" << m_tool_changes[m_layer_idx][m_tool_change_idx].new_tool
+                        << " tcr.initial_tool=" << m_tool_changes[m_layer_idx][m_tool_change_idx].initial_tool;
                     gcode += append_tcr(gcodegen, m_tool_changes[m_layer_idx][m_tool_change_idx++], extruder_id, wipe_tower_z);
                     m_last_wipe_tower_print_z = wipe_tower_z;
                 }
@@ -1530,6 +1550,39 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
         }
 
         return gcode;
+    }
+
+    void WipeTowerIntegration::skip_tool_change_for_tower(GCode &gcodegen, int extruder_id, bool /*finish_layer*/)
+    {
+        // Data-driven skip: if the next pre-generated tool-change entry at the
+        // current index has new_tool == extruder_id, then ToolOrdering
+        // scheduled a tool change TO this extruder on this layer. Since we're
+        // skipping the iteration (batched into a lower layer's tower), consume
+        // that entry silently so subsequent tool_change() calls see the right
+        // entry for the next extruder. CRUCIALLY, also update m_writer's
+        // current filament state to match what ToolOrdering expected — without
+        // this, the writer's "current filament" drifts from the plan's
+        // assumption across consecutive skipped layers, eventually causing the
+        // next real tool_change to consume the wrong pre-gen entry.
+        if (m_layer_idx < 0 || m_layer_idx >= (int) m_tool_changes.size())
+            return;
+        if ((size_t) m_tool_change_idx >= m_tool_changes[m_layer_idx].size())
+            return;
+        const int next_new_tool = m_tool_changes[m_layer_idx][m_tool_change_idx].new_tool;
+        BOOST_LOG_TRIVIAL(warning) << "[FLA-B] skip_tool_change_for_tower: layer_idx=" << m_layer_idx
+            << " idx=" << m_tool_change_idx << "/" << m_tool_changes[m_layer_idx].size()
+            << " skipping ext=" << extruder_id
+            << " next_entry.new_tool=" << next_new_tool
+            << " -> " << (next_new_tool == extruder_id ? "CONSUME" : "LEAVE");
+        if (next_new_tool == extruder_id) {
+            ++m_tool_change_idx;
+        }
+        // Note: during FLA-DEV-HACK period (prime tower disabled by
+        // Print::process() when lookahead is on), this whole path isn't
+        // exercised because has_wipe_tower is false in process_layer.
+        // Kept for when wipe tower regeneration ships and lookahead
+        // re-enables it — the simple idx advance is still correct if
+        // pre-gen was generated from the lookahead-adjusted ordering.
     }
 
     bool WipeTowerIntegration::is_empty_wipe_tower_gcode(GCode &gcodegen, int extruder_id, bool finish_layer)
@@ -2149,12 +2202,13 @@ void GCode::do_export(Print* print, const char* path, GCodeProcessorResult* resu
     BOOST_LOG_TRIVIAL(debug) << boost::format("Finished processing gcode to %1% ") % path_tmp;
 
     // Phase 6a: run the filament lookahead post-processor on the temp gcode
-    // before it gets renamed to the final output. The post-processor parses
-    // LOOKAHEAD markers and (eventually) relocates tower blocks for batched
-    // printing. 6a only round-trips the file; semantic changes land in 6b-6d.
+    // as a verification shadow. After the Option B pivot, Phase 6's actual
+    // batching happens in process_layer via emit_lookahead_tower_extras; the
+    // post-processor's transform is no-op (apply_transform=false) and only
+    // validates marker balance / prints summary stats.
     if (m_print->config().filament_lookahead.value) {
         FilamentLookaheadPostProcessor pp;
-        if (!pp.process(path_tmp)) {
+        if (!pp.process(path_tmp, /*apply_transform=*/false)) {
             BOOST_LOG_TRIVIAL(warning) << "[FLA-PP] post-processor failed; "
                 << "continuing with un-post-processed gcode.";
         }
@@ -3649,7 +3703,15 @@ void GCode::process_layers(
                 //BBS
                 check_placeholder_parser_failed();
                 print.throw_if_canceled();
-                return this->process_layer(print, layer.second, layer_tools, &layer == &layers_to_print.back(), &print_object_instances_ordering, tool_ordering.get_most_used_extruder(), size_t(-1));
+                try {
+                    return this->process_layer(print, layer.second, layer_tools, &layer == &layers_to_print.back(), &print_object_instances_ordering, tool_ordering.get_most_used_extruder(), size_t(-1));
+                } catch (const std::exception &e) {
+                    BOOST_LOG_TRIVIAL(error) << "[FLA-B] generator: process_layer threw at print_z=" << layer_tools.print_z << ": " << e.what();
+                    throw;
+                } catch (...) {
+                    BOOST_LOG_TRIVIAL(error) << "[FLA-B] generator: process_layer threw non-std at print_z=" << layer_tools.print_z;
+                    throw;
+                }
             }
         });
     if (m_spiral_vase) {
@@ -3661,29 +3723,73 @@ void GCode::process_layers(
         [&spiral_mode = *this->m_spiral_vase.get(), &layers_to_print](LayerResult in) -> LayerResult {
         	if (in.nop_layer_result)
                 return in;
-                
+
             spiral_mode.enable(in.spiral_vase_enable);
             bool last_layer = in.layer_id == layers_to_print.size() - 1;
-            return { spiral_mode.process_layer(std::move(in.gcode), last_layer), in.layer_id, in.spiral_vase_enable, in.cooling_buffer_flush};
+            try {
+                return { spiral_mode.process_layer(std::move(in.gcode), last_layer), in.layer_id, in.spiral_vase_enable, in.cooling_buffer_flush};
+            } catch (const std::exception &e) {
+                BOOST_LOG_TRIVIAL(error) << "[FLA-B] filter SpiralVase threw on layer=" << in.layer_id << ": " << e.what();
+                throw;
+            } catch (...) {
+                BOOST_LOG_TRIVIAL(error) << "[FLA-B] filter SpiralVase threw non-std exception on layer=" << in.layer_id;
+                throw;
+            }
         });
     const auto pressure_equalizer = tbb::make_filter<LayerResult, LayerResult>(slic3r_tbb_filtermode::serial_in_order,
         [pressure_equalizer = this->m_pressure_equalizer.get()](LayerResult in) -> LayerResult {
-            return pressure_equalizer->process_layer(std::move(in));
+            int layer_id_copy = in.layer_id;
+            try {
+                return pressure_equalizer->process_layer(std::move(in));
+            } catch (const std::exception &e) {
+                BOOST_LOG_TRIVIAL(error) << "[FLA-B] filter PressureEqualizer threw on layer=" << layer_id_copy << ": " << e.what();
+                throw;
+            } catch (...) {
+                BOOST_LOG_TRIVIAL(error) << "[FLA-B] filter PressureEqualizer threw non-std exception on layer=" << layer_id_copy;
+                throw;
+            }
         });
     const auto cooling = tbb::make_filter<LayerResult, std::string>(slic3r_tbb_filtermode::serial_in_order,
         [&cooling_buffer = *this->m_cooling_buffer.get()](LayerResult in) -> std::string {
         	if (in.nop_layer_result)
                 return in.gcode;
-            return cooling_buffer.process_layer(std::move(in.gcode), in.layer_id, in.cooling_buffer_flush);
+            int layer_id_copy = in.layer_id;
+            try {
+                return cooling_buffer.process_layer(std::move(in.gcode), in.layer_id, in.cooling_buffer_flush);
+            } catch (const std::exception &e) {
+                BOOST_LOG_TRIVIAL(error) << "[FLA-B] filter CoolingBuffer threw on layer=" << layer_id_copy << ": " << e.what();
+                throw;
+            } catch (...) {
+                BOOST_LOG_TRIVIAL(error) << "[FLA-B] filter CoolingBuffer threw non-std exception on layer=" << layer_id_copy;
+                throw;
+            }
         });
     const auto pa_processor_filter = tbb::make_filter<std::string, std::string>(slic3r_tbb_filtermode::serial_in_order,
             [&pa_processor = *this->m_pa_processor](std::string in) -> std::string {
-                return pa_processor.process_layer(std::move(in));
+                try {
+                    return pa_processor.process_layer(std::move(in));
+                } catch (const std::exception &e) {
+                    BOOST_LOG_TRIVIAL(error) << "[FLA-B] filter AdaptivePA threw: " << e.what();
+                    throw;
+                } catch (...) {
+                    BOOST_LOG_TRIVIAL(error) << "[FLA-B] filter AdaptivePA threw non-std exception";
+                    throw;
+                }
             }
         );
     
     const auto output = tbb::make_filter<std::string, void>(slic3r_tbb_filtermode::serial_in_order,
-        [&output_stream](std::string s) { output_stream.write(s); }
+        [&output_stream](std::string s) {
+            try {
+                output_stream.write(s);
+            } catch (const std::exception &e) {
+                BOOST_LOG_TRIVIAL(error) << "[FLA-B] filter output threw: " << e.what();
+                throw;
+            } catch (...) {
+                BOOST_LOG_TRIVIAL(error) << "[FLA-B] filter output threw non-std exception";
+                throw;
+            }
+        }
     );
 
     const auto fan_mover = tbb::make_filter<std::string, std::string>(slic3r_tbb_filtermode::serial_in_order,
@@ -3691,19 +3797,27 @@ void GCode::process_layers(
 
         CNumericLocalesSetter locales_setter;
 
-        if (config.fan_speedup_time.value != 0 || config.fan_kickstart.value > 0) {
-            if (fan_mover.get() == nullptr)
-                fan_mover.reset(new Slic3r::FanMover(
-                    writer,
-                    std::abs((float)config.fan_speedup_time.value),
-                    config.fan_speedup_time.value > 0,
-                    config.use_relative_e_distances.value,
-                    config.fan_speedup_overhangs.value,
-                    (float)config.fan_kickstart.value));
-            //flush as it's a whole layer
-            return fan_mover->process_gcode(in, true);
+        try {
+            if (config.fan_speedup_time.value != 0 || config.fan_kickstart.value > 0) {
+                if (fan_mover.get() == nullptr)
+                    fan_mover.reset(new Slic3r::FanMover(
+                        writer,
+                        std::abs((float)config.fan_speedup_time.value),
+                        config.fan_speedup_time.value > 0,
+                        config.use_relative_e_distances.value,
+                        config.fan_speedup_overhangs.value,
+                        (float)config.fan_kickstart.value));
+                //flush as it's a whole layer
+                return fan_mover->process_gcode(in, true);
+            }
+            return in;
+        } catch (const std::exception &e) {
+            BOOST_LOG_TRIVIAL(error) << "[FLA-B] filter FanMover threw: " << e.what();
+            throw;
+        } catch (...) {
+            BOOST_LOG_TRIVIAL(error) << "[FLA-B] filter FanMover threw non-std exception";
+            throw;
         }
-        return in;
     });
 
     // The pipeline elements are joined using const references, thus no copying is performed.
@@ -4425,6 +4539,25 @@ LayerResult GCode::process_layer(
     assert(! layers.empty());
     // Either printing all copies of all objects, or just a single copy of a single object.
     assert(single_object_instance_idx == size_t(-1) || layers.size() == 1);
+
+    BOOST_LOG_TRIVIAL(warning) << "[FLA-B] process_layer ENTRY print_z=" << layer_tools.print_z;
+
+    // Dump pre-gen wipe-tower entries for this layer for debugging.
+    if (m_wipe_tower) {
+        std::string tc_dump;
+        const int layer_idx_peek = m_wipe_tower->peek_layer_idx_for_next();
+        auto *tc_peek = m_wipe_tower->peek_tool_changes_for_next_layer();
+        if (tc_peek) {
+            for (size_t i = 0; i < tc_peek->size(); ++i) {
+                if (i > 0) tc_dump += ",";
+                tc_dump += std::to_string((*tc_peek)[i].initial_tool) + "->" + std::to_string((*tc_peek)[i].new_tool);
+            }
+        }
+        BOOST_LOG_TRIVIAL(warning) << "[FLA-B]   wipe tower pre-gen for next layer (incoming idx=" << layer_idx_peek
+            << "): [" << tc_dump << "]";
+    }
+    BOOST_LOG_TRIVIAL(warning) << "[FLA-B]   layer_tools.extruders order: "
+        << [&]() { std::string s; for (auto e : layer_tools.extruders) { s += std::to_string(e); s += ","; } return s; }();
 
     // First object, support and raft layer, if available.
     const Layer         *object_layer  = nullptr;
@@ -5158,6 +5291,25 @@ LayerResult GCode::process_layer(
         std::optional<FilamentLookaheadPlan::TowerInfo> tower_info;
         if (m_lookahead_plan && m_lookahead_plan->enabled())
             tower_info = m_lookahead_plan->tower_info_for(m_current_layer_idx, extruder_id);
+        // Phase 6b+6c (Option B): if this filament is a tower extra on this layer
+        // (stack_index > 0), skip the entire iteration — the extrusion was already
+        // emitted as part of the tower's base layer batch, and emitting it again
+        // here would duplicate the extrusion at the wrong Z.
+        // CRITICAL: we must also advance the wipe tower's pre-generated tool-change
+        // index, because ToolOrdering was computed before the plan existed and
+        // included a tool change for this filament on this layer. Without this
+        // advance, subsequent extruder iterations on this layer would consume
+        // mismatched pre-gen entries and throw "toolchange it didn't expect".
+        if (tower_info && tower_info->stack_index > 0) {
+            BOOST_LOG_TRIVIAL(debug) << "[FLA-B] skip ext=" << extruder_id
+                << " on layer=" << m_current_layer_idx
+                << " (batched into tower base_layer=" << tower_info->base_layer << ")";
+            if (has_wipe_tower && m_wipe_tower) {
+                const bool finish_layer = (extruder_id == layer_tools.extruders.back());
+                m_wipe_tower->skip_tool_change_for_tower(*this, extruder_id, finish_layer);
+            }
+            continue;
+        }
         if (tower_info) {
             gcode += "; LOOKAHEAD_BLOCK_BEGIN"
                    " layer=" + std::to_string(m_current_layer_idx)
@@ -5166,8 +5318,14 @@ LayerResult GCode::process_layer(
                  + " stack_index=" + std::to_string(tower_info->stack_index)
                  + " extra_layers=" + std::to_string(tower_info->extra_layers)
                  + " role=" + (tower_info->stack_index == 0 ? "base" : "extra")
+                 + " z=" + std::to_string(print_z)
                  + "\n";
         }
+
+        // (Former FLA-B force-T hack removed — not needed while the
+        // FLA-DEV-HACK in Print::process() disables the wipe tower. When
+        // wipe tower regeneration ships and the pre-gen TCRs match our
+        // emission, no force-T will be necessary either.)
 
         if (print.config().skirt_type == stCombined && !print.skirt().empty())
             gcode += generate_skirt(print, print.skirt(), Point(0, 0), layer.object()->config().skirt_start_angle, layer_tools, layer,
@@ -5470,6 +5628,24 @@ LayerResult GCode::process_layer(
             }
         }
 
+        // Phase 6b (Option B): if this iteration is a tower's BASE layer,
+        // emit the tower's upper layers at raised Z immediately after the base
+        // extrusion. This produces a single batched tower that the subsequent
+        // layers will have skipped emission for.
+        if (tower_info && tower_info->stack_index == 0 && tower_info->extra_layers > 0) {
+            BOOST_LOG_TRIVIAL(warning) << "[FLA-B] caller: invoking emit_lookahead_tower_extras";
+            gcode += this->emit_lookahead_tower_extras(
+                print,
+                tower_info->base_layer,
+                extruder_id,
+                tower_info->extra_layers,
+                print_z);
+            BOOST_LOG_TRIVIAL(warning) << "[FLA-B] caller: emit_lookahead_tower_extras returned cleanly"
+                << ", writer pos=(" << m_writer.get_position().x() << ","
+                << m_writer.get_position().y() << ","
+                << m_writer.get_position().z() << ")";
+        }
+
         // Phase 5c: close the LOOKAHEAD_BLOCK wrapper if we opened one for this
         // extruder at the top of the iteration.
         if (tower_info) {
@@ -5481,6 +5657,7 @@ LayerResult GCode::process_layer(
                  + "\n";
         }
     }
+    BOOST_LOG_TRIVIAL(warning) << "[FLA-B] process_layer: extruder loop completed for layer=" << m_current_layer_idx;
     if (first_layer) {
         for (auto iter = by_extruder.begin(); iter != by_extruder.end(); ++iter) {
             if (!iter->second.empty())
@@ -5531,6 +5708,14 @@ LayerResult GCode::process_layer(
         gcode += insert_timelapse_gcode();
     }
 
+    // (Former FLA-B end-of-layer T sync removed — was a patch for the
+    // prime-tower-on case. FLA-DEV-HACK disables prime tower during
+    // development, so real tool changes now emit T<n> naturally and no
+    // end-of-layer sync is needed. When wipe tower regeneration ships,
+    // the plan-aware TCRs will keep writer/physical in sync themselves.)
+
+    BOOST_LOG_TRIVIAL(warning) << "[FLA-B] process_layer: about to return result for layer=" << m_current_layer_idx
+        << " gcode_size=" << gcode.size();
     result.gcode = std::move(gcode);
     result.cooling_buffer_flush = object_layer || raft_layer || last_layer;
     return result;
@@ -8076,5 +8261,270 @@ void GCode::ObjectByExtruder::Island::Region::append(const Type type, const Extr
 // Index into std::vector<LayerToPrint>, which contains Object and Support layers for the current print_z, collected for
 // a single object, or for possibly multiple objects with multiple instances.
 
+// ===========================================================================
+// Filament Lookahead Phase 6b+6c (Option B) — emission-time tower batching
+// ===========================================================================
+// Emit a tower's extra layers at raised Z. Called from process_layer's
+// extruder loop immediately after the base layer's normal extrusion is
+// written, so the nozzle is on the tower's filament and positioned somewhere
+// on the base zone. We walk k=1..extra_layers; for each, raise Z, find the
+// upper layer's extrusion entities whose region uses ext_id, and emit them
+// via extrude_entity. After the last stack: retract, safe-travel to the
+// pre-batch XY position, drop back to base Z, unretract.
+//
+// Known v1 limitations (documented in FILAMENT_LOOKAHEAD.md):
+// - Seam alignment across stack levels is not enforced — each layer's seam
+//   was chosen independently during slicing.
+// - Wipe tower purges for skipped tool changes on upper layers remain in
+//   the gcode — Phase 6d will rewrite the wipe tower per-layer (Rule 10).
+// - Support extrusion for tower-filament supports on upper layers is NOT
+//   currently emitted by this helper; v1 scope is object extrusion only.
+//   Deferred to a 6b follow-up once object batching is validated.
+std::string GCode::emit_lookahead_tower_extras(
+    const Print  &print,
+    size_t        base_layer_idx,
+    unsigned int  ext_id,
+    size_t        extra_layers,
+    double        base_z)
+{
+    std::string gcode;
+    if (extra_layers == 0)
+        return gcode;
+
+    // Cache entry XY: where the nozzle sits right now, on the base layer's
+    // zone. That point is outside the tower's active exclusion zone on
+    // subsequent raised-Z layers (it was a valid printing position at
+    // base_z, which is below all the stack Z slabs). Safe to return to
+    // after the stack finishes and drop Z from there.
+    const Vec3d pre_batch_pos = m_writer.get_position();
+
+    // Recursive extrude helper — region entity lists may contain
+    // ExtrusionEntityCollection wrappers (common in fill patterns); the
+    // non-recursive extrude_entity() throws on those. Descend into collections
+    // and dispatch each leaf path/multipath/loop through extrude_entity.
+    std::function<std::string(const ExtrusionEntity*, const char*, size_t&)> extrude_recursive;
+    extrude_recursive = [&](const ExtrusionEntity *ee, const char *desc, size_t &counter) -> std::string {
+        std::string out;
+        if (!ee) return out;
+        if (auto *coll = dynamic_cast<const ExtrusionEntityCollection*>(ee)) {
+            for (const ExtrusionEntity *child : coll->entities)
+                out += extrude_recursive(child, desc, counter);
+        } else {
+            const char *kind = nullptr;
+            if (dynamic_cast<const ExtrusionLoop*>(ee))       kind = "loop";
+            else if (dynamic_cast<const ExtrusionMultiPath*>(ee)) kind = "multipath";
+            else if (dynamic_cast<const ExtrusionPath*>(ee))  kind = "path";
+            else {
+                BOOST_LOG_TRIVIAL(warning) << "[FLA-B]      SKIP unknown entity type: " << typeid(*ee).name();
+                return out;
+            }
+            BOOST_LOG_TRIVIAL(warning) << "[FLA-B]      extrude #" << counter
+                << " kind=" << kind << " desc=" << desc << " START";
+            out += this->extrude_entity(*ee, desc);
+            BOOST_LOG_TRIVIAL(warning) << "[FLA-B]      extrude #" << counter << " DONE";
+            ++counter;
+        }
+        return out;
+    };
+
+    BOOST_LOG_TRIVIAL(warning) << "[FLA-B] emit batch: base_layer=" << base_layer_idx
+        << " ext=" << ext_id << " extra=" << extra_layers
+        << " base_z=" << base_z
+        << " pre_batch_pos=(" << pre_batch_pos.x() << "," << pre_batch_pos.y() << "," << pre_batch_pos.z() << ")";
+
+    // Retract before leaving the base-layer extrusion.
+    try {
+        gcode += m_writer.retract();
+    } catch (const std::exception &e) {
+        BOOST_LOG_TRIVIAL(error) << "[FLA-B] exception in initial retract: " << e.what();
+        throw;
+    }
+
+    // Save base layer's nominal Z — we'll restore it after the batch so the
+    // rest of the base layer's emission (more extruder iterations, etc.)
+    // continues as expected at base_z.
+    const coordf_t saved_nominal_z = m_nominal_z;
+
+    for (size_t k = 1; k <= extra_layers; ++k) {
+        size_t upper_li = base_layer_idx + k;
+        const auto &obj_layers = print.objects().front()->layers();
+        if (upper_li >= obj_layers.size()) break;
+        const double upper_z = obj_layers[upper_li]->print_z;
+
+        // CRITICAL: set m_nominal_z to the raised Z. `GCode::travel_to` uses
+        // m_nominal_z as the default target Z when the extrude methods call
+        // it. Without this, extrude_entity's internal travels would force Z
+        // back down to the base layer's print_z, collapsing all stack extras
+        // onto base Z (breaks the tower completely + confuses the gcode
+        // viewer). Restored to saved_nominal_z at the end of the batch.
+        m_nominal_z = upper_z;
+
+        // Raise Z to the upper layer's print Z.
+        try {
+            gcode += m_writer.travel_to_z(upper_z, "; lookahead tower stack z-raise");
+            gcode += m_writer.unretract();
+        } catch (const std::exception &e) {
+            BOOST_LOG_TRIVIAL(error) << "[FLA-B] exception in z-raise/unretract k=" << k
+                << " upper_z=" << upper_z << ": " << e.what();
+            throw;
+        }
+
+        // Walk all print objects for entities on this upper layer.
+        size_t entities_emitted = 0;
+        for (const PrintObject *pobj : print.objects()) {
+            const auto &pobj_layers = pobj->layers();
+            if (upper_li >= pobj_layers.size()) continue;
+            const Layer *up_layer = pobj_layers[upper_li];
+            if (!up_layer) continue;
+
+            for (const LayerRegion *region : up_layer->regions()) {
+                if (!region || !region->has_extrusions()) continue;
+                const auto &rcfg = region->region().config();
+                // Per-entity filament: perimeters use wall_filament; fill
+                // entities use solid_infill_filament or sparse_infill_filament
+                // depending on the entity's role (mirrors LayerTools::extruder
+                // in ToolOrdering.cpp). Previously only wall_filament was
+                // checked, which silently dropped every fill entity whose
+                // sparse/solid infill filament differed from its wall filament
+                // — resulting in ~13% missing extrusion in tower-extra layers.
+                const unsigned int wall_ext       = (unsigned int)(rcfg.wall_filament.value - 1);
+                const unsigned int solid_fill_ext = (unsigned int)(rcfg.solid_infill_filament.value - 1);
+                const unsigned int sparse_fill_ext = (unsigned int)(rcfg.sparse_infill_filament.value - 1);
+
+                // Perimeters: filament is wall_filament. Skip the whole
+                // perimeter collection if it doesn't belong to ext_id.
+                if (wall_ext == ext_id) {
+                for (const ExtrusionEntity *ee : region->perimeters.entities) {
+                    try {
+                        gcode += extrude_recursive(ee, "lookahead-tower-perimeter", entities_emitted);
+                    } catch (const std::exception &e) {
+                        BOOST_LOG_TRIVIAL(error) << "[FLA-B] exception in perimeter extrude k=" << k
+                            << " upper_li=" << upper_li << " ext=" << ext_id
+                            << " entity_type=" << typeid(*ee).name()
+                            << " what=" << e.what();
+                        throw;
+                    }
+                }
+                } // end `if wall_ext == ext_id`
+
+                // Fill entities: filament depends on whether the collection
+                // contains solid or sparse infill. Each entity in region->fills.entities
+                // is an ExtrusionEntityCollection — check has_solid_infill() on
+                // it to decide.
+                for (const ExtrusionEntity *ee : region->fills.entities) {
+                    auto *coll = dynamic_cast<const ExtrusionEntityCollection*>(ee);
+                    unsigned int this_fill_ext = sparse_fill_ext;
+                    if (coll && coll->has_solid_infill())
+                        this_fill_ext = solid_fill_ext;
+                    else if (!coll) {
+                        // Shouldn't happen (fills are always wrapped in a collection)
+                        // but be defensive: infer from the entity's role.
+                        const ExtrusionRole r = ee ? ee->role() : erNone;
+                        if (is_solid_infill(r) || r == erIroning)
+                            this_fill_ext = solid_fill_ext;
+                    }
+                    if (this_fill_ext != ext_id)
+                        continue;
+                    try {
+                        gcode += extrude_recursive(ee, "lookahead-tower-infill", entities_emitted);
+                    } catch (const std::exception &e) {
+                        BOOST_LOG_TRIVIAL(error) << "[FLA-B] exception in infill extrude k=" << k
+                            << " upper_li=" << upper_li << " ext=" << ext_id
+                            << " entity_type=" << typeid(*ee).name()
+                            << " what=" << e.what();
+                        throw;
+                    }
+                }
+            }
+
+            // Support extrusions for this extruder on the upper layer.
+            // SupportLayers are separate from object Layers; find the one
+            // matching upper_z (if any) and emit its support_fills entries
+            // whose filament resolves to ext_id. This picks up tree/normal
+            // supports, interface layers, etc. — without this, any support
+            // content of the tower's filament on upper layers is silently
+            // dropped (a major cause of the extrusion deficit).
+            for (const SupportLayer *slayer : pobj->support_layers()) {
+                if (!slayer || slayer->support_fills.entities.empty()) continue;
+                if (std::abs(slayer->print_z - upper_z) > EPSILON) continue;
+
+                // Resolve support + interface filament, consulting the
+                // Phase 3a Any-Type override map if present.
+                int support_val = pobj->config().support_filament.value;
+                int iface_val   = pobj->config().support_interface_filament.value;
+
+                auto resolve_via_plan = [&](int cfg_val, bool is_iface) -> int {
+                    if (is_support_filament_any_type(cfg_val) && m_lookahead_plan && m_lookahead_plan->enabled()) {
+                        auto ovr = m_lookahead_plan->override_for_support(slayer, is_iface);
+                        if (ovr) return (int)*ovr + 1;
+                    }
+                    return cfg_val;
+                };
+                support_val = resolve_via_plan(support_val, false);
+                iface_val   = resolve_via_plan(iface_val, true);
+
+                const unsigned int base_ext = (support_val > 0 && !is_support_filament_any_type(support_val))
+                    ? (unsigned int)(support_val - 1) : (unsigned int)-1;
+                const unsigned int iface_ext = (iface_val > 0 && !is_support_filament_any_type(iface_val))
+                    ? (unsigned int)(iface_val - 1) : (unsigned int)-1;
+
+                // Walk support_fills entities, dispatching by role.
+                std::function<void(const ExtrusionEntity*)> walk_support;
+                walk_support = [&](const ExtrusionEntity *ee) {
+                    if (!ee) return;
+                    if (auto *coll = dynamic_cast<const ExtrusionEntityCollection*>(ee)) {
+                        for (const ExtrusionEntity *child : coll->entities)
+                            walk_support(child);
+                        return;
+                    }
+                    const ExtrusionRole r = ee->role();
+                    const bool is_iface_entity = (r == erSupportMaterialInterface);
+                    const unsigned int entity_ext = is_iface_entity ? iface_ext : base_ext;
+                    if (entity_ext != ext_id) return;
+                    gcode += extrude_recursive(ee, is_iface_entity ? "lookahead-tower-support-iface" : "lookahead-tower-support", entities_emitted);
+                };
+                for (const ExtrusionEntity *ee : slayer->support_fills.entities)
+                    walk_support(ee);
+            }
+        }
+
+        BOOST_LOG_TRIVIAL(warning) << "[FLA-B]   stack k=" << k << " upper_li=" << upper_li
+            << " z=" << upper_z << " entities=" << entities_emitted << " COMPLETE";
+
+        // Retract between stack levels so the z-raise to k+1 doesn't ooze.
+        BOOST_LOG_TRIVIAL(warning) << "[FLA-B]   between-stack retract START k=" << k;
+        try {
+            gcode += m_writer.retract();
+        } catch (const std::exception &e) {
+            BOOST_LOG_TRIVIAL(error) << "[FLA-B] exception in between-stack retract k=" << k << ": " << e.what();
+            throw;
+        }
+        BOOST_LOG_TRIVIAL(warning) << "[FLA-B]   between-stack retract DONE k=" << k;
+    }
+
+    BOOST_LOG_TRIVIAL(warning) << "[FLA-B] all stacks done, entering safe-exit";
+    // Restore nominal Z to base layer so subsequent emission on this layer
+    // (further extruder iterations) uses the right Z default.
+    m_nominal_z = saved_nominal_z;
+    // Safe exit: travel XY back to the pre-batch position (known-safe on
+    // base layer), drop Z to base, then unretract.
+    try {
+        BOOST_LOG_TRIVIAL(warning) << "[FLA-B]   safe-exit: travel_to_xy to ("
+            << pre_batch_pos.x() << "," << pre_batch_pos.y() << ")";
+        gcode += m_writer.travel_to_xy(Vec2d(pre_batch_pos.x(), pre_batch_pos.y()),
+                                        "; lookahead tower safe-exit travel");
+        BOOST_LOG_TRIVIAL(warning) << "[FLA-B]   safe-exit: travel_to_z to " << base_z;
+        gcode += m_writer.travel_to_z(base_z, "; lookahead tower z-return to base");
+        BOOST_LOG_TRIVIAL(warning) << "[FLA-B]   safe-exit: unretract";
+        gcode += m_writer.unretract();
+        BOOST_LOG_TRIVIAL(warning) << "[FLA-B]   safe-exit DONE";
+    } catch (const std::exception &e) {
+        BOOST_LOG_TRIVIAL(error) << "[FLA-B] exception in safe-exit: " << e.what();
+        throw;
+    }
+
+    BOOST_LOG_TRIVIAL(warning) << "[FLA-B] emit_lookahead_tower_extras returning cleanly";
+    return gcode;
+}
 
 } // namespace Slic3r

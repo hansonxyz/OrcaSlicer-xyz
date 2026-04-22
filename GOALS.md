@@ -59,13 +59,15 @@ Wishlist item. Add an optional travel move behavior: when the toolhead travels f
 
 Wishlist item. Currently, "flush into infill" is a simple all-or-nothing boolean for the entire print. When enabled, purge material from filament changes is deposited into infill regions to reduce waste. However, when printing with bright, white, or translucent filaments, colored purge material can bleed through thin walls and discolor the surface.
 
-**Goal:** Add a per-filament or color-aware toggle so that flush-into-infill is automatically disabled for filaments whose color is close to white or very light (e.g., >60% toward white in luminance). This way, dark filament purge material won't be flushed into infill behind thin walls of a white/light part, but flush-into-infill remains active for darker filaments where it doesn't cause visible defects.
+**Goal:** Flush-into-infill should refuse to deposit purge material into objects whose assigned filament is **brighter than a luminance threshold** (default: RGB 0.6/0.6/0.6 — any filament with each channel >0.6 is excluded as a flush target). Dark filament purge therefore never lands behind the thin walls of a light-colored part where bleed-through would be visible. Flush-into-infill remains active for objects whose filament is at or below the brightness threshold.
 
 **Key considerations:**
 - This decision must happen at slice time during toolpath generation, not at gcode execution time
 - By the time gcode runs, purge-into-infill moves are indistinguishable from regular extrusion
-- Could be implemented as a per-filament override (checkbox per filament: "allow flush into infill") and/or an automatic heuristic based on filament color luminance
-- The per-filament approach is simpler and more predictable; the automatic heuristic is a nice-to-have on top
+- Threshold is applied per-object based on that object's assigned filament color. An object printed in white filament gets skipped as a flush target; an object in black filament stays eligible.
+- Threshold should be configurable (default 0.6 per channel). UI: a slider or numeric input in the flush-into-infill settings.
+- Could also add a per-filament override (checkbox per filament: "allow flush into infill") for manual overrides that bypass the luminance heuristic. Per-filament override and automatic luminance heuristic can coexist: the heuristic provides the default, the override forces a specific answer.
+- Any channel exceeding threshold disqualifies (so pure red 1.0/0/0 is still eligible, but cream 1.0/0.95/0.9 is not). Alternative: compute perceived luminance (e.g. 0.299R + 0.587G + 0.114B) and threshold that instead — decide during implementation.
 
 ## Future Goal: Multi-Material Purge Calibration Tool (not yet implementing)
 

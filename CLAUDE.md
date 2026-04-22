@@ -155,7 +155,22 @@ Resolution: **OpenBambu** — open-source LAN protocol replacement.
 ### CLI Headless Slicing (for testing xyz fork features)
 OrcaSlicer supports headless CLI slicing:
 ```bash
-build/OrcaSlicer/orca-slicer.exe --slice 2 "path\to\model.3mf"
+build/OrcaSlicer/orca-slicer.exe --slice 1 --outputdir "C:\path\to\out" "path\to\model.3mf"
+```
+This drives the same `GCode::_do_export()` / `process_layer()` pipeline as the GUI, but without GUI startup, document-recovery prompts, or manual clicks. Preferred for mid-iteration testing. See `FILAMENT_LOOKAHEAD.md` for the "Development mandate — CLI headless testing" section.
+
+### Gcode Debug Tools (`debug-tools/`)
+
+Python helpers for inspecting lookahead-feature gcode output. No external dependencies — pure stdlib.
+
+- **`debug-tools/lookahead_towers.py <gcode>`** — summarize all filament-lookahead towers in a gcode file. Reports per tower: covered layer range, extruder id, tool-in-head at tower start, XY bounds, total extrusion (mm of E), and per-stack breakdown. Pass `--json` for machine-readable output.
+- **`debug-tools/layer_regions.py <gcode> <layer_idx>`** — dissect a single gcode layer. Reports regions grouped by active tool + lookahead mode (normal vs inside a tower block), with extrusion volume and XY bounds per region. Also lists any batched-in tower extras whose raised Z matches this layer's Z but whose gcode was emitted under another layer's block.
+- **`debug-tools/gcode_common.py`** — shared parsing helpers (regexes, G1 axis parser, layer/tower scanners). Imported by the tools above.
+
+Run with Python 3:
+```bash
+python debug-tools/lookahead_towers.py "path\to\plate_1.gcode"
+python debug-tools/layer_regions.py "path\to\plate_1.gcode" 266
 ```
 
 ## Architecture

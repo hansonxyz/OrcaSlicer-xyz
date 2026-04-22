@@ -111,6 +111,23 @@ public:
     void next_layer() { ++ m_layer_idx; m_tool_change_idx = 0; }
     std::string tool_change(GCode &gcodegen, int extruder_id, bool finish_layer);
     bool is_empty_wipe_tower_gcode(GCode &gcodegen, int extruder_id, bool finish_layer);
+    // Phase 6b+6c (Filament Lookahead Option B): advance m_tool_change_idx
+    // without emitting any gcode. Used when the extruder's iteration is being
+    // skipped because its extrusion was batched into a lower layer's tower
+    // pass. Keeps the pre-generated tool-change array in sync so subsequent
+    // tool_change() calls don't see mismatched new_tool IDs. Mirrors the
+    // conditions under which tool_change() itself would have advanced the
+    // index, so the skip is idempotent for the cases where tool_change()
+    // would have been a no-op (sparse-layer skipping).
+    void skip_tool_change_for_tower(GCode &gcodegen, int extruder_id, bool finish_layer);
+    // Debug peek: returns the tool-change array for the CURRENT layer index
+    // (which is m_layer_idx + 1 because next_layer() is called BEFORE
+    // process_layer emits; or the next layer's index from the caller's view).
+    int peek_layer_idx_for_next() const { return m_layer_idx; }
+    const std::vector<WipeTower::ToolChangeResult>* peek_tool_changes_for_next_layer() const {
+        if (m_layer_idx < 0 || m_layer_idx >= (int) m_tool_changes.size()) return nullptr;
+        return &m_tool_changes[m_layer_idx];
+    }
     std::string finalize(GCode &gcodegen);
     std::vector<float> used_filament_length() const;
 
@@ -477,6 +494,18 @@ private:
     std::string     extrude_perimeters(const Print& print, const std::vector<ObjectByExtruder::Island::Region>& by_region, bool is_first_layer, bool is_infill_first);
     std::string     extrude_infill(const Print& print, const std::vector<ObjectByExtruder::Island::Region>& by_region, bool ironing);
     std::string     extrude_support(const ExtrusionEntityCollection& support_fills, const ExtrusionRole support_extrusion_role);
+
+    // Phase 6b+6c (Filament Lookahead Option B): emit a tower's extra layers at
+    // raised Z immediately after its base layer's extrusion. Walks each upper
+    // layer's extrusion entities filtered to ext_id and emits them via
+    // extrude_entity, bracketed by retract / Z-raise / travel and a safe exit.
+    // Returns the generated gcode string.
+    std::string     emit_lookahead_tower_extras(
+        const Print  &print,
+        size_t        base_layer_idx,
+        unsigned int  ext_id,
+        size_t        extra_layers,
+        double        base_z);
 
     // BBS
     LiftType to_lift_type(ZHopType z_hop_types);

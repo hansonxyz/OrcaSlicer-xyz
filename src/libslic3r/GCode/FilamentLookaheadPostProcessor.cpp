@@ -23,6 +23,7 @@ static std::string get_attr(const std::string &line, const std::string &key)
 
 static size_t to_size(const std::string &s) { return s.empty() ? 0 : std::stoul(s); }
 static unsigned int to_uint(const std::string &s) { return s.empty() ? 0u : (unsigned int)std::stoul(s); }
+static double to_double(const std::string &s) { return s.empty() ? 0.0 : std::stod(s); }
 
 static std::vector<unsigned int> parse_csv_uints(const std::string &s)
 {
@@ -73,6 +74,7 @@ bool FilamentLookaheadPostProcessor::parse()
             b.extra_layers = to_size(get_attr(line, "extra_layers"));
             const std::string role = get_attr(line, "role");
             b.is_base = (role == "base");
+            b.z       = to_double(get_attr(line, "z"));
             m_blocks.push_back(b);
             open_stack.push_back(m_blocks.size() - 1);
         } else if (line.rfind("; LOOKAHEAD_BLOCK_END", 0) == 0) {
@@ -119,7 +121,7 @@ bool FilamentLookaheadPostProcessor::write(const std::string &path) const
     return (bool)f;
 }
 
-bool FilamentLookaheadPostProcessor::process(const std::string &path)
+bool FilamentLookaheadPostProcessor::process(const std::string &path, bool apply_transform)
 {
     m_lines.clear();
     m_blocks.clear();
@@ -145,12 +147,17 @@ bool FilamentLookaheadPostProcessor::process(const std::string &path)
     }
 
     BOOST_LOG_TRIVIAL(warning) << "[FLA-PP] parsed " << m_lines.size() << " lines, "
-        << m_blocks.size() << " tower blocks, " << m_layers.size() << " layer-info markers";
+        << m_blocks.size() << " tower blocks, " << m_layers.size() << " layer-info markers"
+        << " (shadow verification only - transform=" << (apply_transform ? "on" : "off") << ")";
 
-    // Phase 6a: no-op transform. Just round-trip the file.
-    // Phase 6b will add block extraction/relocation here.
-    // Phase 6c will add Z bracketing.
-    // Phase 6d will rewrite wipe tower per-layer.
+    // Option B direction: the actual batching transform moved to
+    // process_layer via GCode::emit_lookahead_tower_extras. This
+    // post-processor stays as a verification shadow — always writes
+    // back verbatim. `apply_transform` is currently unused but retained
+    // in the API for future text-based cleanups (e.g. Phase 6d wipe
+    // tower rewrite, if implemented as post-process rather than
+    // ToolOrdering regen).
+    (void)apply_transform;
 
     if (!write(path)) {
         BOOST_LOG_TRIVIAL(error) << "[FLA-PP] write failed for " << path;

@@ -2116,6 +2116,37 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
 
     name_tbb_thread_pool_threads_set_locale();
 
+    // ─────────────────────────────────────────────────────────────────────
+    // FLA-DEV-HACK: when filament_lookahead is enabled, forcibly disable
+    // the prime/wipe tower for the duration of the slice. This is a
+    // TEMPORARY development workaround while Option B tower emission is
+    // being stabilized — the wipe tower's pre-generated tool-change array
+    // conflicts with our tower-extra skipping, and patching around it
+    // creates brittle corner cases (wrong-filament bugs, etc.).
+    //
+    // TO REMOVE: delete this block once the wipe tower regeneration step
+    // (Phase 6f / "wipe tower reborn") is implemented. At that point the
+    // plan is built before psWipeTower runs, ToolOrdering + wipe tower are
+    // regenerated with lookahead-adjusted layer_filaments, and the TCRs
+    // naturally match our emission.
+    //
+    // See FILAMENT_LOOKAHEAD.md → "Dev-mode wipe tower disable" for the
+    // removal checklist.
+    {
+        // Also honor the FLA_FORCE_NO_PRIME env var so we can slice a
+        // no-lookahead baseline with prime tower off (for dev comparisons).
+        const char *env_force = std::getenv("FLA_FORCE_NO_PRIME");
+        const bool force_via_env = env_force && env_force[0] != '\0' && env_force[0] != '0';
+        if ((m_config.filament_lookahead.value || force_via_env) && m_config.enable_prime_tower.value) {
+            BOOST_LOG_TRIVIAL(warning) << "[FLA-DEV-HACK] forcibly disabling enable_prime_tower for this slice "
+                << "(trigger=" << (m_config.filament_lookahead.value ? "filament_lookahead" : "FLA_FORCE_NO_PRIME")
+                << "). Output gcode is NOT printable (no wipe-tower purge). "
+                << "See FILAMENT_LOOKAHEAD.md for removal details.";
+            const_cast<ConfigOptionBool&>(m_config.enable_prime_tower).value = false;
+        }
+    }
+    // ─────────────────────────────────────────────────────────────────────
+
     //compute the PrintObject with the same geometries
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": this=%1%, enter, use_cache=%2%, object size=%3%")%this%use_cache%m_objects.size();
     if (m_objects.empty())

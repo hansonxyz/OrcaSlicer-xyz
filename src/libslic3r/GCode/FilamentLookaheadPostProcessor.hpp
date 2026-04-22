@@ -25,6 +25,7 @@ public:
         size_t       stack_index = 0;
         size_t       extra_layers = 0;
         bool         is_base     = false; // role=base when stack_index==0
+        double       z           = 0.0;   // layer's print_z, from BLOCK_BEGIN z= attribute
     };
 
     // Per-layer metadata from LAYER_INFO markers.
@@ -37,7 +38,12 @@ public:
     // Run the post-processor on the gcode at `path`. Returns true on success.
     // On parse error or validation failure, logs and returns false without
     // modifying the file.
-    bool process(const std::string &path);
+    //
+    // If apply_transform is true, tower extra-layer blocks are extracted and
+    // relocated to their base layer's tower pass with Z-brackets between
+    // stack levels (Phase 6b + 6c). If false, the file round-trips unchanged
+    // (Phase 6a baseline — used when filament_lookahead_post_process is off).
+    bool process(const std::string &path, bool apply_transform);
 
     // Stats populated after a successful process() call.
     size_t blocks_found()     const { return m_blocks.size(); }

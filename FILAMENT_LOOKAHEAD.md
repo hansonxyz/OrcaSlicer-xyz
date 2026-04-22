@@ -7,6 +7,28 @@ Status: Phases 1, 2, 3a, 3b, 3c, 5a, 5c, 6a complete; 5b skipped. Post-processor
 
 On single-nozzle multi-material printers (e.g. X1C / A1 with AMS), when a region printed with one filament is spatially isolated from other filaments on the plate, print multiple consecutive layers of that region before switching filaments — instead of switching on every layer. Each skipped filament change saves purge material and ~30–60 seconds of tool-change time. On typical MMU painted models, a "disappearing extruder" case (e.g. a gold nub on top of a body) can eliminate *all* subsequent tool changes for that filament, saving hours and 50%+ of its purge.
 
+## Development mandate — CLI headless testing for iteration
+
+**Primary test file:** `C:\Users\brian\Desktop\obj_1_tulipan_mod.3mf`. This project is preconfigured with tree supports, 4 filaments including a PVA support-interface filament, multi-material regions that produce the disappearing-extruder case, and enough geometry variety (tall body + extras at mid-upper layers) to exercise the full spectrum of lookahead conditions: tower chaining, Rule 4 filament-completeness rejections, Any-Type support filament resolution (Phase 3a overrides), and the wipe tower tool-change sequence issues that Option B has to handle. Use it for the default iteration loop; fall back to other models only if chasing a scenario-specific regression.
+
+Use `orca-slicer.exe --slice 1 --outputdir <dir> <model.3mf>` for **all mid-iteration verification** during implementation. The CLI drives the same `GCode::_do_export()` / `process_layer()` path that the GUI uses, so filament lookahead code exercises identically. Advantages vs manual GUI testing:
+
+- No document-recovery prompt to dismiss.
+- No click-to-slice; exit code indicates success/failure.
+- Writes `[FLA]` / `[FLA-B]` / `[FLA-PP]` log lines to `C:\Users\brian\AppData\Roaming\OrcaSlicer\log\debug_*.log.0` just like GUI mode.
+- Can be invoked in a background task so the Claude loop gets a completion notification.
+
+**Standard dev iteration flow:**
+
+1. Make code change.
+2. `xyz/build_artifacts/build_incremental.ps1` (background task, wait for notification).
+3. Run `orca-slicer.exe --slice 1 --outputdir <tmpdir> <test.3mf>` (background task, wait for notification).
+4. Check exit code + read the latest log file from `AppData\Roaming\OrcaSlicer\log`.
+5. If the output gcode is relevant, inspect it too (e.g. for `LOOKAHEAD_*` markers).
+6. **Only when a full discrete sub-phase (e.g. Phase 6b, Phase 6d) is complete**, hand off to the user for manual GUI verification. The user confirms the preview + interaction are correct before the sub-phase ships.
+
+Manual user tests are reserved for end-of-sub-phase verification, not for every build iteration during debugging.
+
 ## Development mandate — verbose logging
 
 During development of this feature, every non-trivial decision point in the analysis, planning, and emission code **must** emit a log entry at `info` level or above, tagged with `[FLA]`, describing:
@@ -921,6 +943,243 @@ Target: total slicing overhead from lookahead should be <10% of baseline slicing
 - **Gcode comment emission**: `; LOOKAHEAD_EXCLUSION_ZONE x_min=... y_min=... x_max=... y_max=... z_max=...` emitted per affected layer from `GCode.cpp`; also populated directly into `m_processor.result().lookahead_exclusion_zones` for the in-memory GUI preview path.
 - **GCodeProcessor parsing**: comments parsed back into the struct for file-loaded gcode.
 - **GCodeViewer rendering**: zones drawn as yellow translucent rectangles, filtered by the vertical layer slider's visible range, toggleable via "Travel Exclusion Zones" in FeatureType / Speed / ActualSpeed legends.
+
+## Phase 6 architecture decision — tower emission
+
+Phase 6's goal is to produce valid gcode for batched towers: at the base layer, after normal extrusion, print the tower's base, then each upper-layer slice of the tower at a raised Z, then return to base layer Z outside the tower's exclusion zone. This raises four correctness problems beyond "move text around":
+
+### Problem 1 — Wipe tower purges carried in relocated blocks
+
+In the current Phase 5c emission, each extruder iteration wrapped by `LOOKAHEAD_BLOCK_BEGIN/END` contains, at its start, the wipe-tower tool-change gcode (the purge deposits filament onto the wipe tower at that layer's Z). If we relocate the full block from layer L+1 to layer L (to batch it with the base), the baked purge says "go to (X, Y, Z_L+1) on the wipe tower and extrude", but **wipe tower layer L+1 hasn't been built yet** at the base layer's timeline — extrusion would deposit in thin air and collide with the physical wipe tower's top.
+
+Required behavior (per user spec):
+- The single real tool change to the tower's filament happens once at the base layer (when entering the tower batch).
+- **No tool change, no purge** happens on upper-layer positions for the tower's filament.
+- The wipe tower's *bridging / purge lines* for those skipped tool changes must not be emitted.
+- The wipe tower's *structural contour edges* on those layers — the perimeter / wall that the bridge lines anchor to — **must still be printed** during normal-layer emission of each upper layer, using whichever filament is actively printing there. Without that structural fill, the wipe tower would have missing layers and the tower above wouldn't stand.
+
+### Problem 2 — Retraction state across block boundaries
+
+The emission pipeline runs with implicit retract/unretract state carried across layers. Moving a block out of its original context leaves both sites with inconsistent retract assumptions:
+- At the relocation site (base layer, just after the base block's last extrusion), we may be in "retracted" or "not retracted" state depending on where the base block ended; the relocated extra-layer block assumes its own entry state.
+- At the original site (upper layer, where the block used to be), the surrounding code expected certain retract state between adjacent iterations.
+
+v1 fix: wrap each relocated block with explicit retract-before and unretract-after; strip internal retract state so it's self-contained.
+
+### Problem 3 — Z context and safe exit
+
+Phase 5c markers now include `z=<print_z>` so the post-processor knows each block's intended Z. Between stack levels we emit `G1 Z<base_z + k·layer_height>`. After the last stack, Rule 8 says we park the nozzle **outside the tower's exclusion zone** before dropping Z back to base.
+
+Safe-exit XY: cache the position just before entering the base block (that point is by definition outside the tower's inflated zone — it's where the previous normal-mode emission ended).
+
+### Problem 4 — Seam placement within a tower
+
+Each stack level's extrusion was sliced independently with its own seam choice. When batched, the seams on consecutive stack levels won't align vertically, producing a ragged seam surface across the tower's height. This is a v1 aesthetic compromise documented here; cleaner seam alignment is future polish (Phase 7 or beyond).
+
+### Planned solutions
+
+**For Problem 1 (wipe tower):**
+- **Amend Phase 5c** to emit *inner markers* wrapping only the object+support extrusion portion of each iteration (after the wipe-tower tool-change prefix). Relocate only the inner span.
+- The outer BLOCK_BEGIN/END + tool-change prefix stays at the original layer. The original layer ends up doing an unnecessary tool change — wasted purge — but the purge lands at the *correct* Z for its wipe tower layer (the slab exists by the time it runs).
+- **Phase 6d (Rule 10 wipe tower rewrite)** eliminates those wasted purges by: stripping the entire tool-change + purge text for filaments that end up being tower-mode (lookahead-active) on that layer, and adding a replacement structural fill using a non-tower filament already printing on that layer. The *structural contours* of the wipe tower (walls enclosing purge bridges) are preserved.
+
+**For Problem 2 (retraction):**
+- Before each relocated block's content: emit `G1 E-<retract_length>` (retract).
+- After the last stack and Z-return: emit `G1 E<retract_length>` (unretract).
+- The block's internal retract/unretract state is unchanged — we just bracket it.
+
+**For Problem 3 (Z + safe exit):**
+- Cache nozzle XY at base-block entry.
+- Between stacks: `G1 Z<base_z + k·layer_height>` bracketing.
+- After last stack: retract → `G1 X<cached.x> Y<cached.y>` → `G1 Z<base_z>` → unretract.
+
+**For Problem 4 (seam):** accept for v1, document.
+
+## Phase 6 architecture — analysis of integration options
+
+The big question is *where in the pipeline* tower batching should happen. Three candidates, evaluated against the actual OrcaSlicer architecture (not hypothetical).
+
+### What the current architecture offers
+
+Observed from `src/libslic3r/GCode.hpp` and `src/libslic3r/GCodeWriter.hpp`:
+
+- **`GCode` class has public extrusion methods**: `extrude_perimeters(print, by_region, ...)`, `extrude_infill(print, by_region, ironing)`, `extrude_support(support_fills, role)`, and the lower-level `extrude_entity(entity, ...)`. These take extrusion data and return gcode as a `std::string`. They operate on any `ExtrusionEntity` — not tied to a specific layer's data.
+- **`GCodeWriter` exposes Z / retraction / position control**: `travel_to_z(z)`, `retract()`, `unretract()`, `lift()` / `unlift()`, `set_position(Vec3d)`, `get_position()`. So we can place the nozzle anywhere between extrude calls.
+- **`Print` is fully in-scope during emission**: `print.objects()[o]->layers()[i]` gives any layer's extrusion regions; `print.objects()[o]->support_layers()[i]` gives support regions. The emitter is not restricted to the "current" layer's data.
+- **The layer pipeline (`process_layers`) is `tbb::parallel_pipeline` with serial_in_order output**: generators run in parallel, filters run in order, output is serialized. A `process_layer` call for layer L can't rely on the output of layer L-1 having been written, but it has full read-only access to `Print`.
+- **ToolOrdering is pre-computed in `Print::process()` (psWipeTower stage)**, stored on `Print` as `m_tool_ordering`. Wipe tower gcode is baked from that ordering at that time.
+
+### Option A — Post-process text (current Phase 6a direction)
+
+Read the emitted gcode file, parse LOOKAHEAD markers, rewrite blocks, write back.
+
+**Pros**
+- Smallest invasion into the existing pipeline — the gcode emitter is unchanged.
+- Runs after all filters (cooling buffer, pressure equalizer, fan mover) have done their work, so we don't fight them.
+- Easy to A/B compare by turning the flag off (gcode is byte-identical pre-Phase-6a).
+- Can be written, tested, and disabled in isolation.
+
+**Cons**
+- Text manipulation is fragile against upstream format drift — OrcaSlicer comment conventions change.
+- Retraction state is implicit in the stream; we have to bracket with explicit retract/unretract to make it safe (Problem 2).
+- Wipe tower purges embedded in the text are baked with specific Z coordinates; relocating them is unsafe (Problem 1), so we need to leave the tool-change prefix in place and rely on Phase 6d to strip later.
+- Seam, retraction, and pressure advance decisions are frozen at their original layer's context. When the block moves, those decisions don't re-evaluate.
+- We don't get to *generate new extrusion gcode* through the existing machinery — anything novel (structural fill for wipe tower gaps) has to be synthesized by hand.
+
+**Feasibility**: works for v1 with known compromises (wasted purges, ragged seams, explicit retract brackets). Phase 6b+6c+6d doable in this mode with escalating complexity.
+
+### Option B — Emission-time batching (in `process_layer`)
+
+At the base layer's emission, after the base's own tower extrusion is written via the existing extrude methods, directly call `extrude_*` for the upper-layer tower extrusions at the raised Z, with Z manipulation bracketed via `GCodeWriter::travel_to_z()` + `retract()` / `unretract()`. Skip F's emission on upper layers.
+
+**Pros**
+- Reuses the existing extrusion machinery (`extrude_perimeters`, `extrude_infill`, `extrude_support`) — retraction, wipe-before-external-loop, pressure advance, cooling fan, and seam-placer all run naturally on the raised-Z extrusion. State machines stay consistent because we're still inside the emitter's normal flow.
+- Z + position control is first-class (`travel_to_z`, `set_position`, `retract`).
+- Can "skip F's emission" on upper layers cleanly by consulting the plan inside `process_layer`.
+- No text manipulation, no parsing fragility.
+- Emission of wipe-tower structural fill (Problem 1's real fix) can use the same existing extrude infrastructure.
+
+**Cons**
+- Invasive: `process_layer` is already a big, intricate function. Adding a "batch upper layers' extrusion at raised Z" branch is non-trivial — ~200-400 LOC.
+- Interacts with the parallel pipeline: if we batch L+1's F-extrusion into layer L's emission, L+1's `process_layer` shouldn't emit F but still needs to emit everything else. Two layers end up cross-communicating through the plan; each layer's output is still a self-contained gcode string, so it's fine for serial_in_order output, but we have to be careful that L+1's skip doesn't leave orphan state (e.g. expected tool changes).
+- ToolOrdering's pre-computed sequence assumes the original layer structure. A tool change to F expected on L+1 won't happen (F is already active from layer L's batch). The wipe tower's pre-generated tool-change index needs matching adjustment — this was the root cause of the original Phase 5b failure. Fix: regenerate ToolOrdering + wipe tower after the plan is built, OR teach the wipe tower to skip pre-generated entries flagged by the plan.
+- Writer state (retraction, position, cooling) at the end of base-layer batching must be valid for the subsequent emission (other extruders on the same layer or next layer's layer-change). The retract/unretract bracketing around the batch makes this self-contained but needs care.
+
+**Feasibility**: moderately invasive but architecturally clean. Each sub-problem has a natural home:
+- Problem 1: the "skip F on upper layer" logic lives in `process_layer`; structural fill for wipe tower can be synthesized via existing `extrude_*` calls.
+- Problems 2, 3: `GCodeWriter::retract`, `travel_to_z`, cached XY — all directly supported.
+- Problem 4: seam still per-slice but easier to mitigate (could re-run seam-placer on the raised-Z entities with base-layer's seam hint).
+
+### Option C — Sub-renderer / recursive slicing (what you asked about)
+
+Conceptually: at Phase 6 time, for each tower, spin up a second instance of the emission pipeline, feed it "just the tower's extrusion entities" with shifted Z, capture its gcode, splice it into the main stream.
+
+**What the architecture does NOT support today**
+- `GCode` is not designed as a reusable, standalone emitter. It mutates its own state during `process_layer` and expects to run once over a `Print`. It isn't reentrant — a second `GCode` instance sharing writer state would corrupt.
+- `Print::process()` is heavy: validation, per-object `PrintObject::process()` (posSlice through posDetectOverhangs), plate-level `psWipeTower` and `psSkirtBrim`. You wouldn't want to run it a second time for just a tower.
+- The slicer is a library, not an external program. You can't fork a sub-process cheaply; invoking "the slicer" recursively means constructing a new `Print` and running its pipeline, which is heavy and assumes access to the whole Model / Config.
+
+**What would need to change for Option C to be viable**
+- `GCode` emitter would need to become re-entrant: hoist state-machine fields (current position, filament, retraction, cooling) into a per-emission `EmitterState` struct; constructor takes state-or-default. Big refactor.
+- `Print` would need a mode where `process()` only runs a subset of stages (the tower's extrusion entities already exist in `PrintObject::layers()`; we don't need to re-slice geometry, just re-emit gcode for a subset of them). That's plausible to factor out.
+- Merging the sub-emitter's output back into the main stream requires careful handoff of writer state (position, retraction, temperature, fan). Doable if both emitters use a shared `EmitterState`.
+
+**Pros (if we did it)**
+- Architecturally most correct: the sub-renderer gets the full benefit of seam placement, retraction, pressure advance, pathing optimization as if it were a normal slice.
+- Composable: same mechanism could be used for other recursive-emission features in the future (per-object sub-extrusion etc.).
+
+**Cons**
+- Large refactor of `GCode` (several thousand LOC touched, many subtle state dependencies).
+- High risk of introducing regressions in the existing emitter that affect all slicing.
+- Timeline: probably 2–4 weeks of engineering even before the tower-specific logic is wired in.
+- Not something to attempt as part of a v1 feature that's otherwise small.
+
+### Recommendation
+
+**Target Option B for v1.** It reuses existing infrastructure (solving the retraction/seam/pressure-advance concerns naturally), solves Problems 1–3 directly with existing tools, and lands as a bounded ~200–400 LOC change inside `process_layer` rather than a pipeline-wide refactor.
+
+**Keep Option A's post-processor (Phase 6a) as a *shadow* for verification**: leave the LOOKAHEAD markers emitted, and let the post-processor verify invariants (balanced blocks, Z sequence matches what Option B emitted) without mutating. Cheap sanity net.
+
+**Option C is a v2/v3 target** once the feature is proven and there's appetite for the refactor. Noted for future.
+
+### Handoff to Phase 6 implementation
+
+If we go with Option B, the sub-phases reshuffle:
+
+- **6b (new)**: inside `process_layer`, after base-block's extrusion is emitted, iterate upper-layer tower extrusions; for each stack k, emit via `extrude_perimeters` / `extrude_infill` / `extrude_support` with `m_writer.travel_to_z(base_z + k·lh)` bracketing and `retract` / `unretract` guards. Cache `m_writer.get_position()` before base block for safe exit.
+- **6c (new)**: on upper layers, when `process_layer` would normally emit F's extrusion, consult the plan — if F is tower-mode here, skip all its perimeters/infill/support. Emit only the non-F extrusions.
+- **6d**: wipe tower per-layer rewrite (Rule 10). Still needed — the pre-baked wipe tower has purges for tool changes that won't happen. Either regenerate the wipe tower after plan construction (spec's Option 1) or post-process-rewrite (spec's Option 2). Option 1 is cleaner given we're already doing Option B.
+- **6e**: `filament_lookahead_post_process` config flag stays useful — when off, skip Option B's batching, producing baseline gcode for A/B comparison.
+- **6f (deferred, v2)**: `ToolOrdering` regeneration with lookahead-adjusted input — see section below.
+
+Phase 6a's post-processor and marker parser stay as the verification shadow, not the primary transform.
+
+### Phase 6g — Flush-into-infill / flush-into-supports handling *(deferred, investigation required)*
+
+**Current Rule 9 spec:** v1 globally disables flush-into-infill and flush-into-supports whenever `filament_lookahead` is enabled (the blunt hammer). User feedback: this is heavier than necessary. A per-layer approach should be feasible.
+
+**Refined requirement:** on any layer that contains a tower (base OR extra), flush-into-infill and flush-into-supports should not be used *for filaments whose flush destination is the tower's zone* (the tower itself or supports sharing the tower's filament). Purge discharge should go to the wipe tower instead. The remaining layer artifacts (regions of other filaments not involved with any tower) could still use flush-into-infill/supports for their own tool changes *if feasible in the code*.
+
+**Open investigation questions (to address when this phase is picked up):**
+
+1. Where in the code does "flush-into-infill" mark a target region? Is the decision made per tool change (dynamically at emission time) or precomputed (in slicing or ToolOrdering)? If dynamic, we can inspect the target region and veto it for tower-involved tool changes; if precomputed, we'd need to re-run that precomputation with lookahead constraints.
+2. Does the flush-into-infill/support mechanism operate on *destination region* (where discharge lands) or *source tool change* (which switch triggers discharge)? The filter for "don't discharge into a tower's zone" needs one or the other.
+3. On the base layer of a tower, the single real tool change TO the tower's filament could legitimately flush-into-infill for *other objects' infill on that base layer* — as long as the flush doesn't land inside the tower's zone. Is that filter doable?
+4. Support filaments that match a tower's filament (via Phase 3a override) become part of the tower's batch. Flush-into-supports using those supports would need to be vetoed for the same reason.
+
+**Fallback if per-layer is infeasible:** keep Rule 9 Option 1 (global disable). Current spec already handles this.
+
+**Why deferred:** the investigation depends on understanding how flush-into-infill is wired in OrcaSlicer's emission pipeline, which hasn't been explored yet. Landing Phase 6b+6c first gives us a working baseline; we can then decide based on actual user workflow whether the per-layer refinement is worth the complexity.
+
+### Phase 6f — ToolOrdering regeneration *(deferred to v2)*
+
+**What and why.** OrcaSlicer's `ToolOrdering::reorder_extruders_for_minimum_flush_volume` (in `src/libslic3r/GCode/ToolOrderUtils.cpp:605`) is a flush-volume minimizer, not a tool-change-count minimizer. It uses the full `flush_matrix` (per-pair purge volumes — e.g. Red→Yellow 20mm³ vs Black→White 800mm³) to compute the globally optimal per-layer filament order via dynamic programming with one-layer forecast. The existing algorithm is strictly better than any heuristic we'd write; we should keep and reuse it.
+
+Our problem: by the time `FilamentLookaheadPlan::build()` runs (inside `_do_export()`, after `Print::process()` completes), `ToolOrdering` has already been built based on the *original* per-layer filament sets — including filaments that will later be batched into a tower. When Phase 6b/6c skip a tower-mode filament's emission on upper layers, the original ordering is left with "gaps" where a tool change was scheduled but no extrusion happens. The remaining filaments' ordering is not re-optimized for the new reality.
+
+**v1 consequence.** Slightly suboptimal tool-change sequence on layers where we've skipped a tower-mode filament. Example: pre-lookahead the flush minimizer chose `R → Y → B` on layer L+1 to minimize `prev→R + R→Y + Y→B`. If we skip R (tower-mode on L+1), the remaining sequence is `Y → B`, but the optimal for *just* `{Y, B}` given the previous layer's last filament might have been `B → Y`. We eat the inefficiency. Not a correctness issue — just extra purge volume.
+
+**v2 fix.** Re-run `reorder_extruders_for_minimum_flush_volume` after the plan is built, with `layer_filaments` adjusted to reflect the skips:
+
+- For each layer L+k where filament F is tower-mode (F's tower has `base_layer < L+k` and extends through L+k): remove F from that layer's filament set.
+- For each base layer L where F's tower starts: F stays (it's being printed there, just with upper layers batched in).
+- Feed the adjusted `layer_filaments` back into the reorder function.
+- Update `m_layer_tools[...].extruders` with the new sequence.
+
+**Why it goes with 6d.** The spec's Phase 6d offers two paths for wipe tower handling:
+- **Option 1** (regenerate wipe tower with lookahead-aware ToolOrdering) — requires this regeneration as a prerequisite.
+- **Option 2** (post-process rewrite) — doesn't need ToolOrdering changes.
+
+v1 ships with 6d Option 2 (text-based wipe tower rewrite). v2 upgrades to 6d Option 1, which naturally bundles 6f. Doing them together in a single v2 pass is cleaner than a standalone 6f — the wipe tower is regenerated from the re-optimized ToolOrdering in one coherent step.
+
+**Rough invasiveness.** Low-to-moderate. The reorder function already takes `layer_filaments` as input; we build an adjusted vector from the plan and call it again. Then swap results into `tool_ordering.layer_tools()`. Wipe tower regeneration from the new order is a bigger subtask (calls into `Print::m_wipe_tower_data` population, currently in `Print::process()` under `psWipeTower`).
+
+**Verification.** Pre-6f slice vs post-6f slice on the same model: total purge volume (from slicer statistics) should decrease on prints with active lookahead towers. On prints without active towers, ordering should be byte-identical (no tower-mode filaments to remove).
+
+## Dev-mode wipe tower disable (TEMPORARY — remove checklist)
+
+During Option B tower-emission development, the wipe tower is **forcibly disabled** at slice time whenever `filament_lookahead` is on. The wipe tower's pre-generated tool-change array is baked from ToolOrdering's view of the filament sequence, which conflicts with our skipping of tower-extra iterations. Rather than continue patching around it (which produced wrong-filament bugs and required fragile workarounds like fake-toolchanges, force-T emissions, and end-of-layer T syncs), we're pulling it out of the development loop entirely so we can iterate on tower generation cleanly. The wipe tower will be re-integrated properly via the "wipe tower reborn" phase below.
+
+**Where the hack lives:**
+- `src/libslic3r/Print.cpp`, top of `Print::process()`. Block is tagged with a `FLA-DEV-HACK` comment.
+- Primary trigger: when `m_config.filament_lookahead.value == true` AND `m_config.enable_prime_tower.value == true`, we force `enable_prime_tower = false` via `const_cast`.
+- Secondary trigger: env var `FLA_FORCE_NO_PRIME=1` forces prime tower off regardless of lookahead state. Used to slice no-lookahead baselines for dev comparison (baselines need prime tower off too, so they can be diffed against lookahead-on output apples-to-apples).
+- Emits log line `[FLA-DEV-HACK] forcibly disabling enable_prime_tower for this slice (trigger=...)`.
+
+**Consequences during this dev period:**
+- Output gcode is **NOT printable** — no wipe-tower purge means colors contaminate at every tool change. Development-only output.
+- Real tool changes emit bare `T<n>` commands via the normal (non-wipe-tower) extruder path. No TCRs consumed, no pre-gen array, no mismatch possible.
+- All lookahead analysis (3a, 3b, 3c), emission markers (5c), batching (6b/6c), and debug tools continue to work normally.
+- `layer_regions.py` and `lookahead_towers.py` are the primary verification tools; compare output against a baseline sliced with `filament_lookahead` off for ground-truth filament assignments per region.
+
+**Removal checklist** — when "wipe tower reborn" (Phase 6f-combined) is implemented, delete the `FLA-DEV-HACK` block in `Print::process()` and verify:
+1. `filament_lookahead = true` with `enable_prime_tower = true` produces gcode whose wipe tower TCR sequence matches what our emission actually does (no `append_tcr` mismatch assertions).
+2. Baseline (lookahead off) vs lookahead gcode have the same per-region filament assignments at every layer.
+3. Wipe tower is structurally complete on every layer (no missing walls on layers where a tower-extra was skipped).
+4. Total purge volume with lookahead on is LESS than baseline (prove the feature saves material).
+
+**Other hacks already removed when this dev-mode hack was introduced:**
+- `WipeTowerIntegration::skip_tool_change_for_tower` — the fake `writer.toolchange()` call inside. (Method still exists as a no-op-when-no-wipe-tower safety net.)
+- Force `T<ext_id>` emission at the start of each tower base iteration (in `process_layer`).
+- End-of-layer `T<writer.filament()>` emission in `process_layer`.
+
+These patch-level fixes for the wipe tower/skip divergence are not needed while the wipe tower is disabled, and won't be needed once regeneration ships.
+
+## Phase 6 revised order — wipe tower reborn is LAST
+
+With the dev-mode hack in place, Phase 6 work now proceeds as:
+
+1. **6a ✅** (done) — post-processor scaffolding + marker parser (shadow verifier).
+2. **6b+6c ✅** (done) — `emit_lookahead_tower_extras` in `process_layer`: batched tower emission at raised Z with retract brackets and safe-exit.
+3. **6e (config flag) — skipped for v1**; folded into `filament_lookahead` directly.
+4. **Iteration + polish (current):** region filtering correctness, entity walking, exclusion zones, travel avoidance, seam — all verified via CLI + debug tools against baseline gcode.
+5. **Wipe tower reborn (final step):** combines the former Phase 6d (Rule 10 wipe tower rewrite) and Phase 6f (ToolOrdering regeneration with lookahead-adjusted `layer_filaments`). Specifically:
+   - Move `FilamentLookaheadPlan::build()` earlier — run it in `Print::process()` before `psWipeTower`.
+   - Adjust `layer_filaments` to remove filaments whose extrusion was batched into a lower base layer.
+   - Let `ToolOrdering::reorder_extruders_for_minimum_flush_volume` run on the adjusted input.
+   - Run the normal wipe tower generator — now produces TCRs that match our emission.
+   - Remove FLA-DEV-HACK.
+   - Verify via removal checklist above.
 
 ## Future polish (post-v1)
 
