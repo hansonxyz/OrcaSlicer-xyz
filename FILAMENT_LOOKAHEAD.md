@@ -1165,6 +1165,81 @@ During Option B tower-emission development, the wipe tower is **forcibly disable
 
 These patch-level fixes for the wipe tower/skip divergence are not needed while the wipe tower is disabled, and won't be needed once regeneration ships.
 
+## Phase 6 emission refactor — Option 3 (sub-render) for upper-layer tower extras
+
+**Motivation.** Earlier iterations of `emit_lookahead_tower_extras` called `extrude_entity` directly on upper-layer extrusion entities while the GCode object's implicit per-layer state (`m_layer`, `m_extrusion_quality_estimator`, seam-placer state, `m_nominal_z`, `m_origin`, `m_avoid_crossing_perimeters` layer init, etc.) was still configured for the BASE layer. Symptoms observed on the tulip test model:
+
+- ~13% total extrusion deficit (lookahead output vs lookahead-off baseline with prime tower forced off via env var).
+- Each emitted move had 30–50% less E per move (overhang quality estimator active on wrong layer's geometry → false overhang detection → flow reduced).
+- Per-Z move counts went UP while per-Z E total went DOWN (finer path splitting from wrong-context seam + PA).
+- Gcode viewer silently blanked out after rendering, likely from `GCodeProcessor`/`libvgcode` choking on the context-incoherent extrusion stream.
+
+Hacks accumulated trying to patch around this (fake-toolchange, force-T at tower base, end-of-layer T sync, m_nominal_z swap) each solved a symptom and created another. The underlying problem is that `process_layer`'s extrusion helpers assume they run in the context of the layer the entities come from, and we were violating that.
+
+**Chosen fix: sub-render.** Extract the per-extruder-per-instance emission body of `process_layer` into a reusable method. Invoke it from both `process_layer`'s normal extruder loop AND from `emit_lookahead_tower_extras`, with proper per-layer state snapshot/restore when called from the batch.
+
+### Stage 1 — rollback checkpoint
+
+Committed at `3ecfde8514` on branch `filament-lookahead`. Contains all partial Option B work + debug tools + FLA-DEV-HACK. If the refactor goes sideways, rollback target is this commit.
+
+### Stage 2 — extract `emit_extruder_on_layer` helper
+
+Factor the per-instance-per-extruder body from the middle of `process_layer`'s extruder loop (currently ~lines 5120–5460 of `GCode.cpp`) into a new method:
+
+```cpp
+std::string GCode::emit_extruder_on_layer(
+    const Print                 &print,
+    const std::vector<LayerToPrint> &layers,
+    const LayerTools            &layer_tools,
+    ObjectByExtruder            &object_by_extruder,
+    size_t                      layer_id,
+    size_t                      instance_id,
+    unsigned int                extruder_id,
+    bool                        first_layer,
+    bool                        print_wipe_extrusions,
+    // ...any other context variables needed...
+);
+```
+
+The helper does **only** the extrusion work — no skirt generation, no wipe-tower toolchange construction, no custom gcode substitution, no timelapse insertion. Those remain in `process_layer`.
+
+The helper's responsibilities:
+- Snapshot any per-layer GCode state it will mutate (`m_layer`, `m_config` region apply, `m_avoid_crossing_perimeters.init_layer`, `m_extrusion_quality_estimator.set_current_object`, `m_last_obj_copy`, `m_origin`).
+- Set those state fields for the target `(layer, instance, extruder)`.
+- Emit `extrude_perimeters` → timelapse-in-infill hook → `extrude_infill` → second `extrude_perimeters` (is_infill_first path) → ironing `extrude_infill`.
+- Emit `extrude_support` if the `object_by_extruder.support` is present.
+- Emit object start/end labels (if `gcode_label_objects`).
+- Do NOT restore state — caller is responsible (simpler, since the normal caller in `process_layer` immediately moves to the next instance anyway).
+
+Initial refactor: `process_layer` calls the helper instead of running the body inline. Expected result: byte-identical gcode output vs pre-refactor for a normal slice. Verify via `debug-tools/` diff tools before moving on.
+
+### Stage 3 — rewrite `emit_lookahead_tower_extras` to use the helper
+
+For each stack `k = 1..extra_layers`:
+
+1. Compute `upper_li = base_layer_idx + k`, `upper_z = layers[upper_li]->print_z`.
+2. Build `by_extruder` for the upper layer, filtered to `ext_id` only. This mirrors the block at `process_layer:4872–5115` that populates `by_extruder` from `LayerToPrint`s, `LayerRegion`s, and support data.
+3. Snapshot the current per-layer state fields.
+4. Emit `retract()` → `travel_to_z(upper_z)` → `unretract()`.
+5. Call `emit_extruder_on_layer(print, synthesized_layers_vec, layer_tools, ..., ext_id, ...)` — the helper correctly sets up `m_layer = upper_layer`, `m_extrusion_quality_estimator` for that layer, etc.
+6. Restore the snapshotted state fields.
+7. `retract()` at end of stack.
+
+After last stack: safe-exit (travel to cached XY, drop Z, unretract) as today.
+
+### Stage 4 — validation
+
+- Slice the standard test model; compare lookahead output to lookahead-off baseline (via `FLA_FORCE_NO_PRIME=1`). Expect total extrusion to match within rounding, not the previous 13% deficit.
+- Per-Z move counts + per-Z E sum should match baseline in the tower-free Z ranges and represent redistributed-but-equivalent extrusion in the tower Z ranges.
+- Gcode viewer should render fully and stay rendered under panning.
+- Tower XY bounds, filament assignments, and layer coverage should match analysis expectations from `debug-tools/lookahead_towers.py`.
+
+### Stage 5 — cleanup after validation
+
+- Remove the `m_nominal_z` save/restore hack (the helper sets it naturally via its per-layer setup).
+- Remove the `skip_tool_change_for_tower` method's no-op body (still a no-op when prime tower is off, but the infrastructure is now unused).
+- Keep FLA-DEV-HACK — still needed until Phase 6d/6f (wipe tower reborn) ships.
+
 ## Phase 6 revised order — wipe tower reborn is LAST
 
 With the dev-mode hack in place, Phase 6 work now proceeds as:

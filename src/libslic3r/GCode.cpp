@@ -8291,6 +8291,19 @@ std::string GCode::emit_lookahead_tower_extras(
     if (extra_layers == 0)
         return gcode;
 
+    // FLA-DEV-BISECT: if FLA_NO_EMIT_BATCH env var is set, return early
+    // without emitting any tower-extra content. Used to test whether the
+    // extra Z oscillations / extra emitted content are what breaks the
+    // GUI gcode viewer (the skip branch + markers still run normally).
+    static const bool fla_no_emit_batch = [](){
+        const char *e = std::getenv("FLA_NO_EMIT_BATCH");
+        return e && e[0] != '\0' && e[0] != '0';
+    }();
+    if (fla_no_emit_batch) {
+        BOOST_LOG_TRIVIAL(warning) << "[FLA-B] emit_lookahead_tower_extras: SKIPPED (FLA_NO_EMIT_BATCH set)";
+        return gcode;
+    }
+
     // Cache entry XY: where the nozzle sits right now, on the base layer's
     // zone. That point is outside the tower's active exclusion zone on
     // subsequent raised-Z layers (it was a valid printing position at
@@ -8340,27 +8353,61 @@ std::string GCode::emit_lookahead_tower_extras(
         throw;
     }
 
-    // Save base layer's nominal Z — we'll restore it after the batch so the
-    // rest of the base layer's emission (more extruder iterations, etc.)
-    // continues as expected at base_z.
+    // Snapshot base-layer per-layer state that emit_entity / extrude_* read
+    // implicitly. Without restoring these around the batch, upper-layer
+    // entities would be emitted using the BASE layer's context (wrong m_layer
+    // for seam, wrong quality estimator for overhang-flow adjustment, wrong
+    // nominal Z for travel targeting). That produced ~13% extrusion deficit
+    // + finer path splitting + wrong-looking output on the test model.
     const coordf_t saved_nominal_z = m_nominal_z;
+    const Layer   *saved_layer     = m_layer;
+    const bool     saved_olor      = m_object_layer_over_raft;
+    // Save current quality-estimator "current object" — ExtrusionProcessor
+    // caches layer boundaries per-object; we'll re-prepare for each upper
+    // layer and restore at the end.
+    const PrintObject *saved_quality_current_object = nullptr;
+    // NOTE: ExtrusionProcessor.hpp exposes only set_current_object as a
+    // setter; there's no getter for current_object. For safety we'll
+    // re-set to the base layer's object after the batch via the caller's
+    // context (m_layer belongs to an object).
 
     for (size_t k = 1; k <= extra_layers; ++k) {
         size_t upper_li = base_layer_idx + k;
         const auto &obj_layers = print.objects().front()->layers();
         if (upper_li >= obj_layers.size()) break;
-        const double upper_z = obj_layers[upper_li]->print_z;
+        const Layer *upper_layer = obj_layers[upper_li];
+        const double upper_z = upper_layer->print_z;
 
-        // CRITICAL: set m_nominal_z to the raised Z. `GCode::travel_to` uses
-        // m_nominal_z as the default target Z when the extrude methods call
-        // it. Without this, extrude_entity's internal travels would force Z
-        // back down to the base layer's print_z, collapsing all stack extras
-        // onto base Z (breaks the tower completely + confuses the gcode
-        // viewer). Restored to saved_nominal_z at the end of the batch.
+        // Swap per-layer context to the upper layer so extrude_entity's
+        // internal machinery (travel Z target, seam placer, extrusion
+        // quality estimator for overhang-flow adjustment) computes against
+        // the CORRECT layer's geometry. Without this, the base layer's
+        // state produces wrong flow scaling and wrong E values for each
+        // emitted move.
         m_nominal_z = upper_z;
+        m_layer     = upper_layer;
+        m_object_layer_over_raft = upper_layer && upper_layer->id() > 0 &&
+            upper_layer->object()->slicing_parameters().raft_layers() == upper_layer->id();
+        if (m_config.reduce_crossing_wall)
+            m_avoid_crossing_perimeters.init_layer(*upper_layer);
+        // Re-prepare the extrusion quality estimator for this layer so its
+        // prev/next layer boundary AABB trees reflect upper_layer, not base.
+        m_extrusion_quality_estimator.prepare_for_new_layer(
+            upper_layer->object(), upper_layer);
+        m_extrusion_quality_estimator.set_current_object(upper_layer->object());
 
         // Raise Z to the upper layer's print Z.
+        // Emit a Z_HEIGHT tag so GCodeProcessor attributes subsequent extrusion
+        // moves to the correct layer (m_print_z). Without this, moves inside
+        // this batched block remain stamped with the base layer's Z, so the
+        // viewer buckets them under the base layer and the real upper layer
+        // appears empty.
         try {
+            {
+                char zhbuf[64];
+                sprintf(zhbuf, print.is_BBL_printer() ? "; Z_HEIGHT: %g\n" : ";Z:%g\n", upper_z);
+                gcode += zhbuf;
+            }
             gcode += m_writer.travel_to_z(upper_z, "; lookahead tower stack z-raise");
             gcode += m_writer.unretract();
         } catch (const std::exception &e) {
@@ -8369,7 +8416,19 @@ std::string GCode::emit_lookahead_tower_extras(
             throw;
         }
 
-        // Walk all print objects for entities on this upper layer.
+        // Build by_region data for ext_id's entities on the upper layer,
+        // then call extrude_perimeters / extrude_infill — the same entry
+        // points `process_layer` uses for normal emission. These methods
+        // set up per-layer context (overhang speed / seam / etc.) via
+        // m_layer + m_extrusion_quality_estimator which we swapped above.
+        //
+        // For v1 we flatten everything into a SINGLE Region (no island
+        // awareness, no wiping-extrusion overrides). That matches the
+        // !is_anything_overridden path in process_layer, which is the
+        // common case when MMU wiping isn't active. Known limitations:
+        // loses island tool-path ordering and wipe-object-infill overrides
+        // on upper layers — v2 can enhance this to mirror the full
+        // by_extruder/islands structure.
         size_t entities_emitted = 0;
         for (const PrintObject *pobj : print.objects()) {
             const auto &pobj_layers = pobj->layers();
@@ -8377,63 +8436,73 @@ std::string GCode::emit_lookahead_tower_extras(
             const Layer *up_layer = pobj_layers[upper_li];
             if (!up_layer) continue;
 
+            // extrude_perimeters uses `&region - &by_region.front()` as the
+            // print_region_id to look up region config via
+            // `print.get_print_region(id).config()`. So by_region MUST be
+            // sized to num_print_regions() and indexed by print_region_id.
+            std::vector<ObjectByExtruder::Island::Region> by_region(print.num_print_regions());
+            bool any_entity = false;
+
             for (const LayerRegion *region : up_layer->regions()) {
                 if (!region || !region->has_extrusions()) continue;
                 const auto &rcfg = region->region().config();
-                // Per-entity filament: perimeters use wall_filament; fill
-                // entities use solid_infill_filament or sparse_infill_filament
-                // depending on the entity's role (mirrors LayerTools::extruder
-                // in ToolOrdering.cpp). Previously only wall_filament was
-                // checked, which silently dropped every fill entity whose
-                // sparse/solid infill filament differed from its wall filament
-                // — resulting in ~13% missing extrusion in tower-extra layers.
+                const size_t print_region_id = region->region().print_region_id();
+                if (print_region_id >= by_region.size()) continue;
                 const unsigned int wall_ext       = (unsigned int)(rcfg.wall_filament.value - 1);
                 const unsigned int solid_fill_ext = (unsigned int)(rcfg.solid_infill_filament.value - 1);
                 const unsigned int sparse_fill_ext = (unsigned int)(rcfg.sparse_infill_filament.value - 1);
 
-                // Perimeters: filament is wall_filament. Skip the whole
-                // perimeter collection if it doesn't belong to ext_id.
                 if (wall_ext == ext_id) {
-                for (const ExtrusionEntity *ee : region->perimeters.entities) {
-                    try {
-                        gcode += extrude_recursive(ee, "lookahead-tower-perimeter", entities_emitted);
-                    } catch (const std::exception &e) {
-                        BOOST_LOG_TRIVIAL(error) << "[FLA-B] exception in perimeter extrude k=" << k
-                            << " upper_li=" << upper_li << " ext=" << ext_id
-                            << " entity_type=" << typeid(*ee).name()
-                            << " what=" << e.what();
-                        throw;
+                    for (ExtrusionEntity *ee : region->perimeters.entities) {
+                        auto *coll = dynamic_cast<const ExtrusionEntityCollection*>(ee);
+                        if (!coll || coll->entities.empty()) continue;
+                        by_region[print_region_id].append(ObjectByExtruder::Island::Region::PERIMETERS, coll, nullptr);
+                        ++entities_emitted;
+                        any_entity = true;
                     }
                 }
-                } // end `if wall_ext == ext_id`
-
-                // Fill entities: filament depends on whether the collection
-                // contains solid or sparse infill. Each entity in region->fills.entities
-                // is an ExtrusionEntityCollection — check has_solid_infill() on
-                // it to decide.
-                for (const ExtrusionEntity *ee : region->fills.entities) {
+                for (ExtrusionEntity *ee : region->fills.entities) {
                     auto *coll = dynamic_cast<const ExtrusionEntityCollection*>(ee);
+                    if (!coll || coll->entities.empty()) continue;
                     unsigned int this_fill_ext = sparse_fill_ext;
-                    if (coll && coll->has_solid_infill())
+                    if (coll->has_solid_infill())
                         this_fill_ext = solid_fill_ext;
-                    else if (!coll) {
-                        // Shouldn't happen (fills are always wrapped in a collection)
-                        // but be defensive: infer from the entity's role.
-                        const ExtrusionRole r = ee ? ee->role() : erNone;
-                        if (is_solid_infill(r) || r == erIroning)
-                            this_fill_ext = solid_fill_ext;
-                    }
                     if (this_fill_ext != ext_id)
                         continue;
-                    try {
-                        gcode += extrude_recursive(ee, "lookahead-tower-infill", entities_emitted);
-                    } catch (const std::exception &e) {
-                        BOOST_LOG_TRIVIAL(error) << "[FLA-B] exception in infill extrude k=" << k
-                            << " upper_li=" << upper_li << " ext=" << ext_id
-                            << " entity_type=" << typeid(*ee).name()
-                            << " what=" << e.what();
-                        throw;
-                    }
+                    by_region[print_region_id].append(ObjectByExtruder::Island::Region::INFILL, coll, nullptr);
+                    ++entities_emitted;
+                    any_entity = true;
+                }
+            }
+
+            if (any_entity) {
+                // Apply region defaults + per-object config, matching what
+                // process_layer does per-instance (lines ~5459-5460). Without
+                // this, things like extrusion_width, flow_ratio, and
+                // speed-related defaults that affect E calculations stay at
+                // whatever they were last applied to, producing ~20% low E
+                // values per move vs baseline.
+                m_config.apply(print.default_region_config());
+                m_config.apply(pobj->config(), true);
+
+                // Set origin for this instance (use first instance for now;
+                // v2 should loop over instances).
+                if (!pobj->instances().empty()) {
+                    const Point &offset = pobj->instances()[0].shift;
+                    this->set_origin(unscale(offset));
+                }
+
+                const bool first_layer_param = false;
+                try {
+                    gcode += this->extrude_perimeters(print, by_region, first_layer_param, false);
+                    gcode += this->extrude_infill(print, by_region, false);
+                    gcode += this->extrude_perimeters(print, by_region, first_layer_param, true);
+                    gcode += this->extrude_infill(print, by_region, true); // ironing
+                } catch (const std::exception &e) {
+                    BOOST_LOG_TRIVIAL(error) << "[FLA-B] exception in extrude_perimeters/infill k=" << k
+                        << " upper_li=" << upper_li << " ext=" << ext_id
+                        << " what=" << e.what();
+                    throw;
                 }
             }
 
@@ -8503,9 +8572,19 @@ std::string GCode::emit_lookahead_tower_extras(
     }
 
     BOOST_LOG_TRIVIAL(warning) << "[FLA-B] all stacks done, entering safe-exit";
-    // Restore nominal Z to base layer so subsequent emission on this layer
-    // (further extruder iterations) uses the right Z default.
+    // Restore per-layer context to base layer so subsequent emission on this
+    // layer (further extruder iterations, skirt/brim label) uses the right
+    // state defaults.
     m_nominal_z = saved_nominal_z;
+    m_layer     = saved_layer;
+    m_object_layer_over_raft = saved_olor;
+    if (saved_layer) {
+        m_extrusion_quality_estimator.prepare_for_new_layer(
+            saved_layer->object(), saved_layer);
+        m_extrusion_quality_estimator.set_current_object(saved_layer->object());
+        if (m_config.reduce_crossing_wall)
+            m_avoid_crossing_perimeters.init_layer(*saved_layer);
+    }
     // Safe exit: travel XY back to the pre-batch position (known-safe on
     // base layer), drop Z to base, then unretract.
     try {
@@ -8514,6 +8593,14 @@ std::string GCode::emit_lookahead_tower_extras(
         gcode += m_writer.travel_to_xy(Vec2d(pre_batch_pos.x(), pre_batch_pos.y()),
                                         "; lookahead tower safe-exit travel");
         BOOST_LOG_TRIVIAL(warning) << "[FLA-B]   safe-exit: travel_to_z to " << base_z;
+        // Restore Z_HEIGHT tag to base so any post-batch moves (or the next
+        // extruder's emission on this same base layer) are re-attributed to
+        // the base layer again.
+        {
+            char zhbuf[64];
+            sprintf(zhbuf, print.is_BBL_printer() ? "; Z_HEIGHT: %g\n" : ";Z:%g\n", base_z);
+            gcode += zhbuf;
+        }
         gcode += m_writer.travel_to_z(base_z, "; lookahead tower z-return to base");
         BOOST_LOG_TRIVIAL(warning) << "[FLA-B]   safe-exit: unretract";
         gcode += m_writer.unretract();
