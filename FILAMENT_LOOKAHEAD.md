@@ -815,44 +815,25 @@ Completed 2026-04-21. New files `src/libslic3r/GCode/FilamentLookaheadPostProces
 
 **Testable by**: round-trip test — parse a known gcode, unparse without changes, byte-diff against input.
 
-#### 6b — Block extraction and relocation
+#### 6b ✅ — Emission-time batching (Option B)
 
-**Technical details:**
-- For each `LOOKAHEAD_BLOCK` with `stack_index > 0` (i.e. an extra-layer zone, not a base), extract its gcode.
-- Insert into the base-layer's tower section at the appropriate stack position (per `stack_index`).
-- Tool change associated with the block's filament: if the block includes a tool change at its start, that tool change moves with the block. If the destination layer already has an active tool change for that filament, dedupe.
+**Status:** superseded the original "block extraction and relocation" post-processor plan. Implemented via `emit_lookahead_tower_extras` called from `process_layer`. See section "Phase 6 architecture — analysis of integration options" and the Option B handoff at line ~1087 for rationale. Completed 2026-04-22.
 
-**Open questions:**
-- Tool change gcode boundaries: where does a tool change start/end in the output? The wipe tower's toolchange gcode is a multi-line sequence. Study existing gcode to find the delimiter pattern.
-- Retract state: moving a block means retract/unretract boundaries may shift. Need to preserve the retract state machine — probably wrap each relocated block in explicit retract/unretract even if originally unnecessary.
+**What shipped:**
+- After a base layer's normal extrusion is emitted, iterate upper-layer tower stacks in-process.
+- Per-stack state snapshot/restore of `m_layer`, `m_nominal_z`, `m_object_layer_over_raft`, `m_avoid_crossing_perimeters`, `m_extrusion_quality_estimator`.
+- Per-stack sequence: emit `; Z_HEIGHT: <upper_z>` → `retract` → `travel_to_z(upper_z)` → `unretract` → build `by_region` filtered to `ext_id` → `extrude_perimeters` / `extrude_infill` / support emission → `retract`.
+- Safe-exit: emit `; Z_HEIGHT: <base_z>` → `travel_to_xy(pre_batch_pos)` → `travel_to_z(base_z)` → `unretract`.
+- `; Z_HEIGHT:` tags inside the batch ensure GCodeProcessor attributes each batched move to the correct layer's Z (otherwise all batched moves would carry the base layer's Z).
 
-**Expected result:** relocated blocks appear at their destination layers in correct order.
+#### 6c ✅ — Upper-layer tower-mode skip
 
-**Testable by**: parse output, verify each tower's blocks are contiguous and in stack order at the base layer.
+**Status:** completed 2026-04-22 alongside 6b.
 
-#### 6c — Z travel bracketing between original/destination layers
-
-**Technical details:**
-- At the tower's base layer, after normal printing completes, emit Z-raise moves to step through each extra-layer zone's Z in order:
-  - `G1 Z<base_z>` (stay)
-  - emit base zone extrusion
-  - `G1 Z<base_z + layer_height>`
-  - emit stack_index=1 zone extrusion
-  - `G1 Z<base_z + 2*layer_height>`
-  - emit stack_index=2 extrusion
-  - ... etc
-  - After last stack: `G1 Z<base_z + 0>` to drop back for subsequent normal printing.
-- Feedrate from config (`travel_speed_z` or similar).
-- Emit retract before Z-raise, unretract after final Z-return (per config).
-- Add comment markers: `; LOOKAHEAD_STACK_Z_RAISE layer=K` / `; LOOKAHEAD_STACK_Z_RETURN` for debug.
-
-**Open questions:**
-- Z-hop on travel between stacks: if the base zone on layer L and the stack_index=1 zone on layer L+1 are at different XY positions, the travel between them happens at stack_index=1's Z (already raised). Should be fine — the whole tower area is clear (it's the tower's own extrusion).
-- Max Z issue: cumulative Z-raise must not exceed printer limits. Bail via exception if it would.
-
-**Expected result:** Z profile is a sequence of raises (tower growth) + a drop (return for normal printing) at every tower base layer.
-
-**Testable by**: plot the gcode's Z coordinate over line number. Should show characteristic raise-raise-...-drop pattern at tower base layers.
+**What shipped:**
+- In `process_layer`'s extruder loop, consult the plan via `tower_info_for(layer_idx, ext_id)`.
+- If `tower_info.stack_index > 0` (this filament on this layer belongs to a tower whose base is below), skip its perimeters/infill/support emission on this layer — the content is being batched into the base layer via Phase 6b.
+- Continue emission of non-tower-mode filaments normally.
 
 #### 6d — Wipe tower per-layer rewrite *(Rule 10)*
 
@@ -930,6 +911,37 @@ Slice typical MMU models with lookahead on; profile:
 - Post-processor time (Phase 6)
 
 Target: total slicing overhead from lookahead should be <10% of baseline slicing time.
+
+#### 7f — GCode viewer rendering polish on lookahead-tower layers
+
+**Problem.** With Phase 6b shipping, batched upper-layer tower content physically prints at the correct Z but is emitted (in the gcode stream) inside the base layer's gcode block. GCodeProcessor attributes each move to a layer via `m_print_z` (driven by `; Z_HEIGHT:` comments), so moves get assigned to the correct layer-index in the processor's result — but the GUI viewer's "show me layer N" slider then presents a weird mid-layer cross-section: at layer 274 you see layer 274's normal extrusion PLUS the slice of tower 271's batched block that happens to be at Z=55.0, but only partially (only entities whose `m_print_z` matches). The effect is that towers look "half-rendered" or "sparse" on lookahead-tower layers, even though the gcode is correct and the physical print will be fine.
+
+**Root cause.** `libvgcode::Viewer` and `GCodeViewer` slice the visualization by the `layer_id` / `print_z` field on each move. In Phase 6b, an upper-layer stack inside a base-layer's batch:
+1. Carries the correct `m_print_z` (we emit `; Z_HEIGHT:` per stack, so the viewer buckets moves by the physically-correct Z).
+2. BUT the layer range widget computes "which layers is this tower part of?" from the gcode's textual `LAYER_CHANGE` + `Z_HEIGHT` history, and the sequential nature of that history makes a tower's stack appear out-of-order when a user scrubs layer-by-layer (base layer shows the tower's full footprint across all Z slabs ABOVE it, then as you scrub up the slider the per-Z slab for each upper layer appears — but only from that one tower, not the full layer).
+
+**Expected behavior.** When the user selects layer N in the viewer:
+- Show ALL extrusion at Z ≈ N's print_z, regardless of which gcode block it was physically emitted in.
+- This includes: layer N's own normal emission, any base-layer batch contributions whose per-stack `Z_HEIGHT` equals layer N's print_z, and any LOOKAHEAD_BLOCK content at that Z.
+- The rendering should look identical to a non-lookahead slice of the same model at that layer, modulo the expected filament/order changes from the lookahead plan.
+
+**Investigation areas.**
+- `src/slic3r/GUI/LibVGCode/src/Viewer/Viewer.cpp` — how it maps layer slider → move subset.
+- `src/slic3r/GUI/GCodeViewer.cpp` — overlay geometry and layer range widgets.
+- `GCodeProcessorResult::moves[].layer_duration` / `print_z` fields — the per-move data model.
+
+**Candidate approaches:**
+1. **Layer-aware indexing by print_z** (viewer-side only). Post-process the `GCodeProcessorResult`: rebuild the layer slider model from `print_z` buckets rather than from sequential layer count. All moves at the same print_z bucket render together regardless of gcode-block order. Contained to the viewer; no gcode emission changes.
+2. **Layer-view re-bucketing at processor level**. Have `GCodeProcessor` emit moves into a secondary structure keyed by `m_print_z` alongside the existing layer-index arrangement. The viewer picks this structure when any layer has lookahead-towers. Larger change, possibly wanted for other features too.
+3. **Emit "virtual layer change" markers** that tell the viewer to group batched moves by print_z even though they came from a single gcode block. Uses the existing marker pipeline; requires viewer work too.
+
+**Verification:**
+- Slice the tulip test model with lookahead on.
+- At layer 274 (inside tower 271's extra range), the viewer should show: layer 274's normal T0 extrusion + the ext=3 contribution at the correct XY footprint of tower 271. Should match the non-lookahead slice's silhouette at that Z.
+- Scrub the layer slider through layers 271–279; each stack layer should show its Z slab of tower 271 plus normal content.
+- Frame rate and memory should stay within current budget.
+
+**Priority.** Cosmetic — the actual gcode is correct and prints correctly. Fix before v1 ships so users' confidence in lookahead isn't undermined by misleading previews.
 
 ---
 
@@ -1293,3 +1305,5 @@ These are known simplifications that can be revisited once the feature is functi
 - **2026-04-21 Phase 5b skipped**: initial attempt to stable-partition `layer_tools.extruders` caused wipe tower generation failure (pre-gen tool-change array overflow). Reverted. Phase 5c markers will serve as Phase 6's insertion anchor without needing the reorder. Kept the `tower_filaments_on_layer()` accessor and per-layer tracking populated during build for Phase 5c's use.
 - **2026-04-21 Phase 5c**: emit `LOOKAHEAD_LAYER_INFO` + `LOOKAHEAD_BLOCK_BEGIN/END` markers in `process_layer()`. 77 balanced BLOCK pairs on test model match exactly the sum of tower-layer counts from 9 accepted towers. Added `tower_info_for(layer_idx, ext_id)` accessor returning `{base_layer, stack_index, extra_layers, extruder_id}` for the wrapping logic.
 - **2026-04-21 Phase 6a**: post-processor module `FilamentLookaheadPostProcessor` with marker parser. Hooked in `_do_export()` before temp→final rename; gated by `filament_lookahead` config flag. Parser produces `TowerBlock`/`LayerInfo` records; 6a transform is no-op (round-trip). Verified marker counts and line positions preserved across process().
+- **2026-04-22 Phase 6b + 6c**: Option B emission-time batching. `emit_lookahead_tower_extras` in `GCode.cpp` iterates upper-layer tower stacks inside `process_layer`, saving/restoring per-layer state (`m_layer`, `m_nominal_z`, `m_object_layer_over_raft`, `m_avoid_crossing_perimeters`, `m_extrusion_quality_estimator`) around each stack. For each stack k, emits `retract` + Z-raise + `extrude_perimeters`/`extrude_infill` (and support) + `retract`. Safe-exit travels back to cached pre-batch XY, drops Z to base, unretracts. Upper-layer skip branch in the extruder loop suppresses tower-mode filament emission on layers where its tower is active (stack_index > 0). FLA-DEV-HACK temporarily forces `enable_prime_tower = false` whenever `filament_lookahead` is on, since wipe tower regeneration is deferred to Phase 6d/6f. Debug tools in `debug-tools/` (lookahead_towers.py, layer_regions.py, gcode_common.py) verify tower structure from gcode. Tulip test model slices correctly with 9 accepted towers emitted.
+- **2026-04-22 Phase 6b viewer fix**: emit `; Z_HEIGHT: <upper_z>` before each stack's Z-raise inside the batch, and `; Z_HEIGHT: <base_z>` at the safe-exit. Without these tags, GCodeProcessor stamped all batched moves with the base layer's Z, so the viewer buckets them under the base layer and the real upper layers appeared empty. With the tags, moves are attributed to the correct layer_z. Cosmetic viewer rendering quirk on tower layers (partial-layer cross-section look) documented as new Phase 7f task; gcode itself is correct.
