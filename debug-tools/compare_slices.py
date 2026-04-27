@@ -43,12 +43,18 @@ PASS 2 — gcode dissection (per file)
   carrying its Z, tool, feature, and (start, end) XY.
 
   Segments are then classified:
-    * WIPE TOWER  — anything bracketed by WIPE_TOWER_START/END
-    * SUPPORT     — `; FEATURE: Support` or `; FEATURE: Support interface`
-    * OBJECT      — everything else (walls, infill, top/bottom surfaces,
-                    bridges, gap fills, overhangs)
+    * WIPE TOWER       — anything bracketed by WIPE_TOWER_START/END
+    * SUPPORT          — `; FEATURE: Support` or `; FEATURE: Support interface`
+    * LOOKAHEAD_TOWER  — object-feature extrusion bracketed by
+                         LOOKAHEAD_BLOCK_BEGIN/END (cluster content hoisted
+                         into a tower batch — physical Z is correct because
+                         the emitter raises Z for each upper stack)
+    * OBJECT           — everything else (walls, infill, top/bottom surfaces,
+                         bridges, gap fills, overhangs) outside an LA block
 
-  Only OBJECT segments are aggregated. For each (Z bucket, filament tool):
+  OBJECT and LOOKAHEAD_TOWER segments are both aggregated into the object
+  bucket — they represent the same model geometry, just emitted in different
+  order. For each (Z bucket, filament tool):
     * total E length extruded (mm of filament — proportional to volume)
     * XY bounding box of all extrusion points
 
@@ -176,6 +182,7 @@ class Segment:
     tool: int
     feature: str
     in_wipe_tower: bool
+    in_lookahead_block: bool
     x_start: float
     y_start: float
     x_end: float
@@ -255,13 +262,22 @@ RE_E = re.compile(r"\sE([\-\d\.]+)")
 
 
 def parse_segments(path: str) -> list[Segment]:
-    """Walk the gcode once, emit one Segment per real extrusion move."""
+    """Walk the gcode once, emit one Segment per real extrusion move.
+
+    Handles both absolute (M82) and relative (M83) extrusion modes. OrcaSlicer
+    defaults to relative; in that mode each G1/G2/G3 line's E value IS the
+    delta. In absolute mode the delta is new_e - prev_e (with G92 E<n>
+    resetting prev_e). Also handles arc moves (G2/G3) which carry extrusion
+    just like G1 in OrcaSlicer-flavored output.
+    """
     lines = load_lines(path)
     cur_z = 0.0
     cur_tool: Optional[int] = None
     cur_feature = "Unknown"
     in_wipe_tower = False
-    prev_e: Optional[float] = None
+    in_lookahead_block = False
+    relative_e = True            # OrcaSlicer default; flipped by M82/M83
+    prev_e_abs: float = 0.0      # only meaningful in absolute mode
     prev_x: Optional[float] = None
     prev_y: Optional[float] = None
     segments: list[Segment] = []
@@ -288,15 +304,33 @@ def parse_segments(path: str) -> list[Segment]:
             if "WIPE_TOWER_END" in s:
                 in_wipe_tower = False
                 continue
+            if "LOOKAHEAD_BLOCK_BEGIN" in s:
+                in_lookahead_block = True
+                continue
+            if "LOOKAHEAD_BLOCK_END" in s:
+                in_lookahead_block = False
+                continue
             continue  # other comments are inert
 
-        if s.startswith("G92"):
-            ge = RE_E.search(" " + s)
-            if ge:
-                prev_e = float(ge.group(1))
+        # E-mode switches (M82 = absolute, M83 = relative).
+        if s.startswith("M82"):
+            relative_e = False
+            continue
+        if s.startswith("M83"):
+            relative_e = True
             continue
 
-        if not (s.startswith("G1") or s.startswith("G0")):
+        # G92 sets the current "absolute" extruder position. In relative mode
+        # it has no effect on deltas; in absolute mode it resets prev_e_abs.
+        if s.startswith("G92"):
+            ge = RE_E.search(" " + s)
+            if ge and not relative_e:
+                prev_e_abs = float(ge.group(1))
+            continue
+
+        # Extrusion-bearing motion: G0/G1 (linear) and G2/G3 (arc).
+        if not (s.startswith("G1") or s.startswith("G0")
+                or s.startswith("G2") or s.startswith("G3")):
             continue
 
         code = s.split(";", 1)[0]
@@ -310,23 +344,31 @@ def parse_segments(path: str) -> list[Segment]:
 
         new_x = float(gx.group(1)) if gx else None
         new_y = float(gy.group(1)) if gy else None
-        new_e = float(ge.group(1)) if ge else None
+        e_val = float(ge.group(1)) if ge else None
 
-        if new_e is not None and prev_e is not None and new_e > prev_e:
-            de = new_e - prev_e
-            if (new_x is not None or new_y is not None) and \
-               cur_tool is not None and prev_x is not None and prev_y is not None:
-                ex = new_x if new_x is not None else prev_x
-                ey = new_y if new_y is not None else prev_y
-                segments.append(Segment(
-                    z=cur_z, tool=cur_tool, feature=cur_feature,
-                    in_wipe_tower=in_wipe_tower,
-                    x_start=prev_x, y_start=prev_y, x_end=ex, y_end=ey,
-                    e_delta=de,
-                ))
+        # Compute the actual extrusion delta for this move.
+        de: Optional[float] = None
+        if e_val is not None:
+            if relative_e:
+                de = e_val   # relative: E on the line is the delta
+            else:
+                de = e_val - prev_e_abs
+                prev_e_abs = e_val
 
-        if new_e is not None:
-            prev_e = new_e
+        if (de is not None and de > 0.0
+                and (new_x is not None or new_y is not None)
+                and cur_tool is not None
+                and prev_x is not None and prev_y is not None):
+            ex = new_x if new_x is not None else prev_x
+            ey = new_y if new_y is not None else prev_y
+            segments.append(Segment(
+                z=cur_z, tool=cur_tool, feature=cur_feature,
+                in_wipe_tower=in_wipe_tower,
+                in_lookahead_block=in_lookahead_block,
+                x_start=prev_x, y_start=prev_y, x_end=ex, y_end=ey,
+                e_delta=de,
+            ))
+
         if new_x is not None:
             prev_x = new_x
         if new_y is not None:
@@ -336,20 +378,41 @@ def parse_segments(path: str) -> list[Segment]:
 
 
 def classify(seg: Segment) -> str:
+    # WIPE_TOWER takes priority — toolchange dance inside an LA block uses
+    # the same WIPE_TOWER_START/END brackets, and that's tower fill (not
+    # cluster geometry), so it should not be folded into object.
     if seg.in_wipe_tower:
         return "wipe_tower"
     if seg.feature in SUPPORT_FEATURES:
+        # Support inside an LA block is still hoisted cluster geometry — its
+        # physical Z matches baseline, so it counts as support either way.
         return "support"
     if seg.feature in OBJECT_FEATURES:
-        return "object"
+        # Object features inside an LA block are cluster content emitted at
+        # the head's actual Z (the emitter raises Z for each upper stack), so
+        # baseline puts that same content at that same Z. Tag separately so
+        # the classification summary shows the split, but it folds into the
+        # object aggregate for the comparison.
+        return "lookahead_tower" if seg.in_lookahead_block else "object"
     return "other"  # brim, skirt, custom, unknown, prime tower, etc.
 
 
+# Classes whose extrusion goes into the object-vs-object aggregate.
+OBJECT_LIKE_CLASSES = {"object", "lookahead_tower"}
+
+
 def aggregate_object(segments: list[Segment]) -> dict[float, dict[int, FilamentStat]]:
-    """Group object-only segments by (Z bucket, filament). Z rounded to 0.01."""
+    """Group object + lookahead_tower segments by (Z bucket, filament).
+
+    Both classes represent the model's geometry; lookahead just emits some
+    of it inside a tower block at the same physical Z. They sum into one
+    bucket so the comparison sees baseline's full layer content matched
+    against (lookahead's normal-emit content + its tower-batched content).
+    Z rounded to 0.01.
+    """
     by_z: dict[float, dict[int, FilamentStat]] = {}
     for seg in segments:
-        if classify(seg) != "object":
+        if classify(seg) not in OBJECT_LIKE_CLASSES:
             continue
         z_key = round(seg.z, 2)
         by_filament = by_z.setdefault(z_key, {})
@@ -359,8 +422,10 @@ def aggregate_object(segments: list[Segment]) -> dict[float, dict[int, FilamentS
 
 
 def classification_summary(segments: list[Segment]) -> dict:
-    counts = {"wipe_tower": 0, "support": 0, "object": 0, "other": 0}
-    e_totals = {"wipe_tower": 0.0, "support": 0.0, "object": 0.0, "other": 0.0}
+    counts = {"wipe_tower": 0, "support": 0,
+              "object": 0, "lookahead_tower": 0, "other": 0}
+    e_totals = {"wipe_tower": 0.0, "support": 0.0,
+                "object": 0.0, "lookahead_tower": 0.0, "other": 0.0}
     other_features: dict[str, int] = defaultdict(int)
     for seg in segments:
         cls = classify(seg)
@@ -493,9 +558,11 @@ def main():
     bl_cls = classification_summary(bl_segs)
     def _summary(name, segs, c):
         return (f"  {name}: {len(segs):>7} segments  "
-                f"obj={c['counts']['object']} sup={c['counts']['support']} "
+                f"obj={c['counts']['object']} la={c['counts']['lookahead_tower']} "
+                f"sup={c['counts']['support']} "
                 f"wt={c['counts']['wipe_tower']} other={c['counts']['other']}  "
-                f"(E mm: obj={c['e_totals']['object']} sup={c['e_totals']['support']} "
+                f"(E mm: obj={c['e_totals']['object']} la={c['e_totals']['lookahead_tower']} "
+                f"sup={c['e_totals']['support']} "
                 f"wt={c['e_totals']['wipe_tower']} other={c['e_totals']['other']})")
     print(_summary("lookahead", la_segs, la_cls))
     print(_summary("baseline ", bl_segs, bl_cls))
