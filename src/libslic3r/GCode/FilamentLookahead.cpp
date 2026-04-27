@@ -770,6 +770,12 @@ FilamentLookaheadPlan::tower_info_for(size_t layer_idx, unsigned int ext_id) con
     return std::nullopt;
 }
 
+bool FilamentLookaheadPlan::is_upper_tower_stack(size_t layer_idx, unsigned int ext_id) const
+{
+    auto t = tower_info_for(layer_idx, ext_id);
+    return t && t->stack_index >= 1;
+}
+
 std::optional<unsigned int> FilamentLookaheadPlan::override_for_support(
     const SupportLayer *support_layer, bool is_interface) const
 {

@@ -3602,7 +3602,7 @@ void WipeTower::update_all_layer_depth(float wipe_tower_depth)
     if (m_wipe_tower_depth > 0)
         m_wipe_tower_depth += start_offset;
 
-    if (m_enable_wrapping_detection || m_enable_timelapse_print) {
+    if (m_enable_wrapping_detection || m_enable_timelapse_print || m_lookahead_force_fill) {
         if (is_approx(m_wipe_tower_depth, 0.f))
             m_wipe_tower_depth = wipe_tower_depth;
         for (WipeTowerInfo &plan_info : m_plan) {

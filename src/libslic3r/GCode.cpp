@@ -1585,6 +1585,41 @@ static std::vector<Vec2d> get_path_of_change_filament(const Print& print)
         // pre-gen was generated from the lookahead-adjusted ordering.
     }
 
+    std::string WipeTowerIntegration::emit_layer_structural_fill(GCode &gcodegen)
+    {
+        // Phase 6d: emit any unconsumed TCRs for the current layer with no
+        // tool change. Called when the layer's extruders list is empty after
+        // lookahead filtering, so the normal extruder-iteration path didn't
+        // call tool_change(). Pass new_filament_id = -1 to bypass the
+        // "expected new tool" check in append_tcr — we're not changing tools,
+        // just emitting structural-fill gcode at the wipe tower's footprint
+        // using whatever filament is currently loaded.
+        //
+        // Pass the TCR's own print_z as wipe_tower_z so append_tcr emits a
+        // travel_to_z to the correct layer height. Without this, append_tcr
+        // would fall back to the writer's current Z (which may be stuck at
+        // an earlier layer's Z from the previous tower batch) and our
+        // structural-fill blocks would all stack at the same physical
+        // height instead of advancing per layer.
+        std::string gcode;
+        if (m_layer_idx < 0 || m_layer_idx >= (int) m_tool_changes.size())
+            return gcode;
+        const auto &layer_tcrs = m_tool_changes[m_layer_idx];
+        if ((size_t) m_tool_change_idx >= layer_tcrs.size())
+            return gcode;
+        BOOST_LOG_TRIVIAL(warning) << "[FLA] emit_layer_structural_fill: layer_idx=" << m_layer_idx
+            << " consuming " << (layer_tcrs.size() - m_tool_change_idx)
+            << " TCR(s) as structural fill";
+        while ((size_t) m_tool_change_idx < layer_tcrs.size()) {
+            const auto &tcr = layer_tcrs[m_tool_change_idx];
+            const double tcr_z = tcr.print_z;
+            gcode += append_tcr(gcodegen, tcr, -1, tcr_z);
+            m_last_wipe_tower_print_z = tcr_z;
+            ++m_tool_change_idx;
+        }
+        return gcode;
+    }
+
     bool WipeTowerIntegration::is_empty_wipe_tower_gcode(GCode &gcodegen, int extruder_id, bool finish_layer)
     {
         assert(m_layer_idx >= 0);
@@ -3399,14 +3434,11 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
 
             tool_ordering.cal_most_used_extruder(print.config());
 
-            // xyz fork: Build Filament Lookahead plan if enabled
-            FilamentLookaheadPlan lookahead_plan;
-            if (print.config().filament_lookahead.value) {
-                lookahead_plan.build(print,
-                    print.config().filament_lookahead_max_height.value,
-                    print.config().filament_lookahead_clearance.value);
-                if (lookahead_plan.enabled())
-                    m_lookahead_plan = &lookahead_plan;
+            // xyz fork: reuse the Filament Lookahead plan that was built at
+            // psWipeTower (so wipe tower generation and gcode emission use
+            // the same plan). Phase 6d — plan is owned by Print now.
+            if (print.filament_lookahead_plan() && print.filament_lookahead_plan()->enabled()) {
+                m_lookahead_plan = print.filament_lookahead_plan();
             }
 
             // Phase 5a: inject overridden support extruders into tool_ordering's
@@ -3421,11 +3453,38 @@ void GCode::_do_export(Print& print, GCodeOutputStream &file, ThumbnailsGenerato
                 // After ToolOrdering::reorder_extruders() runs (inside
                 // sort_and_build_data), lt.extruders stores 0-based filament ids.
                 size_t injected = 0;
+                // Build print_z -> object-layer index map once (the plan keys
+                // on object-layer index, not LayerTools or SupportLayer index).
+                std::vector<std::pair<coordf_t, size_t>> object_layer_z_idx;
+                if (!print.objects().empty()) {
+                    const auto &ref_layers = print.objects().front()->layers();
+                    object_layer_z_idx.reserve(ref_layers.size());
+                    for (size_t i = 0; i < ref_layers.size(); ++i)
+                        object_layer_z_idx.emplace_back(ref_layers[i]->print_z, i);
+                }
+                auto layer_idx_for_z = [&](coordf_t z) -> std::optional<size_t> {
+                    for (const auto &[lz, idx] : object_layer_z_idx) {
+                        if (std::abs(lz - z) < 1e-4) return idx;
+                    }
+                    return std::nullopt;
+                };
+
                 for (const auto &[key, ext_id] : m_lookahead_plan->any_support_overrides()) {
                     const SupportLayer *slayer = key.first;
                     if (!slayer) continue;
                     for (LayerTools &lt : tool_ordering.layer_tools()) {
                         if (std::abs(lt.print_z - slayer->print_z) > EPSILON) continue;
+                        // Phase 6d guard: don't re-inject an extruder that 6d
+                        // already filtered out as a tower-mode upper-layer stack.
+                        // Without this, 5a undoes 6d's wipe-tower filtering and
+                        // the wipe tower's pre-baked TCRs become out of sync with
+                        // process_layer's extruder loop (skip branch fires but
+                        // the pre-baked TCR for that extruder still exists,
+                        // leaving the layer's structural fill stranded).
+                        if (auto oli = layer_idx_for_z(lt.print_z)) {
+                            if (m_lookahead_plan->is_upper_tower_stack(*oli, ext_id))
+                                break;
+                        }
                         if (std::find(lt.extruders.begin(), lt.extruders.end(), ext_id)
                             == lt.extruders.end()) {
                             lt.extruders.push_back(ext_id);
@@ -4581,9 +4640,37 @@ LayerResult GCode::process_layer(
         layer_ptr = support_layer;
     const Layer& layer = *layer_ptr;
     LayerResult   result { {}, layer.id(), false, last_layer };
-    if (layer_tools.extruders.empty())
-        // Nothing to extrude.
+    // Phase 6d: when lookahead has filtered all extruders off this layer, the
+    // object/support extrusion is fully batched into a tower's base layer
+    // (Phase 6b). But the wipe tower still needs a structural-fill block on
+    // this layer to maintain Z continuity. Emit a minimal layer block —
+    // LAYER_CHANGE marker, Z_HEIGHT marker, and the wipe tower's drained TCR.
+    // The full process_layer body is skipped because there's no object
+    // extrusion to do here (and several downstream code paths assume
+    // extruders is non-empty).
+    if (layer_tools.extruders.empty()) {
+        const bool needs_drain = m_wipe_tower && layer_tools.has_wipe_tower &&
+            m_lookahead_plan && m_lookahead_plan->enabled();
+        if (!needs_drain)
+            return result;
+        std::string gcode;
+        gcode += ";" + GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Layer_Change) + "\n";
+        char buf[64];
+        const coordf_t print_z = layer.print_z;
+        sprintf(buf, print.is_BBL_printer() ? "; Z_HEIGHT: %g\n" : ";Z:%g\n", print_z);
+        gcode += buf;
+        const float height = static_cast<float>(print_z) - m_last_layer_z;
+        sprintf(buf, ";%s%g\n", GCodeProcessor::reserved_tag(GCodeProcessor::ETags::Height).c_str(),
+                std::max(0.f, height));
+        gcode += buf;
+        m_last_layer_z = static_cast<float>(print_z);
+        m_max_layer_z  = std::max(m_max_layer_z, m_last_layer_z);
+        gcode += m_wipe_tower->emit_layer_structural_fill(*this);
+        result.gcode = std::move(gcode);
+        BOOST_LOG_TRIVIAL(warning) << "[FLA] process_layer: empty-extruders structural-fill-only path "
+            << "for layer print_z=" << print_z << " gcode_size=" << result.gcode.size();
         return result;
+    }
 
     // Extract 1st object_layer and support_layer of this set of layers with an equal print_z.
     coordf_t             print_z       = layer.print_z;
@@ -5658,6 +5745,12 @@ LayerResult GCode::process_layer(
         }
     }
     BOOST_LOG_TRIVIAL(warning) << "[FLA-B] process_layer: extruder loop completed for layer=" << m_current_layer_idx;
+    // Phase 6d: when lookahead filtered all extruders off this layer, the
+    // wipe tower's structural-fill TCR was never emitted by the loop above.
+    // Drain it now so the wipe tower stays continuous along Z.
+    if (has_wipe_tower && m_wipe_tower && layer_tools.extruders.empty()) {
+        gcode += m_wipe_tower->emit_layer_structural_fill(*this);
+    }
     if (first_layer) {
         for (auto iter = by_extruder.begin(); iter != by_extruder.end(); ++iter) {
             if (!iter->second.empty())

@@ -152,6 +152,10 @@ Resolution: **OpenBambu** — open-source LAN protocol replacement.
 - `C:\Users\brian\Desktop\Crystal Dragon Statue - Spryo.3mf` — multi-material Spyro statue, good for testing paint tools, boundary painter, flushing volumes, tree supports
 - `Z:\cabinets\Things\Projects\drg_buff_beer_mugs_coloration_2.3mf` (plate 2) — multi-material model with spatially isolated regions
 
+**Filament Lookahead test files (paired):**
+- `C:\Users\brian\Desktop\obj_1_tulipan_mod.3mf` — tulip rose with `filament_lookahead = 1`, prime tower on, supports = "any PLA", interface = PVA. Primary regression test for Phase 6 emission.
+- `C:\Users\brian\Desktop\obj_1_tulipan_mod_no_look_ahead.3mf` — same model with `filament_lookahead = 0`. Baseline for `compare_slices.py` (object placement should match this exactly modulo discretization noise).
+
 ### CLI Headless Slicing (for testing xyz fork features)
 OrcaSlicer supports headless CLI slicing:
 ```bash
@@ -165,12 +169,15 @@ Python helpers for inspecting lookahead-feature gcode output. No external depend
 
 - **`debug-tools/lookahead_towers.py <gcode>`** — summarize all filament-lookahead towers in a gcode file. Reports per tower: covered layer range, extruder id, tool-in-head at tower start, XY bounds, total extrusion (mm of E), and per-stack breakdown. Pass `--json` for machine-readable output.
 - **`debug-tools/layer_regions.py <gcode> <layer_idx>`** — dissect a single gcode layer. Reports regions grouped by active tool + lookahead mode (normal vs inside a tower block), with extrusion volume and XY bounds per region. Also lists any batched-in tower extras whose raised Z matches this layer's Z but whose gcode was emitted under another layer's block.
+- **`debug-tools/compare_slices.py`** — slice the lookahead-on and lookahead-off 3MFs through the Orca CLI, dissect both gcodes by physical Z, classify segments (wipe tower / support / object) using `; FEATURE:` markers, and flag any per-(Z, filament) object-placement divergence. Outputs a JSON report at `<out_dir>/comparison_report.json` plus a stdout summary. Default tolerances: 1% E volume, 2 mm bbox corner. Use `--reuse-gcode` to skip re-slicing during tolerance tuning. Defaults to the tulip test pair documented above; override with `--lookahead-3mf` / `--baseline-3mf`. Read the docblock at the top of the script for the full design rationale.
 - **`debug-tools/gcode_common.py`** — shared parsing helpers (regexes, G1 axis parser, layer/tower scanners). Imported by the tools above.
 
 Run with Python 3:
 ```bash
 python debug-tools/lookahead_towers.py "path\to\plate_1.gcode"
 python debug-tools/layer_regions.py "path\to\plate_1.gcode" 266
+python debug-tools/compare_slices.py                     # full pipeline
+python debug-tools/compare_slices.py --reuse-gcode       # iterate on tolerances only
 ```
 
 ## Architecture

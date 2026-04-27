@@ -66,6 +66,12 @@ public:
     };
     std::optional<TowerInfo> tower_info_for(size_t layer_idx, unsigned int ext_id) const;
 
+    // Phase 6d: returns true if (layer_idx, ext_id) is an upper-layer tower stack
+    // (stack_index >= 1). Meaning: on this layer, ext_id's content is being
+    // batched into the tower's base layer (below), so its tool change should
+    // be removed from this layer's wipe tower planning.
+    bool is_upper_tower_stack(size_t layer_idx, unsigned int ext_id) const;
+
     // Phase 3a: Any-Type support filament override.
     // Key: (support_layer_ptr, is_interface). SupportLayer pointers are stable
     // between Phase A analysis and gcode emission since Print state isn't mutated.

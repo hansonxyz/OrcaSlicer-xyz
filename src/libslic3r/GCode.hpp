@@ -120,6 +120,12 @@ public:
     // index, so the skip is idempotent for the cases where tool_change()
     // would have been a no-op (sparse-layer skipping).
     void skip_tool_change_for_tower(GCode &gcodegen, int extruder_id, bool finish_layer);
+    // xyz fork: Phase 6d. Emit any remaining unconsumed TCRs for the current
+    // layer as structural fill (no actual tool change). Used when the layer's
+    // extruders list is empty after lookahead filtering — without this, the
+    // wipe tower's structural-fill TCR would never get emitted, leaving Z
+    // gaps in the wipe tower. Called by process_layer when extruders.empty().
+    std::string emit_layer_structural_fill(GCode &gcodegen);
     // Debug peek: returns the tool-change array for the CURRENT layer index
     // (which is m_layer_idx + 1 because next_layer() is called BEFORE
     // process_layer emits; or the next layer's index from the caller's view).

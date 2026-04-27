@@ -313,6 +313,15 @@ public:
 	void set_has_tpu_filament(bool has_tpu) { m_has_tpu_filament = has_tpu; }
     bool has_tpu_filament() const { return m_has_tpu_filament; }
 
+    // xyz fork: Phase 6d. When filament_lookahead has filtered all tool
+    // changes off some layers, those layers would normally be skipped by
+    // generate_new (depth=0 < perimeter_width). With this flag, we instead
+    // emit a structural fill block using the currently-loaded filament so
+    // the wipe tower remains continuous up the Z axis. Unlike
+    // m_enable_timelapse_print, this leaves extruder_fill on (full structural
+    // infill, not walls-only).
+    void set_lookahead_force_fill(bool v) { m_lookahead_force_fill = v; }
+
     struct FilamentParameters {
         std::string 	    material = "PLA";
         int                 category;
@@ -416,6 +425,7 @@ private:
     int    m_wrapping_detection_layers = 0;
     bool   m_enable_wrapping_detection = false;
 	bool   m_enable_timelapse_print = false;
+	bool   m_lookahead_force_fill = false;  // xyz fork: Phase 6d, see set_lookahead_force_fill()
 	bool   m_semm               = true; // Are we using a single extruder multimaterial printer?
 	bool   m_purge_in_prime_tower = false; // Do we purge in the prime tower?
     Vec2f  m_wipe_tower_pos; 			// Left front corner of the wipe tower in mm.

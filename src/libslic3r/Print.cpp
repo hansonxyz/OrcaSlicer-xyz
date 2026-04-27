@@ -37,6 +37,7 @@
 #include "nlohmann/json.hpp"
 
 #include "GCode/ConflictChecker.hpp"
+#include "GCode/FilamentLookahead.hpp"
 #include "ParameterUtils.hpp"
 
 #include <codecvt>
@@ -2116,36 +2117,17 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
 
     name_tbb_thread_pool_threads_set_locale();
 
-    // ─────────────────────────────────────────────────────────────────────
-    // FLA-DEV-HACK: when filament_lookahead is enabled, forcibly disable
-    // the prime/wipe tower for the duration of the slice. This is a
-    // TEMPORARY development workaround while Option B tower emission is
-    // being stabilized — the wipe tower's pre-generated tool-change array
-    // conflicts with our tower-extra skipping, and patching around it
-    // creates brittle corner cases (wrong-filament bugs, etc.).
-    //
-    // TO REMOVE: delete this block once the wipe tower regeneration step
-    // (Phase 6f / "wipe tower reborn") is implemented. At that point the
-    // plan is built before psWipeTower runs, ToolOrdering + wipe tower are
-    // regenerated with lookahead-adjusted layer_filaments, and the TCRs
-    // naturally match our emission.
-    //
-    // See FILAMENT_LOOKAHEAD.md → "Dev-mode wipe tower disable" for the
-    // removal checklist.
+    // xyz fork: FLA_FORCE_NO_PRIME env var retained for baseline comparisons
+    // (slice with wipe tower off regardless of filament_lookahead setting).
     {
-        // Also honor the FLA_FORCE_NO_PRIME env var so we can slice a
-        // no-lookahead baseline with prime tower off (for dev comparisons).
         const char *env_force = std::getenv("FLA_FORCE_NO_PRIME");
         const bool force_via_env = env_force && env_force[0] != '\0' && env_force[0] != '0';
-        if ((m_config.filament_lookahead.value || force_via_env) && m_config.enable_prime_tower.value) {
-            BOOST_LOG_TRIVIAL(warning) << "[FLA-DEV-HACK] forcibly disabling enable_prime_tower for this slice "
-                << "(trigger=" << (m_config.filament_lookahead.value ? "filament_lookahead" : "FLA_FORCE_NO_PRIME")
-                << "). Output gcode is NOT printable (no wipe-tower purge). "
-                << "See FILAMENT_LOOKAHEAD.md for removal details.";
+        if (force_via_env && m_config.enable_prime_tower.value) {
+            BOOST_LOG_TRIVIAL(warning) << "[FLA] FLA_FORCE_NO_PRIME env var set, disabling enable_prime_tower "
+                << "for this slice (baseline comparison mode).";
             const_cast<ConfigOptionBool&>(m_config.enable_prime_tower).value = false;
         }
     }
-    // ─────────────────────────────────────────────────────────────────────
 
     //compute the PrintObject with the same geometries
     BOOST_LOG_TRIVIAL(info) << __FUNCTION__ << boost::format(": this=%1%, enter, use_cache=%2%, object size=%3%")%this%use_cache%m_objects.size();
@@ -2371,6 +2353,25 @@ void Print::process(long long *time_cost_with_cache, bool use_cache)
                 }
             }
             this->set_geometric_unprintable_filaments(geometric_unprintables);
+        }
+
+        // xyz fork: build the Filament Lookahead plan BEFORE the wipe tower is
+        // generated. _make_wipe_tower consults m_filament_lookahead_plan to
+        // filter out tower-mode upper-layer filaments from each LayerTools's
+        // extruder list, so the pre-baked wipe tower TCRs don't schedule
+        // purges for tool changes that Phase 6b/6c batch away.
+        m_filament_lookahead_plan.reset();
+        if (m_config.filament_lookahead.value) {
+            auto plan = std::make_unique<FilamentLookaheadPlan>();
+            plan->build(*this,
+                m_config.filament_lookahead_max_height.value,
+                m_config.filament_lookahead_clearance.value);
+            if (plan->enabled()) {
+                BOOST_LOG_TRIVIAL(warning) << "[FLA] Lookahead plan built at psWipeTower, feeding into wipe tower generation.";
+                m_filament_lookahead_plan = std::move(plan);
+            } else {
+                BOOST_LOG_TRIVIAL(warning) << "[FLA] Lookahead plan built but found no towers — wipe tower unaffected.";
+            }
         }
 
         m_wipe_tower_data.clear();
@@ -3227,6 +3228,11 @@ bool Print::enable_timelapse_print() const
     return m_config.timelapse_type.value == TimelapseType::tlSmooth;
 }
 
+// xyz fork: ctor/dtor out-of-line so m_filament_lookahead_plan's unique_ptr
+// can use the forward-declared FilamentLookaheadPlan in Print.hpp.
+Print::Print() = default;
+Print::~Print() { this->clear(); }
+
 void Print::_make_wipe_tower()
 {
     m_wipe_tower_data.clear();
@@ -3242,6 +3248,50 @@ void Print::_make_wipe_tower()
     if (!m_wipe_tower_data.tool_ordering.has_wipe_tower())
         // Don't generate any wipe tower.
         return;
+
+    // xyz fork: Phase 6d — drop tower-mode upper-layer filaments from each
+    // layer's extruders list BEFORE plan_toolchange runs. The filament is
+    // still scheduled for printing via Phase 6b's emit_lookahead_tower_extras
+    // (batched into the tower's base layer), so its tool change on upper
+    // layers would conflict with process_layer's skip branch. Removing it
+    // here lets plan_toolchange see the actually-needed transitions and
+    // recompute purge volumes accordingly. Layers that end up with zero
+    // transitions fall through to finish_layer() naturally — same code path
+    // used for any single-filament layer, prints only wipe tower perimeters
+    // and structural fill for layer-height continuity.
+    if (m_filament_lookahead_plan && !m_objects.empty()) {
+        // The plan indexes layers by position in the first object's layers
+        // vector. Match each LayerTools's print_z back to that index with a
+        // small epsilon — layer print_z values can differ by float rounding.
+        // Wipe-tower-only layers (no object counterpart) are skipped: the
+        // plan has no tower info for them.
+        const auto &ref_layers = m_objects.front()->layers();
+        const coordf_t z_epsilon = 1e-4;  // 0.1 microns — tighter than layer height
+
+        size_t removed = 0;
+        size_t layers_matched = 0;
+        for (LayerTools &lt : m_wipe_tower_data.tool_ordering.layer_tools()) {
+            size_t layer_idx = size_t(-1);
+            for (size_t i = 0; i < ref_layers.size(); ++i) {
+                if (std::abs(ref_layers[i]->print_z - lt.print_z) < z_epsilon) {
+                    layer_idx = i;
+                    break;
+                }
+            }
+            if (layer_idx == size_t(-1)) continue;
+            ++layers_matched;
+            auto &ex = lt.extruders;
+            const size_t before = ex.size();
+            ex.erase(std::remove_if(ex.begin(), ex.end(),
+                [&](unsigned int e) {
+                    return m_filament_lookahead_plan->is_upper_tower_stack(layer_idx, e);
+                }), ex.end());
+            removed += before - ex.size();
+        }
+        BOOST_LOG_TRIVIAL(warning) << "[FLA] Phase 6d: matched " << layers_matched
+            << " wipe-tower layers to object-layer indices, filtered " << removed
+            << " tower-mode filament entries out of wipe tower's per-layer extruder lists.";
+    }
 
     // Check whether there are any layers in m_tool_ordering, which are marked with has_wipe_tower,
     // they print neither object, nor support. These layers are above the raft and below the object, and they
@@ -3286,6 +3336,15 @@ void Print::_make_wipe_tower()
                              m_wipe_tower_data.tool_ordering.empty() ? 0.f : m_wipe_tower_data.tool_ordering.back().print_z, m_wipe_tower_data.tool_ordering.all_extruders());
         wipe_tower.set_has_tpu_filament(this->has_tpu_filament());
         wipe_tower.set_filament_map(this->get_filament_maps());
+        // xyz fork: Phase 6d. With filament_lookahead, our filter pass above
+        // empties some layers' extruder lists when their only tool changes
+        // were to upper-layer-tower filaments. Without this flag, those
+        // layers would be skipped entirely (depth=0 < perimeter_width),
+        // leaving the wipe tower with vertical gaps. With it, the wipe tower
+        // emits a structural-fill block on every layer using the currently-
+        // loaded filament, preserving Z continuity.
+        if (m_filament_lookahead_plan)
+            wipe_tower.set_lookahead_force_fill(true);
         // Set the extruder & material properties at the wipe tower object.
         for (size_t i = 0; i < number_of_extruders; ++i)
             wipe_tower.set_extruder(i, m_config);

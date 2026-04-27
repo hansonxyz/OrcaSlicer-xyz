@@ -34,6 +34,7 @@ class ModelObject;
 class Print;
 class PrintObject;
 class SupportLayer;
+class FilamentLookaheadPlan;
 // BBS
 class TreeSupportData;
 class TreeSupport;
@@ -888,8 +889,8 @@ private: // Prevents erroneous use by other classes.
     typedef std::pair<PrintObject *, bool>         PrintObjectInfo;
 
 public:
-    Print() = default;
-	virtual ~Print() { this->clear(); }
+    Print();
+	virtual ~Print();
 
 	PrinterTechnology	technology() const noexcept override { return ptFFF; }
 
@@ -1035,6 +1036,11 @@ public:
     const PrintRegion&          get_print_region(size_t idx) const  { return *m_print_regions[idx]; }
     const ToolOrdering&         get_tool_ordering() const { return m_wipe_tower_data.tool_ordering; }
 
+    // xyz fork: accessor for the Filament Lookahead plan built at psWipeTower.
+    // May be nullptr if the config flag is off or the plan found no candidates.
+    const FilamentLookaheadPlan* filament_lookahead_plan() const { return m_filament_lookahead_plan.get(); }
+    FilamentLookaheadPlan*       filament_lookahead_plan()       { return m_filament_lookahead_plan.get(); }
+
     //BBS: plate's origin related functions
     void set_plate_origin(Vec3d origin) { m_origin = origin; }
     const Vec3d get_plate_origin() const { return m_origin; }
@@ -1153,6 +1159,13 @@ private:
     // Following section will be consumed by the GCodeGenerator.
     ToolOrdering 							m_tool_ordering;
     WipeTowerData                           m_wipe_tower_data {m_tool_ordering};
+
+    // xyz fork: Filament Lookahead plan, built at the start of psWipeTower so
+    // _make_wipe_tower can filter per-layer extruder lists (drop tower-mode
+    // upper-layer filaments from wipe tower planning). Reused by GCode::_do_export
+    // during emission so the plan is consistent across wipe tower generation and
+    // per-layer emission. Empty/disabled when filament_lookahead config is off.
+    std::unique_ptr<FilamentLookaheadPlan>  m_filament_lookahead_plan;
 
     // Estimated print time, filament consumed.
     PrintStatistics                         m_print_statistics;
