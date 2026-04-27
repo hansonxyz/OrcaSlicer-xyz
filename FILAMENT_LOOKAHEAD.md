@@ -220,13 +220,13 @@ When filament lookahead is enabled, the wipe tower is printed at the normal laye
 
 5. **No wipe tower exclusion zone for travel routing.** Because the tower prints at the standard layer Z every physical layer (nothing skipped, nothing backfilled later), existing wipe tower travel avoidance applies unchanged. The tower does NOT get a lookahead-style active exclusion zone.
 
-### Rule 11 — Plate-edge clearance for tower exclusion zones
+### Rule 11 — *(removed)* — replaced by Z-clearance fallback at emission time
 
-A candidate tower's exclusion zone, on every layer it covers, must keep at least `PLATE_EDGE_MARGIN_MM` (default 2 mm) clearance from the printable area's outer boundary. If the inflated zone reaches within margin of any plate edge on layer L+k, cap the in-progress tower at L+k-1.
+This rule previously required tower exclusion zones to keep ≥2 mm from the printable area's outer boundary so XY routing always had room to go around. It has been removed for the same reason as Rule 12: a planning-time veto that rejects an entire tower (cost: N additional tool changes, ~120 sec each on Bambu hardware) to avoid a travel-routing edge case (cost: one Z-lift, ~0.3 sec) is wildly poor economics.
 
-**Rationale.** Travel routing in the GCode emitter (Rule 8) needs room to move *around* a tower's footprint without leaving the plate. An exclusion zone wedged against the plate edge has no clearance on that side; routing must go the other way. That alone is fine — but in combination with another zone elsewhere on the plate, an edge-locked zone can compose into a wall that cuts off plate area, effectively trapping any printing position behind the wall. Conservative: never accept an edge-locked zone in the first place. The 2 mm margin guarantees that on every side of every zone there's enough air for the head to route through, regardless of what other zones come in or out on later layers.
+**What replaces it.** When the head needs to travel into or around an edge-locked zone, the Z-clearance fallback in `GCode::route_around_lookahead_zones` lifts the head ABOVE every printed tower and traverses XY at that elevated Z, then drops back down. The lifted-Z XY traverse is unconditionally safe regardless of where on the plate the zones sit, including against the edge.
 
-**Envelope growth.** A tower's exclusion zone grows monotonically as the cascade extends — each new layer's self-content can expand the envelope. A base zone that passes Rule 11 may fail it after extending by 5 layers, because the envelope picked up an extra millimeter of width. The cascade re-tests Rule 11 against the running envelope at every k. First failure caps at k-1.
+Edge-locked towers are now allowed. The optimization opportunity is real: clusters near plate edges (e.g. a print rotated to put a small isolated region against one side) that previously couldn't form towers can now do so.
 
 ### Rule 12 — *(removed)* — replaced by Z-clearance fallback at emission time
 

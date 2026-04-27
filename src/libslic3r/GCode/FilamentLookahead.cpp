@@ -4,8 +4,8 @@
 #include "../PrintConfig.hpp"
 #include "../ExtrusionEntity.hpp"
 #include "../ExtrusionEntityCollection.hpp"
-#include "../ClipperUtils.hpp"
-#include "../Polygon.hpp"
+// (ClipperUtils / Polygon includes removed alongside Rules 11 and 12 —
+//  no Phase 5d code in this file uses union_/diff_ex/ExPolygon anymore.)
 
 #include <boost/log/trivial.hpp>
 #include <queue>
@@ -384,10 +384,9 @@ void FilamentLookaheadPlan::build(const Print &print,
     // Phase 5d (travel exclusion): plate geometry cache + reachability rules
     //
     // The cascade loop below decides whether each candidate layer extends
-    // an in-progress tower. Five rules gate that decision; three pre-existed
-    // (Rules 1, 3, 4) and two are added here for travel-routing correctness
-    // (Rules 11, 12). All five must hold at every k for the tower to extend
-    // through layer li+k. Any failure caps the tower at the previous layer.
+    // an in-progress tower. Three rules gate that decision (Rules 1, 3, 4).
+    // All three must hold at every k for the tower to extend through layer
+    // li+k. Any failure caps the tower at the previous layer.
     //
     //   Rule 1 — Candidate zone isolation. Other filaments' entities on the
     //     candidate layer must stay clearance away from the cluster's
@@ -407,62 +406,31 @@ void FilamentLookaheadPlan::build(const Print &print,
     //     to ext_id ANYWAY, defeating the entire savings the tower was
     //     supposed to deliver.
     //
-    //   Rule 11 — Plate-edge clearance (NEW). The candidate exclusion zone
-    //     on every covered layer must keep at least PLATE_EDGE_MARGIN_MM
-    //     from the printable area's outer boundary. Travel routing in
-    //     GCode emission has to move AROUND a tower's footprint without
-    //     leaving the plate; if a zone is wedged against the edge, that
-    //     side has no clearance and a single edge-locked zone composed
-    //     with another zone forms a wall that cuts off plate area.
-    //     Conservative: 2 mm of breathing room on all four sides.
+    // Rules 11 and 12 (previously checked here) have BOTH been removed in
+    // favor of an emission-time Z-clearance fallback. The argument is the
+    // same for both: a planning-time veto rejects an entire tower (cost: N
+    // additional tool changes, ~120 sec each on Bambu hardware) in order
+    // to avoid a travel-routing edge case (cost: one Z-lift, ~0.3 sec).
+    // The economics are wildly skewed in favor of accepting the tower and
+    // handling the rare unsolvable travel via a Z-lift.
     //
-    //   Rule 12 was previously a planning-time veto for "no enclosed
-    //   object pockets" — rejecting tower configurations whose exclusion
-    //   zones would ring an unzoned object cluster on the same layer. It
-    //   has been removed in favor of an emission-time fallback: when a
-    //   travel polyline can't be XY-routed around the active zones,
-    //   GCode::emit_lookahead_z_clearance_travel lifts the head ABOVE
-    //   every printed tower and traverses XY at that elevated Z. The
-    //   Z-lift is unconditionally safe regardless of zone topology, so
-    //   ringed pockets are tolerable at the cost of one slow Z move
-    //   per affected travel — a much smaller cost than vetoing the
-    //   tower entirely (a vetoed tower means N extra tool changes vs
-    //   one extra Z lift). See Rule 8 for the emission-side details.
+    //   Rule 11 was — Plate-edge clearance. Required candidate exclusion
+    //     zones to keep ≥ 2 mm from the printable area's outer boundary so
+    //     that XY routing always had room to go around. Removed: a zone
+    //     wedged against the plate edge just means the head can't XY-route
+    //     around it on that side; the Z-lift fallback in
+    //     GCode::route_around_lookahead_zones handles it by going OVER the
+    //     tower instead. Edge-locked zones are now allowed.
     //
-    // Rule 11 uses a bbox-level approximation for v1: zones are bbox
-    // polygons (axis-aligned rectangles). False-positive rejections
-    // (over-conservative caps) are acceptable since they trade one
-    // missed savings opportunity for guaranteed travel correctness;
-    // false-negatives would let a bad topology slip through and could
-    // corrupt the print's travel safety.
+    //   Rule 12 was — No enclosed object pockets. Required combined zones
+    //     not to ring any unzoned object content. Removed: ringed pockets
+    //     are resolved at emission time by the same Z-lift fallback.
     //
-    constexpr double PLATE_EDGE_MARGIN_MM = 2.0;
-    const coord_t plate_margin_scaled = scaled<coord_t>(PLATE_EDGE_MARGIN_MM);
-
-    Polygon bed_polygon;
-    bed_polygon.points = Slic3r::get_bed_shape(print.config(), false);
-    const BoundingBox bed_bbox = bed_polygon.bounding_box();
-
-    BOOST_LOG_TRIVIAL(info) << "[FLA] Phase 5d: plate bbox = ["
-        << unscale<double>(bed_bbox.min.x()) << "," << unscale<double>(bed_bbox.min.y())
-        << "]-[" << unscale<double>(bed_bbox.max.x()) << "," << unscale<double>(bed_bbox.max.y())
-        << "]  edge_margin=" << PLATE_EDGE_MARGIN_MM << "mm";
-
-    // Rule 11 — candidate inflated zone must keep PLATE_EDGE_MARGIN_MM clearance
-    // from every plate edge. v1 uses the bed_bbox shrunk by margin (treats the
-    // bed as rectangular); precise polygon containment is a v2 enhancement and
-    // matters only for non-rectangular printable areas (e.g. delta printers).
-    auto rule_11_passes = [&](const BoundingBox &zone_inflated) -> bool {
-        return zone_inflated.min.x() >= bed_bbox.min.x() + plate_margin_scaled
-            && zone_inflated.min.y() >= bed_bbox.min.y() + plate_margin_scaled
-            && zone_inflated.max.x() <= bed_bbox.max.x() - plate_margin_scaled
-            && zone_inflated.max.y() <= bed_bbox.max.y() - plate_margin_scaled;
-    };
-
-    // (Rule 12 removed — the previous "no enclosed object pockets" planning-
-    // time veto has been replaced by GCode::emit_lookahead_z_clearance_travel
-    // at emission time. See the Phase 5d header comment above.)
-    // ─────────────────────────────────────────────────────────────────────
+    // The Z-clearance fallback in GCode::emit_lookahead_z_clearance_travel
+    // lifts the head ABOVE every physically-printed tower and traverses XY
+    // at that elevated Z, then drops back down. Unconditionally safe
+    // regardless of zone topology relative to plate edges or to other
+    // zones. See Rule 8 in FILAMENT_LOOKAHEAD.md for emission details.
 
     for (unsigned int ext_id : all_extruders) {
         size_t li = 0;
@@ -530,19 +498,22 @@ void FilamentLookaheadPlan::build(const Print &print,
 
             for (const auto &cb : clusters) {
                 // ───── Base-layer (k=0) gate ─────
-                // Five rules govern whether a cluster can become a tower base.
-                // The first three — Rule 1 (other-filament clearance on the
-                // starting layer), Rule 11 (plate-edge clearance), Rule 12
-                // (no enclosed object pockets) — gate acceptance even before
-                // we look at upper layers. Rule 3 and Rule 4 only kick in
-                // for cascade extension (k>=1) since they govern whether the
-                // tower can EXTEND past the base.
-
-                // Rule 1 (k=0): cluster's bbox must be clear of other
-                // extruders' entities on the starting layer. Inflating cb by
-                // `clearance_scaled` and intersecting with other entities is
-                // the same check applied at every cascade step — applied
-                // here for the base layer alone.
+                // One rule gates acceptance at the starting layer:
+                //
+                //   Rule 1 — other-filament clearance on the starting layer:
+                //     cluster's bbox must be clear of other extruders'
+                //     entities. Inflating cb by `clearance_scaled` and
+                //     intersecting with other entities is the same check
+                //     applied at every cascade step.
+                //
+                // Rules 11 and 12 used to also gate here (plate-edge
+                // clearance and no-enclosed-pockets); both have been removed
+                // in favor of the GCode::emit_lookahead_z_clearance_travel
+                // fallback at emission time. See the Phase 5d header above.
+                //
+                // Rule 3 (self-content) and Rule 4 (filament-completeness)
+                // are upper-layer rules — they govern whether the tower can
+                // EXTEND past the base, not whether it can start.
                 bool cluster_isolated = true;
                 for (const auto &[other_id, other_ents] : layer_extruder_entity_bboxes[li]) {
                     if (other_id == ext_id) continue;
@@ -561,30 +532,15 @@ void FilamentLookaheadPlan::build(const Print &print,
                     continue;
                 }
 
-                // Rule 11 (k=0): the cluster's inflated zone must keep
-                // PLATE_EDGE_MARGIN_MM clearance from the printable area's
-                // outer boundary. Travel routing on every layer the tower
-                // covers needs room to move around it without leaving the
-                // plate; an edge-locked zone has no such room.
+                // Running envelope tracks the cluster's footprint as the
+                // cascade extends. Starts at the base cluster's bbox; each
+                // accepted layer that contributes overlapping self-content
+                // merges into it.
                 BoundingBox running_envelope = cb;
-                BoundingBox running_inflated = running_envelope.inflated(clearance_scaled);
-                if (!rule_11_passes(running_inflated)) {
-                    BOOST_LOG_TRIVIAL(info) << "[FLA]   cluster at [" << cb.min.x() << "," << cb.min.y()
-                        << "]-[" << cb.max.x() << "," << cb.max.y()
-                        << "] REJECT: fails Rule 11 (plate-edge clearance) on starting layer " << li
-                        << " — inflated zone reaches within " << PLATE_EDGE_MARGIN_MM << "mm of plate edge";
-                    continue;
-                }
-
-                // (Rule 12 — "no enclosed object pockets" — was previously
-                // checked here. Removed; the Z-clearance fallback in
-                // GCode::route_around_lookahead_zones handles ringed-pocket
-                // travels at emission time, so the planner no longer needs
-                // to veto the configuration. See Phase 5d header.)
 
                 // ───── Cascade truncation (k=1..max) ─────
-                // For each candidate extension layer, all five rules must
-                // pass. First failure caps the tower at k-1.
+                // For each candidate extension layer, three rules must pass
+                // (Rules 1, 3, 4). First failure caps the tower at k-1.
                 //
                 //   Rule 3  — self-content: tower's filament must have
                 //             entities inside the running envelope on this
@@ -596,15 +552,11 @@ void FilamentLookaheadPlan::build(const Print &print,
                 //   Rule 4  — filament completeness: every extrusion of
                 //             ext_id on this layer must lie inside an
                 //             isolated cluster (Phase 3b output).
-                //   Rule 11 — plate-edge clearance for the GROWING envelope.
-                //             The envelope can expand as we extend (each
-                //             layer's self-content merges in), and an
-                //             expanded envelope may now violate the margin
-                //             even if the base didn't.
-                //   Rule 12 — no enclosed object pockets, recomputed per
-                //             layer because m_raised_per_layer may carry
-                //             a different set of zones on each candidate
-                //             layer (other towers can start/end mid-cascade).
+                //   (Rules 11 and 12 used to be checked here too — both
+                //    removed in favor of the emission-time Z-clearance
+                //    fallback. The running envelope is still tracked
+                //    because it's used elsewhere by the post-cascade
+                //    accepted_zones registration.)
                 size_t cluster_extra = truncated_extra;
                 for (size_t k = 1; k <= truncated_extra; ++k) {
                     // Rule 4 — filament-completeness on layer li+k (Phase 3b).
@@ -659,28 +611,20 @@ void FilamentLookaheadPlan::build(const Print &print,
 
                     // Update the running envelope to include layer li+k's
                     // self-content overlapping cb. The envelope can only
-                    // grow; once it grows we re-test Rules 11 and 12 against
-                    // the new size.
+                    // grow as the cascade extends. (Used downstream by the
+                    // accepted_zones registration after the loop.)
                     if (self_it != layer_extruder_entity_bboxes[li + k].end()) {
                         for (const auto &sb : self_it->second)
                             if (cb.overlap(sb))
                                 running_envelope.merge(sb);
                     }
-                    running_inflated = running_envelope.inflated(clearance_scaled);
 
-                    // Rule 11 — re-check plate-edge clearance with the grown envelope.
-                    if (!rule_11_passes(running_inflated)) {
-                        cluster_extra = k - 1;
-                        BOOST_LOG_TRIVIAL(info) << "[FLA]   cascade truncate at k=" << k
-                            << " (layer " << (li + k) << "): Rule 11 — envelope grew within "
-                            << PLATE_EDGE_MARGIN_MM << "mm of plate edge";
-                        break;
-                    }
-
-                    // (Rule 12 cascade check removed. Travels into pockets
-                    // formed by combined exclusion zones are now resolved at
-                    // emission time via the Z-clearance fallback in
-                    // GCode::route_around_lookahead_zones.)
+                    // (Rules 11 and 12 cascade re-checks removed. Travel-
+                    // routing edge cases — edge-locked envelopes, ringed
+                    // pockets — are resolved at emission time via the
+                    // Z-clearance fallback in
+                    // GCode::route_around_lookahead_zones rather than
+                    // capping the tower here. See Phase 5d header.)
                 }
 
                 // Use the minimum cascade truncation across all clusters in this plan entry.
