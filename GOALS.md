@@ -49,11 +49,17 @@ Wishlist item for after Features 1-3 are complete. Optimize the order filaments 
 - `src/libslic3r/Support/` - Support generation (Feature 1: support base material)
 - `src/slic3r/GUI/` - GUI components (Features 1, 2, 3: dropdowns, toggles, color mapping)
 
-## Future Goal: Arc Travel Moves to Avoid Printed Objects (not yet implementing)
+## Future Goal: Avoid Travel Through Already-Printed Object Interiors (not yet implementing)
 
-Wishlist item. Add an optional travel move behavior: when the toolhead travels from point A to point B between layers or within a layer, if the straight-line travel path would exit the current object's infill, cross over its walls, and then pass through another printed object on the plate before reaching the destination, the toolhead should instead arc around the obstructing object rather than traveling straight through it. This avoids dragging ooze/strings across the surface of already-printed objects, reducing surface defects on multi-object prints. The feature would be an opt-in setting (e.g., "Avoid printed objects during travel").
+Wishlist item. Always-active travel-routing rule (not opt-in): when the toolhead is travelling from point A to point B and the straight-line travel path would enter the wall of an already-printed object, cross through the interior, and exit out the opposite wall — *without depositing any extrusion inside that object* — route the travel around the object instead.
 
-**Research needed:** OrcaSlicer already has some non-trivial travel move behavior - investigate what the existing "avoid crossing perimeters" logic actually does before implementing. The existing behavior may be about keeping the toolhead *within* the current object's boundary during travel (so it doesn't cross its own walls and leave strings on the outside), which is a different problem than avoiding travel paths that unnecessarily cross *other* printed objects on the plate. Clarify the distinction and determine what, if anything, already exists for the inter-object case before designing a solution.
+The trigger is specifically the "enter one wall, exit the opposite wall, no extrusion in between" pattern. Travelling *into* an object to start a new perimeter or infill move is fine (the travel terminates inside, the next move is an extrusion). What we want to prevent is the toolhead using a printed object's interior as a shortcut between two unrelated points — the head physically passes over already-laid material, dragging any oozed filament across the top surface and leaving strings or scuffs.
+
+**Why always active.** Surface defects from shortcut-through-object travels are universal, not lookahead-specific. Every multi-object print is exposed to it. The cost of the rule (slightly longer travels) is small relative to the benefit (cleaner top surfaces). Default on; consider an off-switch only if a real user case appears.
+
+**Research needed:** OrcaSlicer already has non-trivial travel-move behavior — investigate `avoid_crossing_perimeters` before designing this. That existing logic appears to keep the toolhead *within* the current object during travel so the head doesn't cross its own walls and string outside. That's a *different* problem than the shortcut-through-another-object case. Clarify the distinction, determine what already exists for inter-object travel, and design the new rule as an additional gate on the existing path planner rather than a parallel implementation.
+
+**Interaction with Filament Lookahead Rule 8.** Lookahead's exclusion-zone travel avoidance (Rule 8) is a similar pattern — route travels around forbidden polygons. Implementing this object-interior rule may share infrastructure with Rule 8's wall-following / merged-obstacle handling. Consider unifying both into a single "active obstacle" planner that takes a list of polygons (lookahead zones + already-printed object hulls) and routes around all of them.
 
 ## Future Goal: Color-Aware Flush Into Infill Toggle (not yet implementing)
 
