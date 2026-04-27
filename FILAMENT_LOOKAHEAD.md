@@ -185,6 +185,14 @@ Efficiency is not critical — the vast majority of travels won't intersect zone
 
 **Z-hop interaction**: existing Z-hop during travel only raises the nozzle slightly above the current layer's Z. Active zones represent extrusion *above* the current layer's Z by definition, so Z-hop does not clear them. Travel must still route around in XY regardless of Z-hop behavior.
 
+**v1 implementation notes** (`GCode::route_around_lookahead_zones`):
+- Hooked into `GCode::travel_to()` after `m_avoid_crossing_perimeters.travel_to()` and after retraction (which can re-trigger AVP). Runs only when lookahead is enabled and the current layer has registered zones — zero cost on prints without towers.
+- Active zones come from `FilamentLookaheadPlan::exclusion_zones(layer_idx)`, which returns the bbox set registered during plan build for the current object-layer index.
+- Each bbox is inflated by `SAFETY_MM` (0.5 mm) on top of the planning-time clearance polygon, then converted to a `Polygon` and unioned via `Clipper::union_` so overlapping/touching zones merge into single obstacles.
+- For each segment of the input polyline: iterate. Test against all obstacles via `Geometry::segment_segment_intersection` per polygon edge. If any obstacle is hit, pick the obstacle vertex that minimizes `cur→vertex + vertex→destination` and that doesn't itself re-cross the same obstacle. Push that vertex into the result and advance the cursor.
+- Iteration is bounded by `MAX_DETOUR_ITER = 32` per segment; on hit the helper logs a warning and emits the straight remainder. Rules 11/12 are designed to keep zone topology solvable, so this fallback should never fire in practice.
+- Crossings of OTHER obstacles introduced by a vertex detour resolve naturally on the next iteration (the new cursor sits on the previously-crossed obstacle's vertex; the next test will find the next obstacle in the way).
+
 ### Rule 9 — Flush-into-infill/supports interaction
 
 Flush-into-infill and flush-into-supports can discharge purge material into infill/support regions during tool changes. This interacts poorly with lookahead because the discharge is scheduled per-tool-change and lookahead moves tool changes around.

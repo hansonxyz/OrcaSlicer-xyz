@@ -14,6 +14,7 @@
 #include "Exception.hpp"
 #include "ExtrusionEntity.hpp"
 #include "EdgeGrid.hpp"
+#include "Geometry.hpp"
 #include "Geometry/ConvexHull.hpp"
 #include "GCode/PrintExtents.hpp"
 #include "GCode/Thumbnails.hpp"
@@ -7597,6 +7598,13 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
         // }
     }
 
+    // Phase 5d (Rule 8): route around active lookahead exclusion zones on the
+    // current layer. Runs AFTER avoid_crossing_perimeters and after retraction
+    // (which can re-trigger AVP if wipe-while-retracting moved the head, line
+    // 7583), so any inside-object detour either pass produced gets re-checked
+    // against outside-object zone obstacles. No-op when lookahead is inactive
+    // or no zones are present, so this has zero cost on prints without towers.
+    travel = this->route_around_lookahead_zones(travel);
 
     // if needed, write the gcode_label_objects_end then gcode_label_objects_start
     m_writer.add_object_change_labels(gcode);
@@ -8372,6 +8380,169 @@ void GCode::ObjectByExtruder::Island::Region::append(const Type type, const Extr
 
 // Index into std::vector<LayerToPrint>, which contains Object and Support layers for the current print_z, collected for
 // a single object, or for possibly multiple objects with multiple instances.
+
+// ===========================================================================
+// Filament Lookahead Phase 5d — travel rerouting around active exclusion zones
+// ===========================================================================
+// Implements the Rule 8 wall-follow detour: when a travel-time polyline
+// crosses any active exclusion zone on the current layer, insert vertex
+// waypoints to route around. Called from GCode::travel_to() AFTER the
+// existing avoid_crossing_perimeters pass (which routes the head INSIDE
+// objects to keep stringing hidden) but BEFORE gcode emission.
+//
+// Approach:
+//   1. Collect the layer's active zones from m_lookahead_plan.
+//   2. Inflate each zone by SAFETY_MM (so the detour stays clear of the
+//      tower itself, not just the planning clearance polygon).
+//   3. Convert each inflated bbox to a Polygon and union — this merges
+//      overlapping or touching zones into single obstacle polygons.
+//   4. For each segment of the input polyline, iteratively:
+//      a. Test the current cursor → segment endpoint against all obstacles.
+//      b. If the segment crosses any obstacle, pick the obstacle vertex
+//         that minimizes total path length (cur→vertex + vertex→endpoint)
+//         and that doesn't itself re-cross the same obstacle.
+//      c. Push the chosen vertex into the result and advance cursor.
+//      d. Repeat until clear or MAX_DETOUR_ITER hits.
+//
+// Bounded iteration prevents pathological loops if the zone arrangement
+// is unsolvable (which Rules 11/12 are supposed to prevent in the first
+// place — if those rules let a bad topology through, this fallback emits
+// the straight path with a warning rather than hang).
+//
+Polyline GCode::route_around_lookahead_zones(const Polyline &travel) const
+{
+    if (!m_lookahead_plan || !m_lookahead_plan->enabled() || travel.points.size() < 2)
+        return travel;
+
+    auto zones_raw = m_lookahead_plan->exclusion_zones(m_current_layer_idx);
+    if (zones_raw.empty()) return travel;
+
+    // SAFETY_MM: extra clearance beyond the planning-time clearance polygon.
+    // The planning polygon is already inflated by `min_clearance_distance`;
+    // adding 0.5 mm on top guarantees the detour stays away from the tower
+    // wall by at least one nozzle-width's worth of margin.
+    constexpr double SAFETY_MM = 0.5;
+    constexpr size_t MAX_DETOUR_ITER = 32;
+    const coord_t safety_scaled = scaled<coord_t>(SAFETY_MM);
+
+    // The travel polyline is in PRINT (object-local) coordinates. The zones
+    // from FilamentLookaheadPlan were collected in PLATE coordinates (every
+    // entity bbox is translated by the instance shift before clustering).
+    // To compare correctly, translate the zones into the same print-coord
+    // frame the travel polyline is using. point_to_gcode() does:
+    //     gcode = unscale(print_point) + m_origin - extruder_offset
+    // so:
+    //     print_point_scaled = plate_point_scaled - scaled(m_origin) + scaled(extruder_offset)
+    //     translate-zones-by = scaled(extruder_offset) - scaled(m_origin)
+    const Vec2d extruder_offset_d = EXTRUDER_CONFIG(extruder_offset);
+    const Point plate_to_print_shift(
+        scaled<coord_t>(extruder_offset_d.x() - m_origin.x()),
+        scaled<coord_t>(extruder_offset_d.y() - m_origin.y()));
+
+    Polygons zone_polys;
+    zone_polys.reserve(zones_raw.size());
+    for (const auto &z : zones_raw) {
+        BoundingBox local = z;
+        local.translate(plate_to_print_shift);
+        zone_polys.push_back(local.inflated(safety_scaled).polygon());
+    }
+    Polygons obstacles = union_(zone_polys);
+    if (obstacles.empty()) return travel;
+
+    // Test whether segment a-b crosses the interior of `obs`'s bounding box.
+    // For axis-aligned bbox obstacles (the common case — single zones, or
+    // unions that didn't merge non-aligned shapes), this is exact. For
+    // arbitrary polygon shapes the bbox is conservative (may flag a
+    // crossing of a concavity), which yields an over-detour but is still
+    // correct.
+    //
+    // Liang-Barsky returns the [t0, t1] sub-interval of the segment that
+    // lies INSIDE the bbox. A segment "crosses" the obstacle iff the
+    // interval is non-empty AND not just a tangent touch at an endpoint.
+    auto seg_crosses_polygon = [](const Point &a, const Point &b, const Polygon &obs) -> bool {
+        BoundingBox bb = obs.bounding_box();
+        BoundingBoxf bbf(bb.min.cast<double>(), bb.max.cast<double>());
+        Vec2d af = a.cast<double>();
+        Vec2d v = (b - a).cast<double>();
+        std::pair<double, double> interval;
+        if (! Geometry::liang_barsky_line_clipping_interval(af, v, bbf, interval))
+            return false;
+        // Reject zero-length interval (tangent line just grazing the bbox).
+        if (interval.second - interval.first < 1e-9) return false;
+        // Reject endpoint-only touches: if the entire interval is at t=0
+        // (segment starts on bbox boundary, exits immediately) or t=1
+        // (segment ends on boundary, was outside until then), we're not
+        // crossing the interior. Use a small parametric tolerance — at
+        // 1e-6 of segment length, this corresponds to micron-scale
+        // tolerance in scaled space.
+        if (interval.first > 1.0 - 1e-6) return false;  // intersection at t≈1 only
+        if (interval.second < 1e-6) return false;       // intersection at t≈0 only
+        return true;
+    };
+
+    // Find the first obstacle that segment a-b crosses, or -1 if none.
+    auto first_obstacle_hit = [&](const Point &a, const Point &b) -> int {
+        for (size_t i = 0; i < obstacles.size(); ++i) {
+            if (seg_crosses_polygon(a, b, obstacles[i])) return (int)i;
+        }
+        return -1;
+    };
+
+    Points result;
+    result.push_back(travel.points.front());
+
+    for (size_t pt_idx = 1; pt_idx < travel.points.size(); ++pt_idx) {
+        const Point seg_dst = travel.points[pt_idx];
+        size_t iter = 0;
+        for (; iter < MAX_DETOUR_ITER; ++iter) {
+            const Point cur = result.back();
+            int hit = first_obstacle_hit(cur, seg_dst);
+            if (hit < 0) {
+                result.push_back(seg_dst);
+                break;
+            }
+            const Polygon &obs = obstacles[hit];
+            // Pick the obstacle vertex with shortest total path that doesn't
+            // re-cross the same obstacle. (Crossings of OTHER obstacles are
+            // resolved in the next iteration.)
+            double best_len = std::numeric_limits<double>::max();
+            Point best_corner;
+            bool found = false;
+            for (const Point &c : obs.points) {
+                if (c == cur) continue;
+                if (seg_crosses_polygon(cur, c, obs)) continue;
+                if (seg_crosses_polygon(c, seg_dst, obs)) continue;
+                double len = (c - cur).cast<double>().norm()
+                           + (seg_dst - c).cast<double>().norm();
+                if (len < best_len) {
+                    best_len = len;
+                    best_corner = c;
+                    found = true;
+                }
+            }
+            if (!found) {
+                BOOST_LOG_TRIVIAL(warning) << "[FLA] route_around_lookahead_zones: no detour found"
+                    " for obstacle on layer=" << m_current_layer_idx
+                    << " — emitting straight (may cross zone)";
+                result.push_back(seg_dst);
+                break;
+            }
+            result.push_back(best_corner);
+        }
+        if (iter == MAX_DETOUR_ITER) {
+            BOOST_LOG_TRIVIAL(warning) << "[FLA] route_around_lookahead_zones: hit MAX_DETOUR_ITER"
+                " on layer=" << m_current_layer_idx
+                << " — emitting last computed path; final segment may cross zone";
+            // Always close out the segment with seg_dst, even if we bailed early.
+            if (result.back() != seg_dst)
+                result.push_back(seg_dst);
+        }
+    }
+
+    Polyline out;
+    out.points = std::move(result);
+    return out;
+}
 
 // ===========================================================================
 // Filament Lookahead Phase 6b+6c (Option B) — emission-time tower batching

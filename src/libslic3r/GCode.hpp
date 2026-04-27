@@ -513,6 +513,14 @@ private:
         size_t        extra_layers,
         double        base_z);
 
+    // Phase 5d (Rule 8): re-route a travel polyline around any active
+    // lookahead exclusion zones on the current layer. Returns the polyline
+    // unchanged if lookahead is inactive or no zones are present. Otherwise
+    // walks each segment, detects crossings against the merged-obstacle
+    // polygon set, and inserts vertex waypoints to route around. Iterative,
+    // bounded by MAX_DETOUR_ITER per segment to avoid pathological loops.
+    Polyline route_around_lookahead_zones(const Polyline &travel) const;
+
     // BBS
     LiftType to_lift_type(ZHopType z_hop_types);
 
