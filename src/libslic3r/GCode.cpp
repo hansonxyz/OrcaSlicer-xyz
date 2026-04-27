@@ -5154,9 +5154,28 @@ LayerResult GCode::process_layer(
                         // Let's recover vector of extruder overrides:
                         const WipingExtrusions::ExtruderPerCopy *entity_overrides = nullptr;
                         if (! layer_tools.has_extruder(correct_extruder_id)) {
-                            // this entity is not overridden, but its extruder is not in layer_tools - we'll print it
-                            // by last extruder on this layer (could happen e.g. when a wiping object is taller than others - dontcare extruders are eradicated from layer_tools)
-                            correct_extruder_id = layer_tools.extruders.back();
+                            // xyz fork (Filament Lookahead Phase 6d): if the missing extruder is
+                            // an upper-stack layer of an LA tower, do NOT fall back. Phase 6d
+                            // intentionally filtered this extruder out of layer_tools.extruders
+                            // because the entity will be emitted as part of the tower's batched
+                            // base-layer extras (emit_lookahead_tower_extras). Falling back to
+                            // extruders.back() would re-emit the entity under a different
+                            // extruder, producing the "wrong color bleed" duplication where
+                            // tower-base layers print the union of multiple extruders' content.
+                            // Leaving correct_extruder_id pointing at the filtered extruder is
+                            // safe: by_extruder.find(filament_id) at line 5210 only iterates
+                            // extruders that are in layer_tools.extruders, so the entity stays
+                            // in unused island data and gets emitted only by the LA tower batch.
+                            const bool la_upper_stack =
+                                m_lookahead_plan && m_lookahead_plan->enabled() &&
+                                m_lookahead_plan->is_upper_tower_stack(
+                                    m_current_layer_idx,
+                                    static_cast<unsigned int>(correct_extruder_id));
+                            if (! la_upper_stack) {
+                                // this entity is not overridden, but its extruder is not in layer_tools - we'll print it
+                                // by last extruder on this layer (could happen e.g. when a wiping object is taller than others - dontcare extruders are eradicated from layer_tools)
+                                correct_extruder_id = layer_tools.extruders.back();
+                            }
                         }
                         printing_extruders.clear();
                         if (is_anything_overridden) {
