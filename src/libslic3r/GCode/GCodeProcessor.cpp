@@ -2599,9 +2599,10 @@ void GCodeProcessor::process_buffer(const std::string &buffer)
 
 void GCodeProcessor::finalize(bool post_process)
 {
-    // xyz fork (Phase 1a verification): log lookahead tower records so we
-    // can confirm parsing populated them correctly. Removed in a later
-    // phase once the viewer consumes the data structurally.
+    // xyz fork (Phase 1a + 1b verification): log lookahead tower records
+    // and per-(tower, stack) move histograms so we can confirm parsing
+    // populated them correctly. Removed in a later phase once the viewer
+    // consumes the data structurally.
     {
         FILE *probe = std::fopen("C:\\Users\\brian\\AppData\\Local\\Temp\\fla_viewer_phase1a.log", "w");
         if (probe) {
@@ -2612,6 +2613,23 @@ void GCodeProcessor::finalize(bool post_process)
                 std::fprintf(probe, "  [%zu] base_layer=%zu ext=%d base_z=%.2f top_z=%.2f stacks=%zu lines=[%zu..%zu]\n",
                     i, t.base_layer, t.extruder_id, t.base_z, t.top_z,
                     t.stack_count, t.begin_line, t.end_line);
+            }
+
+            // Phase 1b histogram: count moves per (tower_id, stack_index).
+            // Outside-of-block moves (tower_id = -1) are summed into a
+            // single "untagged" total. Inside-block moves are bucketed.
+            size_t untagged = 0;
+            // Use a small map keyed (tower_id, stack_index) → count.
+            std::map<std::pair<int, int>, size_t> hist;
+            for (const auto &mv : m_result.moves) {
+                if (mv.tower_id < 0) ++untagged;
+                else ++hist[{(int)mv.tower_id, (int)mv.stack_index}];
+            }
+            std::fprintf(probe, "Phase 1b histogram (moves per (tower, stack)):\n");
+            std::fprintf(probe, "  untagged (outside any LA block): %zu\n", untagged);
+            for (const auto &kv : hist) {
+                std::fprintf(probe, "  tower=%d stack=%d → %zu moves\n",
+                    kv.first.first, kv.first.second, kv.second);
             }
             std::fclose(probe);
         }
@@ -3106,10 +3124,18 @@ void GCodeProcessor::process_tags(const std::string_view comment, bool producers
         // unique Z increment (not per marker — towers emit a Z_HEIGHT
         // both on stack ramp-up and on safe-exit ramp-down, and the
         // ramp-down should not double-count).
+        //
+        // Phase 1b: m_lookahead_current_stack_index advances in lockstep
+        // with stack_count (minus 1, since stack_index is 0-based whereas
+        // stack_count counts the base as 1). On the safe-exit Z_HEIGHT
+        // back to base_z, top_z does NOT increase, stack_index stays put,
+        // and the moves emitted thereafter (the safe-exit travel + return
+        // unretract) get tagged with the LAST upper-stack's index.
         if (m_lookahead_in_block) {
             if (m_print_z > m_lookahead_current.top_z) {
                 m_lookahead_current.top_z = m_print_z;
                 ++m_lookahead_current.stack_count;
+                m_lookahead_current_stack_index = (int8_t)(m_lookahead_current.stack_count - 1);
             }
         }
         return;
@@ -3158,6 +3184,12 @@ void GCodeProcessor::process_tags(const std::string_view comment, bool producers
         m_lookahead_current.stack_count = 1; // base layer counts as stack 0
         m_lookahead_current.begin_line  = m_line_id;
         m_lookahead_in_block            = true;
+        // Phase 1b: pre-compute the index this tower will occupy in
+        // m_result.lookahead_towers so every move emitted inside the
+        // block gets tagged with the right tower_id before the END
+        // marker actually pushes the record.
+        m_lookahead_current_tower_id    = (int8_t) m_result.lookahead_towers.size();
+        m_lookahead_current_stack_index = 0; // base layer
         return;
     }
 
@@ -3166,7 +3198,9 @@ void GCodeProcessor::process_tags(const std::string_view comment, bool producers
         if (m_lookahead_in_block) {
             m_lookahead_current.end_line = m_line_id;
             m_result.lookahead_towers.push_back(m_lookahead_current);
-            m_lookahead_in_block = false;
+            m_lookahead_in_block            = false;
+            m_lookahead_current_tower_id    = -1;
+            m_lookahead_current_stack_index = -1;
         }
         // If the END appears without a matching BEGIN we silently ignore —
         // shouldn't happen in well-formed gcode but bailing here would
@@ -5631,7 +5665,19 @@ void GCodeProcessor::store_move_vertex(EMoveType type, EMovePathType path_type, 
         internal_only,
         m_object_label_id,
         m_print_z
+        // tower_id, stack_index left at their default -1; set below if
+        // the move was emitted inside a lookahead-tower block.
     });
+
+    // xyz fork (Phase 1b): tag the just-pushed move with lookahead tower
+    // metadata if we're emitting inside a `LOOKAHEAD_BLOCK_BEGIN ... END`
+    // bracket. Set on the back element to avoid having to plumb extra
+    // fields into the aggregate-init list above.
+    if (m_lookahead_in_block && !m_result.moves.empty()) {
+        auto &mv = m_result.moves.back();
+        mv.tower_id    = m_lookahead_current_tower_id;
+        mv.stack_index = m_lookahead_current_stack_index;
+    }
 
     if (type == EMoveType::Seam) {
         m_seams_count++;

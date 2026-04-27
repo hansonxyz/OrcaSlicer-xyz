@@ -195,6 +195,23 @@ class Print;
             int  object_label_id{-1};
             float print_z{0.0f};
 
+            // xyz fork: Filament Lookahead viewer tagging.
+            // tower_id is the index into GCodeProcessorResult::lookahead_towers
+            // for the tower this move belongs to, or -1 if the move was emitted
+            // OUTSIDE any LOOKAHEAD_BLOCK_BEGIN/END bracket. stack_index is
+            // 0 for the base layer's content (and the toolchange/wipe-tower
+            // dance preceding the upper-stack ramp-ups), and 1..N for each
+            // upper stack — incremented every time `; Z_HEIGHT:` raises Z
+            // strictly above the running top inside the block.
+            //
+            // The viewer uses these to expand the layer slider with sub-ticks
+            // at each tower-base layer (one extra tick per upper stack) and,
+            // in Phase 5, to filter rendering to "stacks 0..K" of an
+            // in-progress tower so the user can scroll through emission order
+            // and watch the tower assemble bottom-up. See LOOKAHEAD_VIEWER.md.
+            int8_t tower_id{ -1 };
+            int8_t stack_index{ -1 };
+
             float volumetric_rate() const { return feedrate * mm3_per_mm; }
             float actual_volumetric_rate() const { return actual_feedrate * mm3_per_mm; }
         };
@@ -801,7 +818,19 @@ class Print;
         // block extends top_z and increments stack_count. On END we push
         // the completed record into m_result.lookahead_towers and clear
         // the in-progress state.
-        bool m_lookahead_in_block{false};
+        //
+        // m_lookahead_current_tower_id is the index this tower will hold
+        // in m_result.lookahead_towers once the END marker pushes it.
+        // Pre-computed at BEGIN as `m_result.lookahead_towers.size()` so
+        // we can tag every move emitted inside the block with the right
+        // index before the tower record is even pushed.
+        //
+        // m_lookahead_current_stack_index is the index of the current
+        // upper-stack layer we're emitting (0 = base, 1..N = upper stacks).
+        // Bumped synchronously with stack_count in the Z_HEIGHT handler.
+        bool   m_lookahead_in_block{false};
+        int8_t m_lookahead_current_tower_id{-1};
+        int8_t m_lookahead_current_stack_index{-1};
         GCodeProcessorResult::LookaheadTower m_lookahead_current{};
         std::vector<float> m_remaining_volume;
         ExtruderTemps m_filament_nozzle_temp;

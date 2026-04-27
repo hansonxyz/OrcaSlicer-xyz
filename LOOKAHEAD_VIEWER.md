@@ -1,7 +1,7 @@
 # GCode Viewer — Filament Lookahead Sub-Layer Display
 
 Branch: `filament-lookahead`
-Status: Phase 1a ✅ complete. Phase 1b next.
+Status: Phase 1a ✅ complete. Phase 1b ✅ complete. Phase 2 next.
 
 ## Goal
 
@@ -89,18 +89,24 @@ Each phase ends in a clean commit. Each must build, must not regress `compare_sl
 
 **No UI surface area.** Probe log is compiled-in for now; remove or guard at a later phase.
 
-### Phase 1b — Per-move tower tagging
+### Phase 1b ✅ — Per-move tower tagging
 
 **Code changes**
-- `GCodeProcessorResult::MoveVertex` (or equivalent): add `int8_t tower_id = -1` and `int8_t stack_index = -1`.
-- Inside a tower block, parser sets these on each emitted move.
-- `Z_HEIGHT` increments inside a block determine `stack_index`: each `Z_HEIGHT: <upper_z>` raises stack_index from k to k+1.
+- `GCodeProcessorResult::MoveVertex`: added `int8_t tower_id = -1` and `int8_t stack_index = -1` fields (8-bit signed; -1 sentinel covers all moves outside any LA block, indices 0..127 are plenty for towers/stacks).
+- `GCodeProcessor` state: added `m_lookahead_current_tower_id` and `m_lookahead_current_stack_index`. tower_id is pre-computed at BEGIN as `lookahead_towers.size()` so moves can be tagged with the right index before the END pushes the record.
+- `store_move_vertex()`: after the existing aggregate-init `push_back`, if `m_lookahead_in_block` is true, set `back().tower_id` and `back().stack_index`. Avoids plumbing extra fields through the positional initializer.
+- `Z_HEIGHT` handler now also bumps `m_lookahead_current_stack_index` in lockstep with `stack_count`. The safe-exit Z_HEIGHT back to base_z (which doesn't increase top_z) correctly does NOT bump stack_index — so safe-exit moves are tagged with the LAST upper-stack's index.
 
-**Verification**
-- Histogram log: count moves per `(tower_id, stack_index)`. Expected per-tower distribution roughly proportional to extra_layers.
-- `compare_slices.py`: 0 divergences.
+**Verification (PASSED)**
+- Histogram of tulip moves per (tower, stack):
+  - 9 towers × 9 or 5 stacks each (matches Phase 1a stack_count exactly).
+  - Tower 7 truncated to stacks 0-4 (matches extras=4).
+  - Stack 0 of each tower is biggest (toolchange dance + first stack content).
+  - Stacks 1..N have decreasing or roughly-equal move counts.
+  - Untagged moves (outside any LA block): 911,360 — the rest of the print.
+- `compare_slices.py`: 0 divergences. No regression.
 
-**No UI surface area.**
+**No UI surface area.** Probe log still compiled in.
 
 ### Phase 2 — Propagate tower tags into libvgcode
 
@@ -177,3 +183,4 @@ Discoveries that change the plan (e.g. libvgcode forces a Plan B in Phase 5) get
 
 - 2026-04-27 — Plan committed. Investigation done; ready to start Phase 1a.
 - 2026-04-27 — Phase 1a complete. 9 tower records correctly parsed on tulip; comparator clean. Probe log left compiled in (will be removed in a later phase). Note on stack_count semantics: it counts total physical layers (1 base + N extras); the original plan text said "8/8/8/8/8/8/8/4/8" but that was extras only — actual stored value is 9/9/9/9/9/9/9/5/9.
+- 2026-04-27 — Phase 1b complete. Per-move tower_id / stack_index tagging implemented and verified via histogram. Stack-0 of each tower has the biggest move count (toolchange dance + base layer content) — expected pattern. Comparator clean. Phase 2 next: propagate these tags into libvgcode's PathVertex.
