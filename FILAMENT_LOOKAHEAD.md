@@ -212,6 +212,31 @@ When filament lookahead is enabled, the wipe tower is printed at the normal laye
 
 5. **No wipe tower exclusion zone for travel routing.** Because the tower prints at the standard layer Z every physical layer (nothing skipped, nothing backfilled later), existing wipe tower travel avoidance applies unchanged. The tower does NOT get a lookahead-style active exclusion zone.
 
+### Rule 11 — Plate-edge clearance for tower exclusion zones
+
+A candidate tower's exclusion zone, on every layer it covers, must keep at least `PLATE_EDGE_MARGIN_MM` (default 2 mm) clearance from the printable area's outer boundary. If the inflated zone reaches within margin of any plate edge on layer L+k, cap the in-progress tower at L+k-1.
+
+**Rationale.** Travel routing in the GCode emitter (Rule 8) needs room to move *around* a tower's footprint without leaving the plate. An exclusion zone wedged against the plate edge has no clearance on that side; routing must go the other way. That alone is fine — but in combination with another zone elsewhere on the plate, an edge-locked zone can compose into a wall that cuts off plate area, effectively trapping any printing position behind the wall. Conservative: never accept an edge-locked zone in the first place. The 2 mm margin guarantees that on every side of every zone there's enough air for the head to route through, regardless of what other zones come in or out on later layers.
+
+**Envelope growth.** A tower's exclusion zone grows monotonically as the cascade extends — each new layer's self-content can expand the envelope. A base zone that passes Rule 11 may fail it after extending by 5 layers, because the envelope picked up an extra millimeter of width. The cascade re-tests Rule 11 against the running envelope at every k. First failure caps at k-1.
+
+### Rule 12 — No enclosed object pockets
+
+The union of all exclusion zones active on a candidate layer (this candidate plus every previously-accepted tower whose base layer ≤ L+k ≤ top layer) must not split the plate's travel-allowed region into a topology where any object content not already inside an exclusion zone is unreachable from the plate's outside. If a candidate creates such a pocket, cap the in-progress tower at L+k-1.
+
+**Rationale.** Three or more exclusion zones can be arranged into a ring around an unzoned object cluster. Once the ring is closed, every travel move from the plate's outside to that cluster has to cross at least one exclusion zone — which Rule 8 forbids. The result would be either an impossible-travel error or a forbidden zone-crossing. Reject the candidate before it closes the ring.
+
+**Implementation (v1, bbox approximation).** At each candidate k:
+1. Build polygons for all exclusion zones active on layer L+k (registered + candidate).
+2. Compute `travel_allowed = bed_polygon - union(zones)`. Each `ExPolygon` is a connected travel-region component.
+3. If only one component exists, no pockets exist — pass.
+4. Else, classify the "outside" component as the one whose bounding contour touches the most plate edges (a heuristic that correctly identifies the perimeter-spanning component for normal printable areas).
+5. For each non-outside component, check whether any object-content bbox on this layer NOT already inside a zone overlaps the component's bbox. If yes, the candidate strands that content — fail.
+
+The bbox approximation is conservative: a pocket-overlapping object bbox that doesn't actually contain extrusion will produce a false-positive rejection (we cap a tower one layer earlier than strictly necessary). A false-negative — accepting a candidate that strands real extrusion — is impossible at the bbox level since extrusion is a subset of the entity bbox. False-positives reduce optimization opportunities but never corrupt the print; the v2 refinement to actual `Layer::lslices` polygons would tighten this further.
+
+**Multi-cluster within same base layer.** Clusters within the same base layer evaluate sequentially; an earlier cluster's accepted zone is in `accepted_zones` but not yet registered in `m_raised_per_layer` when the next cluster's cascade runs. Rule 12 currently sees only registered (previous-base-layer) zones plus the candidate, missing intra-base-layer cluster interactions. Refine if real prints exhibit multi-cluster bases that conflict.
+
 **Currently-loaded filament definition**: the filament last extruded before the wipe tower's structural band emission begins. Per Rule 8 (normal-first print order), this is either the last normal region's filament, the previous tower base's filament, or the prior tower extrusion's filament on this same layer — whichever was most recently active.
 
 **Unreachable-state safeguard**: if a layer has no normal-mode filament AND the currently-loaded filament is somehow unusable, this is an invariant violation (not believed reachable under the rules above). Log and abort rather than silently work around it — such a scenario would indicate a bug in the analysis stage.

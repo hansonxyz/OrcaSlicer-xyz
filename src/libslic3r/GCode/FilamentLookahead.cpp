@@ -4,6 +4,8 @@
 #include "../PrintConfig.hpp"
 #include "../ExtrusionEntity.hpp"
 #include "../ExtrusionEntityCollection.hpp"
+#include "../ClipperUtils.hpp"
+#include "../Polygon.hpp"
 
 #include <boost/log/trivial.hpp>
 #include <queue>
@@ -377,6 +379,157 @@ void FilamentLookaheadPlan::build(const Print &print,
         for (const auto &[eid, _] : layer_extruder_bboxes_single[li])
             all_extruders.insert(eid);
 
+    // ─────────────────────────────────────────────────────────────────────
+    // Phase 5d (travel exclusion): plate geometry cache + reachability rules
+    //
+    // The cascade loop below decides whether each candidate layer extends
+    // an in-progress tower. Five rules gate that decision; three pre-existed
+    // (Rules 1, 3, 4) and two are added here for travel-routing correctness
+    // (Rules 11, 12). All five must hold at every k for the tower to extend
+    // through layer li+k. Any failure caps the tower at the previous layer.
+    //
+    //   Rule 1 — Candidate zone isolation. Other filaments' entities on the
+    //     candidate layer must stay clearance away from the cluster's
+    //     inflated bbox. Otherwise the tower would force a collision with
+    //     another extruder's print on the same layer.
+    //
+    //   Rule 3 — Containment for tower continuation. The tower's own
+    //     filament must have entities INSIDE the cluster's footprint on
+    //     every layer it covers. A layer with no overlapping content has
+    //     nothing to batch into the tower; extending past it would emit
+    //     no gcode at that level and break the layer-height continuity
+    //     of the tower's structural fill.
+    //
+    //   Rule 4 — Filament completeness. Every extrusion of ext_id on the
+    //     candidate layer must fall inside some isolated cluster of ext_id.
+    //     Stray ext_id extrusion outside the cluster forces a tool change
+    //     to ext_id ANYWAY, defeating the entire savings the tower was
+    //     supposed to deliver.
+    //
+    //   Rule 11 — Plate-edge clearance (NEW). The candidate exclusion zone
+    //     on every covered layer must keep at least PLATE_EDGE_MARGIN_MM
+    //     from the printable area's outer boundary. Travel routing in
+    //     GCode emission has to move AROUND a tower's footprint without
+    //     leaving the plate; if a zone is wedged against the edge, that
+    //     side has no clearance and a single edge-locked zone composed
+    //     with another zone forms a wall that cuts off plate area.
+    //     Conservative: 2 mm of breathing room on all four sides.
+    //
+    //   Rule 12 — No enclosed object pockets (NEW). The union of all
+    //     exclusion zones active on a covered layer (this candidate plus
+    //     every previously-accepted tower) must not split the plate's
+    //     travel-allowed region into a topology where any object content
+    //     not already inside a zone is unreachable from the plate's
+    //     outside. Three or more zones can ring a piece of unzoned model
+    //     such that any travel toward it must cross a zone — which we
+    //     forbid by Rule 8 (Rule 8 also covers what happens once a tower
+    //     is up: every same-layer travel must avoid its XY footprint).
+    //     Reject any candidate that creates such a ring.
+    //
+    // Both new rules use bbox-level approximations for v1: zones are bbox
+    // polygons (axis-aligned rectangles), and "object content" inside a
+    // pocket is detected by per-extruder entity-bbox overlap with the
+    // pocket's bbox. Refinement to actual slice polygons is deferred —
+    // false-positive rejections (over-conservative caps) are acceptable
+    // since they trade one missed savings opportunity for guaranteed
+    // travel correctness; false-negatives (missed rejections) would let a
+    // bad topology slip through and corrupt the print.
+    //
+    constexpr double PLATE_EDGE_MARGIN_MM = 2.0;
+    const coord_t plate_margin_scaled = scaled<coord_t>(PLATE_EDGE_MARGIN_MM);
+
+    Polygon bed_polygon;
+    bed_polygon.points = Slic3r::get_bed_shape(print.config(), false);
+    const BoundingBox bed_bbox = bed_polygon.bounding_box();
+    const Polygons bed_polys = { bed_polygon };
+
+    BOOST_LOG_TRIVIAL(info) << "[FLA] Phase 5d: plate bbox = ["
+        << unscale<double>(bed_bbox.min.x()) << "," << unscale<double>(bed_bbox.min.y())
+        << "]-[" << unscale<double>(bed_bbox.max.x()) << "," << unscale<double>(bed_bbox.max.y())
+        << "]  edge_margin=" << PLATE_EDGE_MARGIN_MM << "mm";
+
+    // Rule 11 — candidate inflated zone must keep PLATE_EDGE_MARGIN_MM clearance
+    // from every plate edge. v1 uses the bed_bbox shrunk by margin (treats the
+    // bed as rectangular); precise polygon containment is a v2 enhancement and
+    // matters only for non-rectangular printable areas (e.g. delta printers).
+    auto rule_11_passes = [&](const BoundingBox &zone_inflated) -> bool {
+        return zone_inflated.min.x() >= bed_bbox.min.x() + plate_margin_scaled
+            && zone_inflated.min.y() >= bed_bbox.min.y() + plate_margin_scaled
+            && zone_inflated.max.x() <= bed_bbox.max.x() - plate_margin_scaled
+            && zone_inflated.max.y() <= bed_bbox.max.y() - plate_margin_scaled;
+    };
+
+    // Rule 12 — zones must not enclose unzoned object content. Compute the
+    // travel-allowed region (bed minus union-of-zones), find connected
+    // components, classify the "outside" component (touches the most plate
+    // edges), and check no other component contains an object bbox that isn't
+    // already covered by some exclusion zone.
+    auto rule_12_passes = [&](const BoundingBox &candidate_inflated, size_t check_layer_idx) -> bool {
+        // Build the union of exclusion zones active on the layer we're
+        // checking. "Active" = previously-accepted towers registered in
+        // m_raised_per_layer plus this candidate. Multi-cluster interactions
+        // within the SAME plan entry (i.e. earlier clusters in the current
+        // base-layer's accepted_zones list) are not yet included — v1
+        // approximation, refine if multi-cluster bases become common.
+        Polygons all_zone_polys;
+        if (check_layer_idx < m_raised_per_layer.size()) {
+            for (const auto &eb : m_raised_per_layer[check_layer_idx].exclusion_bboxes)
+                all_zone_polys.push_back(eb.polygon());
+        }
+        all_zone_polys.push_back(candidate_inflated.polygon());
+        Polygons zones_union = union_(all_zone_polys);
+
+        // travel_allowed = bed - zones_union. Each ExPolygon is a connected
+        // component of where the head can reach without crossing a zone.
+        ExPolygons travel = diff_ex(bed_polys, zones_union);
+        if (travel.size() <= 1)
+            return true;  // single component → all reachable, no pockets
+
+        // Heuristic: pick the "outside" component as the one whose contour
+        // touches the most plate edges. A pocket fully inside the plate
+        // touches zero edges; the main travel region touches all four.
+        size_t  outside_idx = 0;
+        int     max_edges_touched = -1;
+        const   coord_t edge_tol = scaled<coord_t>(0.1);  // 0.1 mm slack for fp noise
+        for (size_t i = 0; i < travel.size(); ++i) {
+            const BoundingBox tb = travel[i].contour.bounding_box();
+            int edges = 0;
+            if (tb.min.x() <= bed_bbox.min.x() + edge_tol) ++edges;
+            if (tb.max.x() >= bed_bbox.max.x() - edge_tol) ++edges;
+            if (tb.min.y() <= bed_bbox.min.y() + edge_tol) ++edges;
+            if (tb.max.y() >= bed_bbox.max.y() - edge_tol) ++edges;
+            if (edges > max_edges_touched) {
+                max_edges_touched = edges;
+                outside_idx = i;
+            }
+        }
+
+        // For each pocket (non-outside component), test whether it overlaps
+        // any object content bbox NOT already inside an exclusion zone on
+        // this layer. If so, this candidate strands that content — reject.
+        if (check_layer_idx >= layer_extruder_entity_bboxes.size())
+            return true;
+        for (size_t i = 0; i < travel.size(); ++i) {
+            if (i == outside_idx) continue;
+            const BoundingBox pocket_bbox = travel[i].contour.bounding_box();
+            for (const auto &[other_ext, bboxes] : layer_extruder_entity_bboxes[check_layer_idx]) {
+                for (const auto &ob : bboxes) {
+                    bool in_any_zone = candidate_inflated.contains(ob);
+                    if (!in_any_zone && check_layer_idx < m_raised_per_layer.size()) {
+                        for (const auto &eb : m_raised_per_layer[check_layer_idx].exclusion_bboxes) {
+                            if (eb.contains(ob)) { in_any_zone = true; break; }
+                        }
+                    }
+                    if (in_any_zone) continue;
+                    if (pocket_bbox.overlap(ob))
+                        return false;  // unzoned content stranded in a pocket
+                }
+            }
+        }
+        return true;
+    };
+    // ─────────────────────────────────────────────────────────────────────
+
     for (unsigned int ext_id : all_extruders) {
         size_t li = 0;
         while (li < num_layers) {
@@ -442,7 +595,20 @@ void FilamentLookaheadPlan::build(const Print &print,
             size_t truncated_extra = last_present - li; // candidate max extra layers
 
             for (const auto &cb : clusters) {
-                // Starting-layer isolation check (required even at k=0)
+                // ───── Base-layer (k=0) gate ─────
+                // Five rules govern whether a cluster can become a tower base.
+                // The first three — Rule 1 (other-filament clearance on the
+                // starting layer), Rule 11 (plate-edge clearance), Rule 12
+                // (no enclosed object pockets) — gate acceptance even before
+                // we look at upper layers. Rule 3 and Rule 4 only kick in
+                // for cascade extension (k>=1) since they govern whether the
+                // tower can EXTEND past the base.
+
+                // Rule 1 (k=0): cluster's bbox must be clear of other
+                // extruders' entities on the starting layer. Inflating cb by
+                // `clearance_scaled` and intersecting with other entities is
+                // the same check applied at every cascade step — applied
+                // here for the base layer alone.
                 bool cluster_isolated = true;
                 for (const auto &[other_id, other_ents] : layer_extruder_entity_bboxes[li]) {
                     if (other_id == ext_id) continue;
@@ -457,35 +623,76 @@ void FilamentLookaheadPlan::build(const Print &print,
                 if (!cluster_isolated) {
                     BOOST_LOG_TRIVIAL(info) << "[FLA]   cluster at [" << cb.min.x() << "," << cb.min.y()
                         << "]-[" << cb.max.x() << "," << cb.max.y()
-                        << "] REJECT: fails isolation on starting layer " << li;
+                        << "] REJECT: fails Rule 1 (isolation) on starting layer " << li;
                     continue;
                 }
 
-                // Cascade truncate: how many layers ahead can this tower continue?
-                // Three conditions must hold on each layer li+k:
-                //   (a) Tower's own filament must have entities INSIDE the cluster's
-                //       zone — otherwise the tower has nothing to batch on this layer.
-                //   (b) Other filaments' entities must stay clear of the inflated zone.
-                //   (c) The layer must be filament-complete for ext_id (Rule 4/3b) —
-                //       every extrusion of ext_id on li+k must fall inside some
-                //       isolated cluster of ext_id. Stray extrusion forces a tool
-                //       change to ext_id anyway, defeating the tower's savings.
-                // Any failure truncates the tower at the last valid layer.
+                // Rule 11 (k=0): the cluster's inflated zone must keep
+                // PLATE_EDGE_MARGIN_MM clearance from the printable area's
+                // outer boundary. Travel routing on every layer the tower
+                // covers needs room to move around it without leaving the
+                // plate; an edge-locked zone has no such room.
+                BoundingBox running_envelope = cb;
+                BoundingBox running_inflated = running_envelope.inflated(clearance_scaled);
+                if (!rule_11_passes(running_inflated)) {
+                    BOOST_LOG_TRIVIAL(info) << "[FLA]   cluster at [" << cb.min.x() << "," << cb.min.y()
+                        << "]-[" << cb.max.x() << "," << cb.max.y()
+                        << "] REJECT: fails Rule 11 (plate-edge clearance) on starting layer " << li
+                        << " — inflated zone reaches within " << PLATE_EDGE_MARGIN_MM << "mm of plate edge";
+                    continue;
+                }
+
+                // Rule 12 (k=0): combined exclusion zones (this candidate +
+                // any zones from previously-accepted towers active on the
+                // same layer) must not strand unzoned object content in a
+                // travel-disconnected pocket. See Phase 5d header for full
+                // rationale.
+                if (!rule_12_passes(running_inflated, li)) {
+                    BOOST_LOG_TRIVIAL(info) << "[FLA]   cluster at [" << cb.min.x() << "," << cb.min.y()
+                        << "]-[" << cb.max.x() << "," << cb.max.y()
+                        << "] REJECT: fails Rule 12 (object pocket) on starting layer " << li;
+                    continue;
+                }
+
+                // ───── Cascade truncation (k=1..max) ─────
+                // For each candidate extension layer, all five rules must
+                // pass. First failure caps the tower at k-1.
+                //
+                //   Rule 3  — self-content: tower's filament must have
+                //             entities inside the running envelope on this
+                //             layer. No content → nothing to batch, break
+                //             continuity.
+                //   Rule 1  — other-filament clearance: foreign extruders'
+                //             entities must stay clearance away from the
+                //             inflated envelope.
+                //   Rule 4  — filament completeness: every extrusion of
+                //             ext_id on this layer must lie inside an
+                //             isolated cluster (Phase 3b output).
+                //   Rule 11 — plate-edge clearance for the GROWING envelope.
+                //             The envelope can expand as we extend (each
+                //             layer's self-content merges in), and an
+                //             expanded envelope may now violate the margin
+                //             even if the base didn't.
+                //   Rule 12 — no enclosed object pockets, recomputed per
+                //             layer because m_raised_per_layer may carry
+                //             a different set of zones on each candidate
+                //             layer (other towers can start/end mid-cascade).
                 size_t cluster_extra = truncated_extra;
                 for (size_t k = 1; k <= truncated_extra; ++k) {
-                    // (c) filament-completeness check (Rule 4 / Phase 3b)
+                    // Rule 4 — filament-completeness on layer li+k (Phase 3b).
                     {
                         auto &lmap = layer_ext_complete[li + k];
                         auto it = lmap.find(ext_id);
                         if (it == lmap.end() || !it->second) {
                             cluster_extra = k - 1;
                             BOOST_LOG_TRIVIAL(info) << "[FLA]   cascade truncate at k=" << k
-                                << " (layer " << (li + k) << "): not filament-complete for ext=" << ext_id;
+                                << " (layer " << (li + k) << "): Rule 4 — not filament-complete for ext=" << ext_id;
                             break;
                         }
                     }
 
-                    // (a) self-content check — containment per Rule 3 (bbox v1)
+                    // Rule 3 — tower's own filament must have content
+                    // overlapping the cluster's footprint on this layer.
                     bool self_has_content = false;
                     auto self_it = layer_extruder_entity_bboxes[li + k].find(ext_id);
                     if (self_it != layer_extruder_entity_bboxes[li + k].end()) {
@@ -498,10 +705,12 @@ void FilamentLookaheadPlan::build(const Print &print,
                     }
                     if (!self_has_content) {
                         cluster_extra = k - 1;
+                        BOOST_LOG_TRIVIAL(info) << "[FLA]   cascade truncate at k=" << k
+                            << " (layer " << (li + k) << "): Rule 3 — no self-content overlapping cluster";
                         break;
                     }
 
-                    // (b) other-filament clearance check
+                    // Rule 1 — other filaments' entities clear of envelope.
                     bool clear_at_k = true;
                     for (const auto &[other_id, other_ents] : layer_extruder_entity_bboxes[li + k]) {
                         if (other_id == ext_id) continue;
@@ -515,6 +724,41 @@ void FilamentLookaheadPlan::build(const Print &print,
                     }
                     if (!clear_at_k) {
                         cluster_extra = k - 1;
+                        BOOST_LOG_TRIVIAL(info) << "[FLA]   cascade truncate at k=" << k
+                            << " (layer " << (li + k) << "): Rule 1 — other extruder intrudes envelope";
+                        break;
+                    }
+
+                    // Update the running envelope to include layer li+k's
+                    // self-content overlapping cb. The envelope can only
+                    // grow; once it grows we re-test Rules 11 and 12 against
+                    // the new size.
+                    if (self_it != layer_extruder_entity_bboxes[li + k].end()) {
+                        for (const auto &sb : self_it->second)
+                            if (cb.overlap(sb))
+                                running_envelope.merge(sb);
+                    }
+                    running_inflated = running_envelope.inflated(clearance_scaled);
+
+                    // Rule 11 — re-check plate-edge clearance with the grown envelope.
+                    if (!rule_11_passes(running_inflated)) {
+                        cluster_extra = k - 1;
+                        BOOST_LOG_TRIVIAL(info) << "[FLA]   cascade truncate at k=" << k
+                            << " (layer " << (li + k) << "): Rule 11 — envelope grew within "
+                            << PLATE_EDGE_MARGIN_MM << "mm of plate edge";
+                        break;
+                    }
+
+                    // Rule 12 — re-check pocket condition on layer li+k.
+                    // m_raised_per_layer at THIS layer index reflects the
+                    // zones from previously-accepted towers active here, so
+                    // a tower that ENDS on layer li+k-1 won't show up at li+k
+                    // (correctly), and a tower whose base is at li+k starts
+                    // contributing here.
+                    if (!rule_12_passes(running_inflated, li + k)) {
+                        cluster_extra = k - 1;
+                        BOOST_LOG_TRIVIAL(info) << "[FLA]   cascade truncate at k=" << k
+                            << " (layer " << (li + k) << "): Rule 12 — combined zones strand unzoned object content";
                         break;
                     }
                 }
