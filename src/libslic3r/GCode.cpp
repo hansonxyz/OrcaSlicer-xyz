@@ -5494,12 +5494,28 @@ LayerResult GCode::process_layer(
             gcode_toolchange = this->set_extruder(extruder_id, print_z);
         }
 
-        if (!gcode_toolchange.empty()) {
+        // Phase 5d (Z-clearance for toolchange): if any lookahead tower has
+        // been physically printed and reaches above the current layer Z, lift
+        // the head over those towers BEFORE running the toolchange gcode.
+        // The toolchange string is opaque to us — we can't insert detours
+        // into its embedded G1 X.. Y.. moves — but we can put the head at a
+        // Z where any XY motion is safe. After the toolchange completes we
+        // descend back to layer Z. The two helpers are paired: pre-op lift
+        // and post-op descent are no-ops when no lift was needed (no tower
+        // printed yet, or head already above all printed-tower tops), so we
+        // always invoke both around a non-empty toolchange and let the
+        // helpers decide whether to emit anything.
+        const bool tc_nonempty = !gcode_toolchange.empty();
+        if (tc_nonempty) {
             // Disable vase mode for layers that has toolchange
             result.spiral_vase_enable = false;
+            gcode += this->emit_lookahead_pre_op_lift("toolchange");
         }
-        
+
         gcode += std::move(gcode_toolchange);
+
+        if (tc_nonempty)
+            gcode += this->emit_lookahead_post_op_descent("toolchange");
 
         // let analyzer tag generator aware of a role type change
         if (layer_tools.has_wipe_tower && m_wipe_tower)
@@ -7604,7 +7620,31 @@ std::string GCode::travel_to(const Point& point, ExtrusionRole role, std::string
     // 7583), so any inside-object detour either pass produced gets re-checked
     // against outside-object zone obstacles. No-op when lookahead is inactive
     // or no zones are present, so this has zero cost on prints without towers.
-    travel = this->route_around_lookahead_zones(travel);
+    //
+    // Two-tier strategy:
+    //   Tier 1: route_around_lookahead_zones inserts XY corner waypoints. If
+    //     it succeeds, `travel` carries the modified polyline and we emit
+    //     normal multi-segment gcode below.
+    //   Tier 2: if Tier 1 can't find an XY route (destination ringed by
+    //     zones, no valid corner detour, etc.), `needs_z_lift` flips true.
+    //     We emit a Z-clearance lift sequence — head goes ABOVE every
+    //     printed tower, traverses XY at that elevated Z, drops back down —
+    //     and skip the normal travel-emission code path entirely. This is
+    //     unconditionally safe regardless of zone topology and lets us
+    //     drop the Rule 12 "no enclosed pockets" planning veto.
+    bool needs_z_lift = false;
+    travel = this->route_around_lookahead_zones(travel, needs_z_lift);
+
+    if (needs_z_lift) {
+        // Tier 2 escape: convert the destination point to gcode coords and
+        // emit a Z-lift travel. Skips the rest of travel_to's normal output
+        // path (the lift sequence ends at the destination XY).
+        m_writer.add_object_change_labels(gcode);
+        gcode += this->emit_lookahead_z_clearance_travel(
+            this->point_to_gcode(travel.points.back()), comment);
+        this->set_last_pos(travel.points.back());
+        return gcode;
+    }
 
     // if needed, write the gcode_label_objects_end then gcode_label_objects_start
     m_writer.add_object_change_labels(gcode);
@@ -8384,13 +8424,36 @@ void GCode::ObjectByExtruder::Island::Region::append(const Type type, const Extr
 // ===========================================================================
 // Filament Lookahead Phase 5d — travel rerouting around active exclusion zones
 // ===========================================================================
-// Implements the Rule 8 wall-follow detour: when a travel-time polyline
-// crosses any active exclusion zone on the current layer, insert vertex
-// waypoints to route around. Called from GCode::travel_to() AFTER the
-// existing avoid_crossing_perimeters pass (which routes the head INSIDE
-// objects to keep stringing hidden) but BEFORE gcode emission.
+// Implements the Rule 8 detour: when a travel-time polyline crosses any
+// active exclusion zone on the current layer, insert vertex waypoints to
+// route around. Called from GCode::travel_to() AFTER the existing
+// avoid_crossing_perimeters pass (which routes the head INSIDE objects to
+// keep stringing hidden) but BEFORE gcode emission.
 //
-// Approach:
+// Two-tier strategy:
+//
+// Tier 1 — XY routing (this function). Cheap. Detect each segment that
+//   crosses an active zone, find the obstacle's corner that minimizes
+//   total path length without re-crossing the same obstacle, and insert
+//   that corner as a waypoint. Iterate until no segment crosses anything.
+//   Most travels resolve cleanly with at most one or two corner insertions.
+//
+// Tier 2 — Z-clearance fallback (emit_lookahead_z_clearance_travel). When
+//   no XY corner detour exists for a segment (e.g. obstacles ring the
+//   destination, or the destination is inside an obstacle, or a custom-
+//   gcode region we don't fully control emits something problematic), the
+//   safe escape is to lift the head ABOVE every printed tower, fly XY to
+//   the destination at that elevated Z, and drop back down. This is slower
+//   (Z moves are slow) but unconditionally safe — the head is in the air
+//   above all obstacles during the XY traverse.
+//
+// The fallback also lets us drop the previously-needed Rule 12 (no enclosed
+// object pockets). Rule 12 was a planning-time veto that rejected tower
+// configurations forming a ring around object content. Without Rule 12 we
+// occasionally produce ringed pockets, but the Tier-2 Z-lift handles them
+// at emission time.
+//
+// Approach (Tier 1):
 //   1. Collect the layer's active zones from m_lookahead_plan.
 //   2. Inflate each zone by SAFETY_MM (so the detour stays clear of the
 //      tower itself, not just the planning clearance polygon).
@@ -8403,14 +8466,17 @@ void GCode::ObjectByExtruder::Island::Region::append(const Type type, const Extr
 //         and that doesn't itself re-cross the same obstacle.
 //      c. Push the chosen vertex into the result and advance cursor.
 //      d. Repeat until clear or MAX_DETOUR_ITER hits.
+//   5. If step 4 fails for any segment (no valid corner, or hit iter cap),
+//      flag `out_needs_z_lift_fallback = true` and let the caller emit
+//      the Z-clearance sequence instead.
 //
-// Bounded iteration prevents pathological loops if the zone arrangement
-// is unsolvable (which Rules 11/12 are supposed to prevent in the first
-// place — if those rules let a bad topology through, this fallback emits
-// the straight path with a warning rather than hang).
+// Bounded iteration also prevents pathological loops if obstacle geometry
+// has degenerate features the corner search can't escape.
 //
-Polyline GCode::route_around_lookahead_zones(const Polyline &travel) const
+Polyline GCode::route_around_lookahead_zones(const Polyline &travel,
+                                              bool &out_needs_z_lift_fallback) const
 {
+    out_needs_z_lift_fallback = false;
     if (!m_lookahead_plan || !m_lookahead_plan->enabled() || travel.points.size() < 2)
         return travel;
 
@@ -8521,27 +8587,222 @@ Polyline GCode::route_around_lookahead_zones(const Polyline &travel) const
                 }
             }
             if (!found) {
-                BOOST_LOG_TRIVIAL(warning) << "[FLA] route_around_lookahead_zones: no detour found"
-                    " for obstacle on layer=" << m_current_layer_idx
-                    << " — emitting straight (may cross zone)";
-                result.push_back(seg_dst);
-                break;
+                // No corner detour can route around this obstacle. Could be
+                // because the destination is INSIDE the obstacle (head needs
+                // to descend into a tower's footprint to start its print —
+                // not actually a zone collision since lookahead towers don't
+                // sit ON object content), or because every corner choice
+                // re-crosses the obstacle (degenerate geometry), or because
+                // multiple obstacles ring the destination. Whatever the
+                // cause, we can't route in XY: signal the caller to emit a
+                // Z-clearance lift over all printed towers instead.
+                BOOST_LOG_TRIVIAL(info) << "[FLA] route_around_lookahead_zones: XY detour unavailable"
+                    " on layer=" << m_current_layer_idx
+                    << " — escalating to Z-clearance lift fallback";
+                out_needs_z_lift_fallback = true;
+                return travel; // caller will emit Z-lift, polyline content moot
             }
             result.push_back(best_corner);
         }
         if (iter == MAX_DETOUR_ITER) {
+            // Iteration cap exhausted means our greedy corner-search couldn't
+            // resolve the segment within MAX_DETOUR_ITER hops. Same escape:
+            // request a Z-clearance fallback rather than emit a partial path
+            // whose final segment may still cross.
             BOOST_LOG_TRIVIAL(warning) << "[FLA] route_around_lookahead_zones: hit MAX_DETOUR_ITER"
                 " on layer=" << m_current_layer_idx
-                << " — emitting last computed path; final segment may cross zone";
-            // Always close out the segment with seg_dst, even if we bailed early.
-            if (result.back() != seg_dst)
-                result.push_back(seg_dst);
+                << " — escalating to Z-clearance lift fallback";
+            out_needs_z_lift_fallback = true;
+            return travel;
         }
     }
 
     Polyline out;
     out.points = std::move(result);
     return out;
+}
+
+// ===========================================================================
+// Filament Lookahead Phase 5d — Z-clearance fallback travel
+// ===========================================================================
+// Emit a travel from the writer's current position to `target_xy_gcode`
+// (already in gcode coordinates — i.e. plate/world frame, not print frame)
+// using a vertical lift over every printed lookahead tower. Used when:
+//
+//   1. route_around_lookahead_zones flags `needs_z_lift_fallback` because no
+//      XY detour exists for one of the segments (Tier 2 of the Rule 8
+//      detour strategy).
+//   2. A toolchange is about to run. Wipe-tower TCRs and custom toolchange
+//      gcodes contain hardcoded G1 X.. Y.. travels we can't intercept; the
+//      only universally-safe way to keep the head clear of every printed
+//      tower during the toolchange dance is to start it ABOVE all towers.
+//
+// Sequence emitted (when a lift is actually needed):
+//
+//   M83/G1 E-<retract>          — retract to prevent ooze during the lift
+//   G1 Z<lift_target>           — lift to (max_printed_top_z + safety),
+//                                 which is at least the highest tower top
+//                                 plus a small clearance margin
+//   G1 X<dst.x> Y<dst.y>        — XY traverse at lift_target Z; the head
+//                                 is in the air above every printed tower,
+//                                 so this segment is unconditionally safe
+//                                 regardless of zone topology
+//   G1 Z<original_z>            — descend back to the pre-lift Z (which
+//                                 already includes any active Z-hop offset
+//                                 the writer was holding)
+//   G1 E+<unretract>            — restore filament for the next move
+//
+// If max_printed_top_z is 0 (no tower has been physically emitted yet) or
+// is at-or-below the writer's current Z (we're already above everything),
+// no lift is needed. We fall through to a normal travel_to_xy emission so
+// the caller doesn't have to special-case the early-print case.
+//
+// Coordinate frames: the input is in GCODE coordinates (the same frame the
+// writer expects for travel_to_xy). Callers should pre-translate from print
+// coords using point_to_gcode().
+std::string GCode::emit_lookahead_z_clearance_travel(const Vec2d &target_xy_gcode,
+                                                     const std::string &comment)
+{
+    std::string gcode;
+
+    // No lookahead state → just emit a regular straight travel.
+    if (!m_lookahead_plan || !m_lookahead_plan->enabled()) {
+        gcode += m_writer.travel_to_xy(target_xy_gcode, comment);
+        return gcode;
+    }
+
+    // Read the current writer Z and the highest printed-tower top Z. If the
+    // tower top is below where the head already is, nothing to lift over.
+    const Vec3d cur_pos = m_writer.get_position();
+    const double cur_z = cur_pos.z();
+    const double max_top_z = m_lookahead_plan->max_printed_top_z();
+
+    // Safety margin above the tallest tower top — keeps the nozzle above
+    // any vertical jitter / micro-overshoot from a tower wall. 0.5 mm is
+    // small enough to keep the lift cost low but big enough to be safe
+    // against typical print-Z accuracy.
+    constexpr double LIFT_SAFETY_MM = 0.5;
+    const double lift_target = max_top_z + LIFT_SAFETY_MM;
+
+    if (max_top_z <= 0. || lift_target <= cur_z + 1e-6) {
+        // Already above all printed towers (or no towers printed yet).
+        // Emit a normal travel — no lift needed.
+        gcode += m_writer.travel_to_xy(target_xy_gcode, comment);
+        return gcode;
+    }
+
+    // We DO need to lift. Order matters: retract before lifting (so the
+    // filament stops oozing while the head moves), do the Z-lift + XY
+    // traverse + Z-descend, then unretract.
+    BOOST_LOG_TRIVIAL(info) << "[FLA] Z-clearance lift: cur_z=" << cur_z
+        << " max_top_z=" << max_top_z << " lift_target=" << lift_target;
+
+    // Retract. m_writer.retract() returns the gcode string for retraction
+    // (no-op if already retracted).
+    gcode += m_writer.retract();
+
+    // Lift Z to clear all printed towers.
+    gcode += m_writer.travel_to_z(lift_target, "lookahead Z-clearance lift");
+
+    // XY traverse at the lifted Z. Single straight move — at this Z the
+    // head is above every printed tower, so direct XY is safe.
+    gcode += m_writer.travel_to_xy(target_xy_gcode, comment);
+
+    // Drop back to the original Z. travel_to_z will produce a no-op if the
+    // writer believes Z is already there, but we pass the explicit value
+    // to be sure the descent is emitted.
+    gcode += m_writer.travel_to_z(cur_z, "lookahead Z-clearance descent");
+
+    // Restore filament. This pairs with the retract above so the next
+    // motion (extrusion or further travel) starts at correct E.
+    gcode += m_writer.unretract();
+
+    return gcode;
+}
+
+// ===========================================================================
+// Filament Lookahead Phase 5d — paired Z-clearance brackets
+// ===========================================================================
+// emit_lookahead_pre_op_lift / emit_lookahead_post_op_descent. Wrap any
+// "uncontrolled" gcode region (a toolchange, a wipe-tower TCR, a custom-
+// gcode block that emits travels we don't generate ourselves) with these
+// two calls so the head is ABOVE every printed lookahead tower for the
+// duration of the wrapped region. This guarantees that whatever XY the
+// inner block tells the head to go to, the head can't collide with any
+// lookahead tower's printed extrusion — because the head is in the air
+// above them.
+//
+// What gets emitted:
+//   pre-op:   retract + G1 Z<lift_target>
+//   <uncontrolled gcode block runs here, possibly with its own Z resets>
+//   post-op:  G1 Z<m_nominal_z>  + unretract
+//
+// lift_target = m_lookahead_plan->max_printed_top_z() + LIFT_SAFETY_MM,
+// computed at pre-op time. Only the lift gcode bumps Z up; if the inner
+// block executes G1 Z<layer_z> partway through, the lift effectively
+// disappears from that point — but the post-op descent restores Z to
+// m_nominal_z at the end, so the writer's state is consistent for the
+// downstream travel_to call which would normally route around zones.
+//
+// Why this is OK in practice: the most common uncontrolled block is a
+// wipe-tower toolchange. The TCR's internal Z resets all target the wipe-
+// tower position — which by configuration is OUTSIDE the printable area
+// (typically X<0 or Y>plate_max). The head being at any Z over the wipe
+// tower doesn't risk collision with LA towers, which sit on the model.
+// The travels TO and FROM the wipe tower (model-to-wipe-tower, wipe-tower-
+// to-next-print) actually go through GCode::travel_to and are routed by
+// route_around_lookahead_zones / Z-clearance fallback already.
+//
+// If max_printed_top_z is 0 (no tower has been physically emitted yet)
+// or is at-or-below the writer's current Z, both helpers are no-ops.
+std::string GCode::emit_lookahead_pre_op_lift(const std::string &reason)
+{
+    std::string gcode;
+    if (!m_lookahead_plan || !m_lookahead_plan->enabled()) return gcode;
+
+    const double cur_z = m_writer.get_position().z();
+    const double max_top_z = m_lookahead_plan->max_printed_top_z();
+    constexpr double LIFT_SAFETY_MM = 0.5;
+    const double lift_target = max_top_z + LIFT_SAFETY_MM;
+
+    if (max_top_z <= 0. || lift_target <= cur_z + 1e-6) return gcode;
+
+    BOOST_LOG_TRIVIAL(info) << "[FLA] pre-op Z-lift (" << reason << "): cur_z=" << cur_z
+        << " max_top_z=" << max_top_z << " lift_target=" << lift_target;
+
+    // Retract before lifting so filament doesn't ooze into the lift gap.
+    // (Comments passed to writer.travel_to_z are emitted only when
+    // GCodeWriter::full_gcode_comment is true; production builds suppress
+    // them. The lift G1 still appears, just without our annotation.)
+    gcode += m_writer.retract();
+    gcode += m_writer.travel_to_z(lift_target,
+        std::string("lookahead pre-op lift: ") + reason);
+    return gcode;
+}
+
+std::string GCode::emit_lookahead_post_op_descent(const std::string &reason)
+{
+    std::string gcode;
+    if (!m_lookahead_plan || !m_lookahead_plan->enabled()) return gcode;
+
+    const double cur_z = m_writer.get_position().z();
+    // Layer's nominal Z is what we want to be at after the wrapped block.
+    // If the wrapped block already reset Z to m_nominal_z internally, the
+    // travel_to_z below is a no-op. If it left Z elevated (or wherever),
+    // we descend.
+    if (cur_z <= m_nominal_z + 1e-6) {
+        // Already at or below nominal; just unretract for the next move.
+        gcode += m_writer.unretract();
+        return gcode;
+    }
+
+    BOOST_LOG_TRIVIAL(info) << "[FLA] post-op Z-descent (" << reason << "): cur_z=" << cur_z
+        << " target=" << m_nominal_z;
+
+    gcode += m_writer.travel_to_z(m_nominal_z,
+        std::string("lookahead post-op descent: ") + reason);
+    gcode += m_writer.unretract();
+    return gcode;
 }
 
 // ===========================================================================
@@ -8891,6 +9152,20 @@ std::string GCode::emit_lookahead_tower_extras(
     } catch (const std::exception &e) {
         BOOST_LOG_TRIVIAL(error) << "[FLA-B] exception in safe-exit: " << e.what();
         throw;
+    }
+
+    // Phase 5d (Z-clearance fallback): record this tower's top-Z as physical.
+    // After this point any subsequent travel that can't be XY-routed around
+    // the tower must lift to AT LEAST this Z to clear it in the air. The
+    // tower's planned raised_z (sourced from the LookaheadEntry) is the top
+    // print Z of its tallest stack — exactly the "above this and you're clear"
+    // boundary. Pull it from the plan since base_z is the BOTTOM and we need
+    // the top after extra_layers stacks.
+    if (m_lookahead_plan && m_lookahead_plan->enabled()) {
+        const auto &entries = m_lookahead_plan->plan_entries();
+        auto it = entries.find({ base_layer_idx, ext_id });
+        if (it != entries.end())
+            m_lookahead_plan->mark_tower_printed(it->second.raised_z);
     }
 
     BOOST_LOG_TRIVIAL(warning) << "[FLA-B] emit_lookahead_tower_extras returning cleanly";

@@ -72,6 +72,29 @@ public:
     // be removed from this layer's wipe tower planning.
     bool is_upper_tower_stack(size_t layer_idx, unsigned int ext_id) const;
 
+    // Phase 5d (Z-clearance fallback): track the highest top-Z of any tower
+    // that has been physically emitted so far during gcode generation.
+    //
+    // Why this exists. When a travel polyline can't be XY-routed around the
+    // active exclusion zones (e.g. zones ring an unzoned object cluster, or
+    // the travel originates inside a wipe-tower TCR string we don't control),
+    // the safe fallback is to lift the head ABOVE every printed tower, travel
+    // XY at that elevated Z, then drop back down. The lift target is the max
+    // top-Z over all towers physically present at the moment of the travel.
+    //
+    // A tower becomes "printed" the instant emit_lookahead_tower_extras
+    // finishes for it — at that point its base + every upper-stack layer is
+    // physically deposited, so its top Z is an obstacle for any subsequent
+    // XY travel below that Z. Towers planned but not yet emitted aren't
+    // tracked here (they're not yet physical, so head-collision can't happen).
+    //
+    // Read at any moment via max_printed_top_z(). 0.0 means no tower has been
+    // printed yet, so no lift is needed (or possible).
+    void mark_tower_printed(coordf_t top_z) {
+        if (top_z > m_max_printed_top_z) m_max_printed_top_z = top_z;
+    }
+    coordf_t max_printed_top_z() const { return m_max_printed_top_z; }
+
     // Phase 3a: Any-Type support filament override.
     // Key: (support_layer_ptr, is_interface). SupportLayer pointers are stable
     // between Phase A analysis and gcode emission since Print state isn't mutated.
@@ -85,6 +108,13 @@ public:
     // overridden extruders into tool_ordering's per-layer extruder list.
     const std::map<std::pair<const SupportLayer*, bool>, unsigned int>&
         any_support_overrides() const { return m_any_support_overrides; }
+
+    // Read-only access to the per-(layer, extruder) plan map. Callers use
+    // this to look up a tower's metadata (raised_z, exclusion_bboxes, etc.)
+    // by its key, e.g. when emit_lookahead_tower_extras has finished and
+    // needs the top-Z of the tower it just printed.
+    const std::map<std::pair<size_t, unsigned int>, LookaheadEntry>&
+        plan_entries() const { return m_plan; }
 
 private:
     bool m_enabled = false;
@@ -110,6 +140,10 @@ private:
     // Phase 3a: resolved overrides for "Any (Type)" supports.
     // Keyed by (support_layer_ptr, is_interface).
     std::map<std::pair<const SupportLayer*, bool>, unsigned int> m_any_support_overrides;
+
+    // Phase 5d: max top-Z of any physically-emitted tower (see mark_tower_printed
+    // / max_printed_top_z). 0 = no tower has been emitted yet.
+    coordf_t m_max_printed_top_z = 0.;
 };
 
 } // namespace Slic3r

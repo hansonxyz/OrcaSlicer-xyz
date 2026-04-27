@@ -228,22 +228,19 @@ A candidate tower's exclusion zone, on every layer it covers, must keep at least
 
 **Envelope growth.** A tower's exclusion zone grows monotonically as the cascade extends — each new layer's self-content can expand the envelope. A base zone that passes Rule 11 may fail it after extending by 5 layers, because the envelope picked up an extra millimeter of width. The cascade re-tests Rule 11 against the running envelope at every k. First failure caps at k-1.
 
-### Rule 12 — No enclosed object pockets
+### Rule 12 — *(removed)* — replaced by Z-clearance fallback at emission time
 
-The union of all exclusion zones active on a candidate layer (this candidate plus every previously-accepted tower whose base layer ≤ L+k ≤ top layer) must not split the plate's travel-allowed region into a topology where any object content not already inside an exclusion zone is unreachable from the plate's outside. If a candidate creates such a pocket, cap the in-progress tower at L+k-1.
+This rule previously vetoed any tower configuration whose exclusion zones would split the plate's travel-allowed region in a way that strands unzoned object content in a pocket. It has been superseded by an emission-time fallback in `GCode::route_around_lookahead_zones` and `GCode::emit_lookahead_z_clearance_travel`.
 
-**Rationale.** Three or more exclusion zones can be arranged into a ring around an unzoned object cluster. Once the ring is closed, every travel move from the plate's outside to that cluster has to cross at least one exclusion zone — which Rule 8 forbids. The result would be either an impossible-travel error or a forbidden zone-crossing. Reject the candidate before it closes the ring.
+**Why removed.** The veto was conservative — it cost the user N tool changes (worth ~2 minutes each on Bambu printers) just to avoid one travel that couldn't be XY-routed. The Z-lift fallback resolves the same case at the cost of one slow Z move (~0.3 seconds), trading 2 minutes of save for a fraction of a second of penalty. Vastly better economics, and the universal Z-clearance approach is unconditionally safe regardless of zone topology.
 
-**Implementation (v1, bbox approximation).** At each candidate k:
-1. Build polygons for all exclusion zones active on layer L+k (registered + candidate).
-2. Compute `travel_allowed = bed_polygon - union(zones)`. Each `ExPolygon` is a connected travel-region component.
-3. If only one component exists, no pockets exist — pass.
-4. Else, classify the "outside" component as the one whose bounding contour touches the most plate edges (a heuristic that correctly identifies the perimeter-spanning component for normal printable areas).
-5. For each non-outside component, check whether any object-content bbox on this layer NOT already inside a zone overlaps the component's bbox. If yes, the candidate strands that content — fail.
+**What replaces it.** When `route_around_lookahead_zones` can't find an XY corner detour for a segment (destination ringed by zones, destination inside a zone, no valid corner exists), it sets a `needs_z_lift_fallback` flag. The caller (`GCode::travel_to`) then emits a Z-clearance travel: retract → lift Z to `(max_printed_top_z + LIFT_SAFETY_MM)` → traverse XY at elevated Z → descend to original Z → unretract. The lifted-Z XY traverse is unconditionally safe because the head is in the air above every printed tower.
 
-The bbox approximation is conservative: a pocket-overlapping object bbox that doesn't actually contain extrusion will produce a false-positive rejection (we cap a tower one layer earlier than strictly necessary). A false-negative — accepting a candidate that strands real extrusion — is impossible at the bbox level since extrusion is a subset of the entity bbox. False-positives reduce optimization opportunities but never corrupt the print; the v2 refinement to actual `Layer::lslices` polygons would tighten this further.
+This same fallback handles toolchanges: every toolchange (wipe-tower TCR or `set_extruder` custom-gcode) is bracketed with `emit_lookahead_pre_op_lift` / `emit_lookahead_post_op_descent` because the toolchange string is opaque (we can't insert detours into its embedded G1 X.. Y.. moves). The Z-lift puts the head above all towers for the duration of the wrapped block.
 
-**Multi-cluster within same base layer.** Clusters within the same base layer evaluate sequentially; an earlier cluster's accepted zone is in `accepted_zones` but not yet registered in `m_raised_per_layer` when the next cluster's cascade runs. Rule 12 currently sees only registered (previous-base-layer) zones plus the candidate, missing intra-base-layer cluster interactions. Refine if real prints exhibit multi-cluster bases that conflict.
+**Cost vs gain.** A lookahead tower exists *because* it eliminates ≥1 toolchange. Each saved toolchange ≈ 120 seconds on Bambu hardware. The Z-lift fallback adds ~0.3-0.5 seconds per affected travel. Even if every travel into a ring-pocket required a fallback, the savings dominate by ~3 orders of magnitude.
+
+**Tracking which towers are physical.** `FilamentLookaheadPlan::mark_tower_printed(top_z)` is called from `emit_lookahead_tower_extras` when each tower finishes emission. `max_printed_top_z()` returns the running maximum. Towers planned-but-not-yet-emitted are not tracked — they're not yet physical, so no Z-lift is needed to clear them.
 
 **Currently-loaded filament definition**: the filament last extruded before the wipe tower's structural band emission begins. Per Rule 8 (normal-first print order), this is either the last normal region's filament, the previous tower base's filament, or the prior tower extrusion's filament on this same layer — whichever was most recently active.
 

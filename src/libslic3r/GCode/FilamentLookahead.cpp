@@ -46,6 +46,7 @@ void FilamentLookaheadPlan::build(const Print &print,
     m_raised_per_layer.clear();
     m_any_support_overrides.clear();
     m_tower_filaments_per_layer.clear();
+    m_max_printed_top_z = 0.;
 
     // Always-visible entry log so we can see whether analysis even started.
     BOOST_LOG_TRIVIAL(info) << "[FLA] build() entry: max_height=" << max_lookahead_height_mm
@@ -415,25 +416,25 @@ void FilamentLookaheadPlan::build(const Print &print,
     //     with another zone forms a wall that cuts off plate area.
     //     Conservative: 2 mm of breathing room on all four sides.
     //
-    //   Rule 12 — No enclosed object pockets (NEW). The union of all
-    //     exclusion zones active on a covered layer (this candidate plus
-    //     every previously-accepted tower) must not split the plate's
-    //     travel-allowed region into a topology where any object content
-    //     not already inside a zone is unreachable from the plate's
-    //     outside. Three or more zones can ring a piece of unzoned model
-    //     such that any travel toward it must cross a zone — which we
-    //     forbid by Rule 8 (Rule 8 also covers what happens once a tower
-    //     is up: every same-layer travel must avoid its XY footprint).
-    //     Reject any candidate that creates such a ring.
+    //   Rule 12 was previously a planning-time veto for "no enclosed
+    //   object pockets" — rejecting tower configurations whose exclusion
+    //   zones would ring an unzoned object cluster on the same layer. It
+    //   has been removed in favor of an emission-time fallback: when a
+    //   travel polyline can't be XY-routed around the active zones,
+    //   GCode::emit_lookahead_z_clearance_travel lifts the head ABOVE
+    //   every printed tower and traverses XY at that elevated Z. The
+    //   Z-lift is unconditionally safe regardless of zone topology, so
+    //   ringed pockets are tolerable at the cost of one slow Z move
+    //   per affected travel — a much smaller cost than vetoing the
+    //   tower entirely (a vetoed tower means N extra tool changes vs
+    //   one extra Z lift). See Rule 8 for the emission-side details.
     //
-    // Both new rules use bbox-level approximations for v1: zones are bbox
-    // polygons (axis-aligned rectangles), and "object content" inside a
-    // pocket is detected by per-extruder entity-bbox overlap with the
-    // pocket's bbox. Refinement to actual slice polygons is deferred —
-    // false-positive rejections (over-conservative caps) are acceptable
-    // since they trade one missed savings opportunity for guaranteed
-    // travel correctness; false-negatives (missed rejections) would let a
-    // bad topology slip through and corrupt the print.
+    // Rule 11 uses a bbox-level approximation for v1: zones are bbox
+    // polygons (axis-aligned rectangles). False-positive rejections
+    // (over-conservative caps) are acceptable since they trade one
+    // missed savings opportunity for guaranteed travel correctness;
+    // false-negatives would let a bad topology slip through and could
+    // corrupt the print's travel safety.
     //
     constexpr double PLATE_EDGE_MARGIN_MM = 2.0;
     const coord_t plate_margin_scaled = scaled<coord_t>(PLATE_EDGE_MARGIN_MM);
@@ -441,7 +442,6 @@ void FilamentLookaheadPlan::build(const Print &print,
     Polygon bed_polygon;
     bed_polygon.points = Slic3r::get_bed_shape(print.config(), false);
     const BoundingBox bed_bbox = bed_polygon.bounding_box();
-    const Polygons bed_polys = { bed_polygon };
 
     BOOST_LOG_TRIVIAL(info) << "[FLA] Phase 5d: plate bbox = ["
         << unscale<double>(bed_bbox.min.x()) << "," << unscale<double>(bed_bbox.min.y())
@@ -459,75 +459,9 @@ void FilamentLookaheadPlan::build(const Print &print,
             && zone_inflated.max.y() <= bed_bbox.max.y() - plate_margin_scaled;
     };
 
-    // Rule 12 — zones must not enclose unzoned object content. Compute the
-    // travel-allowed region (bed minus union-of-zones), find connected
-    // components, classify the "outside" component (touches the most plate
-    // edges), and check no other component contains an object bbox that isn't
-    // already covered by some exclusion zone.
-    auto rule_12_passes = [&](const BoundingBox &candidate_inflated, size_t check_layer_idx) -> bool {
-        // Build the union of exclusion zones active on the layer we're
-        // checking. "Active" = previously-accepted towers registered in
-        // m_raised_per_layer plus this candidate. Multi-cluster interactions
-        // within the SAME plan entry (i.e. earlier clusters in the current
-        // base-layer's accepted_zones list) are not yet included — v1
-        // approximation, refine if multi-cluster bases become common.
-        Polygons all_zone_polys;
-        if (check_layer_idx < m_raised_per_layer.size()) {
-            for (const auto &eb : m_raised_per_layer[check_layer_idx].exclusion_bboxes)
-                all_zone_polys.push_back(eb.polygon());
-        }
-        all_zone_polys.push_back(candidate_inflated.polygon());
-        Polygons zones_union = union_(all_zone_polys);
-
-        // travel_allowed = bed - zones_union. Each ExPolygon is a connected
-        // component of where the head can reach without crossing a zone.
-        ExPolygons travel = diff_ex(bed_polys, zones_union);
-        if (travel.size() <= 1)
-            return true;  // single component → all reachable, no pockets
-
-        // Heuristic: pick the "outside" component as the one whose contour
-        // touches the most plate edges. A pocket fully inside the plate
-        // touches zero edges; the main travel region touches all four.
-        size_t  outside_idx = 0;
-        int     max_edges_touched = -1;
-        const   coord_t edge_tol = scaled<coord_t>(0.1);  // 0.1 mm slack for fp noise
-        for (size_t i = 0; i < travel.size(); ++i) {
-            const BoundingBox tb = travel[i].contour.bounding_box();
-            int edges = 0;
-            if (tb.min.x() <= bed_bbox.min.x() + edge_tol) ++edges;
-            if (tb.max.x() >= bed_bbox.max.x() - edge_tol) ++edges;
-            if (tb.min.y() <= bed_bbox.min.y() + edge_tol) ++edges;
-            if (tb.max.y() >= bed_bbox.max.y() - edge_tol) ++edges;
-            if (edges > max_edges_touched) {
-                max_edges_touched = edges;
-                outside_idx = i;
-            }
-        }
-
-        // For each pocket (non-outside component), test whether it overlaps
-        // any object content bbox NOT already inside an exclusion zone on
-        // this layer. If so, this candidate strands that content — reject.
-        if (check_layer_idx >= layer_extruder_entity_bboxes.size())
-            return true;
-        for (size_t i = 0; i < travel.size(); ++i) {
-            if (i == outside_idx) continue;
-            const BoundingBox pocket_bbox = travel[i].contour.bounding_box();
-            for (const auto &[other_ext, bboxes] : layer_extruder_entity_bboxes[check_layer_idx]) {
-                for (const auto &ob : bboxes) {
-                    bool in_any_zone = candidate_inflated.contains(ob);
-                    if (!in_any_zone && check_layer_idx < m_raised_per_layer.size()) {
-                        for (const auto &eb : m_raised_per_layer[check_layer_idx].exclusion_bboxes) {
-                            if (eb.contains(ob)) { in_any_zone = true; break; }
-                        }
-                    }
-                    if (in_any_zone) continue;
-                    if (pocket_bbox.overlap(ob))
-                        return false;  // unzoned content stranded in a pocket
-                }
-            }
-        }
-        return true;
-    };
+    // (Rule 12 removed — the previous "no enclosed object pockets" planning-
+    // time veto has been replaced by GCode::emit_lookahead_z_clearance_travel
+    // at emission time. See the Phase 5d header comment above.)
     // ─────────────────────────────────────────────────────────────────────
 
     for (unsigned int ext_id : all_extruders) {
@@ -642,17 +576,11 @@ void FilamentLookaheadPlan::build(const Print &print,
                     continue;
                 }
 
-                // Rule 12 (k=0): combined exclusion zones (this candidate +
-                // any zones from previously-accepted towers active on the
-                // same layer) must not strand unzoned object content in a
-                // travel-disconnected pocket. See Phase 5d header for full
-                // rationale.
-                if (!rule_12_passes(running_inflated, li)) {
-                    BOOST_LOG_TRIVIAL(info) << "[FLA]   cluster at [" << cb.min.x() << "," << cb.min.y()
-                        << "]-[" << cb.max.x() << "," << cb.max.y()
-                        << "] REJECT: fails Rule 12 (object pocket) on starting layer " << li;
-                    continue;
-                }
+                // (Rule 12 — "no enclosed object pockets" — was previously
+                // checked here. Removed; the Z-clearance fallback in
+                // GCode::route_around_lookahead_zones handles ringed-pocket
+                // travels at emission time, so the planner no longer needs
+                // to veto the configuration. See Phase 5d header.)
 
                 // ───── Cascade truncation (k=1..max) ─────
                 // For each candidate extension layer, all five rules must
@@ -749,18 +677,10 @@ void FilamentLookaheadPlan::build(const Print &print,
                         break;
                     }
 
-                    // Rule 12 — re-check pocket condition on layer li+k.
-                    // m_raised_per_layer at THIS layer index reflects the
-                    // zones from previously-accepted towers active here, so
-                    // a tower that ENDS on layer li+k-1 won't show up at li+k
-                    // (correctly), and a tower whose base is at li+k starts
-                    // contributing here.
-                    if (!rule_12_passes(running_inflated, li + k)) {
-                        cluster_extra = k - 1;
-                        BOOST_LOG_TRIVIAL(info) << "[FLA]   cascade truncate at k=" << k
-                            << " (layer " << (li + k) << "): Rule 12 — combined zones strand unzoned object content";
-                        break;
-                    }
+                    // (Rule 12 cascade check removed. Travels into pockets
+                    // formed by combined exclusion zones are now resolved at
+                    // emission time via the Z-clearance fallback in
+                    // GCode::route_around_lookahead_zones.)
                 }
 
                 // Use the minimum cascade truncation across all clusters in this plan entry.

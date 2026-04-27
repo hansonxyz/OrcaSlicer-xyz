@@ -517,9 +517,62 @@ private:
     // lookahead exclusion zones on the current layer. Returns the polyline
     // unchanged if lookahead is inactive or no zones are present. Otherwise
     // walks each segment, detects crossings against the merged-obstacle
-    // polygon set, and inserts vertex waypoints to route around. Iterative,
-    // bounded by MAX_DETOUR_ITER per segment to avoid pathological loops.
-    Polyline route_around_lookahead_zones(const Polyline &travel) const;
+    // polygon set, and inserts vertex waypoints to route around.
+    //
+    // `out_needs_z_lift_fallback` (out): set to true when at least one
+    // segment can't be XY-routed (no valid corner detour exists, e.g. the
+    // destination is inside an obstacle or the obstacles ring it). The
+    // caller is then expected to bracket the travel with a Z-clearance
+    // lift/lower sequence — see emit_lookahead_z_clearance_travel().
+    //
+    // Iterative XY routing is bounded by MAX_DETOUR_ITER per segment; on
+    // hit, the helper sets the fallback flag rather than emitting a
+    // straight-through line that would cross a zone.
+    Polyline route_around_lookahead_zones(const Polyline &travel,
+                                          bool &out_needs_z_lift_fallback) const;
+
+    // Phase 5d (Z-clearance fallback): emit a travel from the writer's
+    // current position to `target` using a Z-lift over all physically-
+    // emitted lookahead towers. Used when XY routing failed (see
+    // route_around_lookahead_zones) or when an uncontrolled gcode region
+    // (toolchange, custom gcode) is about to emit travels we can't re-plan.
+    //
+    // Sequence: retract → lift Z to (max_printed_top_z + safety) → travel
+    // XY to target at lifted Z → drop Z to original layer Z (preserving any
+    // existing Z-hop) → unretract. The lifted Z guarantees the head is
+    // ABOVE every printed tower, so the XY portion is always safe.
+    //
+    // If no tower has been printed yet (max_printed_top_z == 0), no lift is
+    // needed; falls through to a plain travel.
+    std::string emit_lookahead_z_clearance_travel(const Vec2d &target_xy_gcode,
+                                                  const std::string &comment);
+
+    // Phase 5d (Z-clearance, paired-bracket form): wrap an uncontrolled
+    // gcode region (toolchange, wipe-tower TCR, custom-gcode block) with
+    // Z-lift before / Z-descend after. Use these two helpers in sequence:
+    //
+    //   gcode += emit_lookahead_pre_op_lift("about to do toolchange");
+    //   gcode += <uncontrolled gcode block>;
+    //   gcode += emit_lookahead_post_op_descent("toolchange done");
+    //
+    // The lift retracts and raises Z to (max_printed_top_z + safety). The
+    // descent drops back to whatever Z the writer was at before the lift
+    // (captured by the lift call) and unretracts. Internal travels inside
+    // the uncontrolled gcode block run at elevated Z and so are safe
+    // against XY collisions with printed towers, regardless of what the
+    // block does.
+    //
+    // Caveat: if the uncontrolled block has its own G1 Z<absolute_value>
+    // commands, they will override our lift mid-block. The descent at the
+    // end still resets Z correctly. This is fine in practice because the
+    // toolchange's Z resets target the wipe-tower position which is far
+    // from any LA tower zone — the head can be at any Z over the wipe
+    // tower without colliding with LA towers.
+    //
+    // If max_printed_top_z is 0 (no tower printed yet) or already <=
+    // current Z, both helpers are no-ops.
+    std::string emit_lookahead_pre_op_lift(const std::string &reason);
+    std::string emit_lookahead_post_op_descent(const std::string &reason);
 
     // BBS
     LiftType to_lift_type(ZHopType z_hop_types);
