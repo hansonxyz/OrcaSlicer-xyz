@@ -1,7 +1,7 @@
 # Filament Lookahead — Multi-Layer Batched Printing for Multi-Material
 
 Branch: `filament-lookahead`
-Status: Phases 1, 2, 3a, 3b, 3c, 5a, 5c, 6a complete; 5b skipped. Post-processor infrastructure stood up — parses `LOOKAHEAD_*` markers into structured TowerBlock + LayerInfo, hooks in `GCode.cpp` just before temp→final rename. 6a round-trips the file unchanged; actual relocation/batching lands in 6b-6d. Analysis correctness gated by Rule 4 filament-completeness. Any-Type support overrides visible in preview (5a).
+Status: Phases 1, 2, 3a, 3b, 3c, 5a, 5c, 6a, 6b, 6c, 6d complete; 5b skipped. End-to-end pipeline shipping: cluster identification → tower planning → emission-time batching (Option B) → wipe tower co-existence. As of commit 756d90f3e4, `compare_slices.py` reports zero divergences on the tulip test pair: every (Z, tool) bucket of object+lookahead_tower extrusion matches baseline object extrusion to ≤0.0003 mm, and the lookahead optimization saves ~3% of wipe tower volume (182.88 mm out of 5980 mm). The previously-observed "wrong color bleed" at tower-base layers (LA tower 251 ext=0 base emitting layer 251's full T0+T3 region content) was traced to a routing fallback in `process_layer`: Phase 6d's filter on `m_wipe_tower_data.tool_ordering.layer_tools()` aliases through the `&` reference to `Print::m_tool_ordering`, removing upper-stack extruders from `layer_tools.extruders`; the fallback at GCode.cpp:5159 then reassigned their entities to `extruders.back()` (the tower's filament). Fix: skip the fallback when the missing extruder is identified as an LA upper-stack — the entity stays in unused island data and gets emitted only by the LA tower batch.
 
 ## Goal
 
