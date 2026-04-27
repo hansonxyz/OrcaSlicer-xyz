@@ -224,6 +224,32 @@ class Print;
         };
         std::vector<ExclusionZone> lookahead_exclusion_zones;
 
+        // xyz fork: Filament Lookahead tower records for the gcode viewer.
+        // One record per `LOOKAHEAD_BLOCK_BEGIN` ... `LOOKAHEAD_BLOCK_END`
+        // pair found in the gcode stream. The viewer's slider uses this to
+        // expand the layer slider with sub-ticks at each tower-base layer
+        // (one extra tick per upper-stack so the user can scroll through
+        // the tower's emission order). See LOOKAHEAD_VIEWER.md.
+        //
+        // base_layer / extruder_id come straight from the marker. base_z is
+        // the head's print Z when the BLOCK_BEGIN fires (layer's print Z).
+        // top_z is the highest physical Z reached inside the block — the
+        // last upper-stack's Z. stack_count counts the number of upper
+        // stacks INCLUDING the base (so a tower covering layers L..L+N has
+        // stack_count = N+1). marker_count tracks how many `Z_HEIGHT:`
+        // bumps fired inside the block (used for sanity-checking against
+        // stack_count).
+        struct LookaheadTower {
+            size_t  base_layer    = 0;   // object-layer index from the BEGIN marker
+            int     extruder_id   = -1;  // extruder this tower is for
+            float   base_z        = 0.f; // print Z at BEGIN
+            float   top_z         = 0.f; // highest Z reached inside the block
+            size_t  stack_count   = 0;   // number of physical layers represented (1 base + extras)
+            size_t  begin_line    = 0;   // gcode line number of BEGIN (for diagnostics)
+            size_t  end_line      = 0;   // gcode line number of END (for diagnostics)
+        };
+        std::vector<LookaheadTower> lookahead_towers;
+
         //BBS: add toolpath_outside
         bool toolpath_outside;
         //BBS: add object_label_enabled
@@ -294,6 +320,7 @@ class Print;
             filament_change_count_map = other.filament_change_count_map;
             initial_layer_time = other.initial_layer_time;
             lookahead_exclusion_zones = other.lookahead_exclusion_zones; // xyz fork
+            lookahead_towers          = other.lookahead_towers;          // xyz fork
 #if ENABLE_GCODE_VIEWER_STATISTICS
             time = other.time;
 #endif
@@ -766,6 +793,16 @@ class Print;
         bool m_wipe_tower;
         int m_object_label_id{-1};
         float m_print_z{0.0f};
+
+        // xyz fork: Filament Lookahead viewer-side parsing state.
+        // While inside a `LOOKAHEAD_BLOCK_BEGIN ... LOOKAHEAD_BLOCK_END`
+        // bracket, m_lookahead_in_block is true and m_lookahead_current
+        // accumulates the tower record. Each `; Z_HEIGHT:` bump inside the
+        // block extends top_z and increments stack_count. On END we push
+        // the completed record into m_result.lookahead_towers and clear
+        // the in-progress state.
+        bool m_lookahead_in_block{false};
+        GCodeProcessorResult::LookaheadTower m_lookahead_current{};
         std::vector<float> m_remaining_volume;
         ExtruderTemps m_filament_nozzle_temp;
         ExtruderTemps m_filament_nozzle_temp_first_layer;

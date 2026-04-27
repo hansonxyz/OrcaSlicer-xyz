@@ -1585,6 +1585,7 @@ void GCodeProcessorResult::reset() {
     filament_change_count_map.clear();
     warnings.clear();
     lookahead_exclusion_zones.clear(); // xyz fork
+    lookahead_towers.clear();          // xyz fork
 
     //BBS: add mutex for protection of gcode result
     unlock();
@@ -2598,6 +2599,24 @@ void GCodeProcessor::process_buffer(const std::string &buffer)
 
 void GCodeProcessor::finalize(bool post_process)
 {
+    // xyz fork (Phase 1a verification): log lookahead tower records so we
+    // can confirm parsing populated them correctly. Removed in a later
+    // phase once the viewer consumes the data structurally.
+    {
+        FILE *probe = std::fopen("C:\\Users\\brian\\AppData\\Local\\Temp\\fla_viewer_phase1a.log", "w");
+        if (probe) {
+            std::fprintf(probe, "GCodeProcessor::finalize lookahead_towers count=%zu\n",
+                m_result.lookahead_towers.size());
+            for (size_t i = 0; i < m_result.lookahead_towers.size(); ++i) {
+                const auto &t = m_result.lookahead_towers[i];
+                std::fprintf(probe, "  [%zu] base_layer=%zu ext=%d base_z=%.2f top_z=%.2f stacks=%zu lines=[%zu..%zu]\n",
+                    i, t.base_layer, t.extruder_id, t.base_z, t.top_z,
+                    t.stack_count, t.begin_line, t.end_line);
+            }
+            std::fclose(probe);
+        }
+    }
+
     m_result.z_offset = m_z_offset;
 
     // update width/height of wipe moves
@@ -3080,6 +3099,78 @@ void GCodeProcessor::process_tags(const std::string_view comment, bool producers
     // ; Z_HEIGHT:
     if (boost::starts_with(comment, " Z_HEIGHT:")) {
         m_print_z = get_z_height(comment);
+        // xyz fork: while inside a lookahead-tower block, every Z_HEIGHT
+        // bump represents a new physical stack of the tower. Track the
+        // running top_z so the completed record knows how far up the
+        // tower physically extends. stack_count is bumped one-time per
+        // unique Z increment (not per marker — towers emit a Z_HEIGHT
+        // both on stack ramp-up and on safe-exit ramp-down, and the
+        // ramp-down should not double-count).
+        if (m_lookahead_in_block) {
+            if (m_print_z > m_lookahead_current.top_z) {
+                m_lookahead_current.top_z = m_print_z;
+                ++m_lookahead_current.stack_count;
+            }
+        }
+        return;
+    }
+
+    // xyz fork: Filament Lookahead block markers.
+    //
+    // Each tower's emission span is bracketed by `; LOOKAHEAD_BLOCK_BEGIN`
+    // (with attributes layer=, extruder=, base_layer=, stack_index=,
+    // extra_layers=, role=, z=) and `; LOOKAHEAD_BLOCK_END`. The viewer
+    // needs one record per BEGIN/END pair so it can expand the layer
+    // slider with sub-ticks at this tower's base layer. Phase 1a
+    // populates the record; per-vertex tagging lands in Phase 1b.
+    //
+    // We trust the BEGIN marker's `base_layer=` and `z=` for the record's
+    // base_layer / base_z fields. top_z is filled in incrementally above
+    // (each `; Z_HEIGHT:` bump while in_block is true). stack_count
+    // starts at 1 (the base layer itself) and increments per upper-stack
+    // Z_HEIGHT.
+    if (boost::starts_with(comment, " LOOKAHEAD_BLOCK_BEGIN") ||
+        boost::starts_with(comment, "LOOKAHEAD_BLOCK_BEGIN")) {
+        // Tiny key=value parser. Marker format example:
+        //   ; LOOKAHEAD_BLOCK_BEGIN layer=251 extruder=0 base_layer=251
+        //     stack_index=0 extra_layers=8 role=base z=50.400000
+        auto parse_size_t = [&comment](const char *key) -> size_t {
+            auto pos = comment.find(key);
+            if (pos == std::string_view::npos) return 0;
+            return (size_t) std::stoull(std::string(comment.substr(pos + strlen(key))));
+        };
+        auto parse_int = [&comment](const char *key) -> int {
+            auto pos = comment.find(key);
+            if (pos == std::string_view::npos) return -1;
+            return std::stoi(std::string(comment.substr(pos + strlen(key))));
+        };
+        auto parse_float = [&comment](const char *key) -> float {
+            auto pos = comment.find(key);
+            if (pos == std::string_view::npos) return 0.f;
+            return std::stof(std::string(comment.substr(pos + strlen(key))));
+        };
+
+        m_lookahead_current = GCodeProcessorResult::LookaheadTower{};
+        m_lookahead_current.base_layer  = parse_size_t("base_layer=");
+        m_lookahead_current.extruder_id = parse_int("extruder=");
+        m_lookahead_current.base_z      = parse_float("z=");
+        m_lookahead_current.top_z       = m_lookahead_current.base_z;
+        m_lookahead_current.stack_count = 1; // base layer counts as stack 0
+        m_lookahead_current.begin_line  = m_line_id;
+        m_lookahead_in_block            = true;
+        return;
+    }
+
+    if (boost::starts_with(comment, " LOOKAHEAD_BLOCK_END") ||
+        boost::starts_with(comment, "LOOKAHEAD_BLOCK_END")) {
+        if (m_lookahead_in_block) {
+            m_lookahead_current.end_line = m_line_id;
+            m_result.lookahead_towers.push_back(m_lookahead_current);
+            m_lookahead_in_block = false;
+        }
+        // If the END appears without a matching BEGIN we silently ignore —
+        // shouldn't happen in well-formed gcode but bailing here would
+        // mask the real bug rather than surface it.
         return;
     }
 

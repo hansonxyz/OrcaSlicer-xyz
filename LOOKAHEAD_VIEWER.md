@@ -1,7 +1,7 @@
 # GCode Viewer — Filament Lookahead Sub-Layer Display
 
 Branch: `filament-lookahead`
-Status: Planning. Phase 1a not yet started.
+Status: Phase 1a ✅ complete. Phase 1b next.
 
 ## Goal
 
@@ -60,19 +60,34 @@ Investigation done up front (committed as part of this plan). Findings:
 
 Each phase ends in a clean commit. Each must build, must not regress `compare_slices.py`, and must be independently verifiable.
 
-### Phase 1a — Tower metadata in `GCodeProcessorResult`
+### Phase 1a ✅ — Tower metadata in `GCodeProcessorResult`
 
 **Code changes**
 - `GCodeProcessor::process_tags()`: parse `LOOKAHEAD_BLOCK_BEGIN` and `LOOKAHEAD_BLOCK_END` comments alongside existing `Z_HEIGHT`.
-- New struct `LookaheadTower` in `GCodeProcessorResult`: `{base_layer, base_z, top_z, stack_count, base_move_first, base_move_last_plus_one}` (vertex range deferred to 1b).
-- Track in-progress tower during parsing; on END push complete record, log warning if mismatched.
+- `GCodeProcessor`: new state members `m_lookahead_in_block`, `m_lookahead_current`. While in_block, every `Z_HEIGHT:` bump that increases the running top_z increments `stack_count`. Ramp-down `Z_HEIGHT:` to base_z (which doesn't increase top_z) is correctly NOT counted.
+- New struct `LookaheadTower` in `GCodeProcessorResult`: `{base_layer, extruder_id, base_z, top_z, stack_count, begin_line, end_line}`. Vertex tagging deferred to Phase 1b.
+- `GCodeProcessorResult::reset()` clears `lookahead_towers`.
+- Operator= copies `lookahead_towers`.
+- `stack_count` semantics: total physical layers represented (1 base + N extras). For a tower covering layers L..L+N, stack_count = N+1.
 
-**Verification**
-- Temporary log line in build emits one line per parsed tower.
-- Slice tulip (CLI). Expected output: 9 records with bases at layers 233/242/244/251/253/260/262/269/271; stack_count 8/8/8/8/8/8/8/4/8.
-- Run `compare_slices.py`. Expected: 0 divergences.
+**Verification (PASSED)**
+- Temporary probe log written at `finalize()`.
+- Sliced tulip; got 9 records:
+  ```
+  [0] base_layer=233 ext=0 base_z=46.80 top_z=48.40 stacks=9
+  [1] base_layer=242 ext=0 base_z=48.60 top_z=50.20 stacks=9
+  [2] base_layer=244 ext=3 base_z=49.00 top_z=50.60 stacks=9
+  [3] base_layer=251 ext=0 base_z=50.40 top_z=52.00 stacks=9
+  [4] base_layer=253 ext=3 base_z=50.80 top_z=52.40 stacks=9
+  [5] base_layer=260 ext=0 base_z=52.20 top_z=53.80 stacks=9
+  [6] base_layer=262 ext=3 base_z=52.60 top_z=54.20 stacks=9
+  [7] base_layer=269 ext=0 base_z=54.00 top_z=54.80 stacks=5
+  [8] base_layer=271 ext=3 base_z=54.40 top_z=56.00 stacks=9
+  ```
+  All 9 expected base layers present. Stack counts match the planning-side records (extras=8 → 9 total, except tower 7 where the cascade truncated to extras=4 → 5 total).
+- `compare_slices.py`: 0 divergences. No regression.
 
-**No UI surface area.**
+**No UI surface area.** Probe log is compiled-in for now; remove or guard at a later phase.
 
 ### Phase 1b — Per-move tower tagging
 
@@ -161,3 +176,4 @@ Discoveries that change the plan (e.g. libvgcode forces a Plan B in Phase 5) get
 ## Progress log
 
 - 2026-04-27 — Plan committed. Investigation done; ready to start Phase 1a.
+- 2026-04-27 — Phase 1a complete. 9 tower records correctly parsed on tulip; comparator clean. Probe log left compiled in (will be removed in a later phase). Note on stack_count semantics: it counts total physical layers (1 base + N extras); the original plan text said "8/8/8/8/8/8/8/4/8" but that was extras only — actual stored value is 9/9/9/9/9/9/9/5/9.
