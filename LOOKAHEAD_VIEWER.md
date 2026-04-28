@@ -1,7 +1,7 @@
 # GCode Viewer — Filament Lookahead Sub-Layer Display
 
 Branch: `filament-lookahead`
-Status: Phase 1a ✅ complete. Phase 1b ✅ complete. Phase 2 next.
+Status: Phase 1a ✅ complete. Phase 1b ✅ complete. Phase 2 ✅ complete. Phase 3 next.
 
 ## Goal
 
@@ -108,15 +108,20 @@ Each phase ends in a clean commit. Each must build, must not regress `compare_sl
 
 **No UI surface area.** Probe log still compiled in.
 
-### Phase 2 — Propagate tower tags into libvgcode
+### Phase 2 ✅ — Propagate tower tags into libvgcode
 
 **Code changes**
-- `libvgcode::PathVertex`: add `int8_t tower_id` and `int8_t stack_index` fields. Verify GPU-buffer alignment doesn't break.
-- `GCodeViewer::load_as_gcode()`: copy these fields when converting `GCodeProcessorResult::moves[]` to `PathVertex` array.
-- Temporary debug feature: a build-time flag that colors tower vertices red.
+- `libvgcode::PathVertex` in `src/libvgcode/include/PathVertex.hpp`: added `int8_t tower_id{-1}` and `int8_t stack_index{-1}` fields. Defaults make existing aggregate-init sites that stop short (the dummy/skirt vertices in LibVGCodeWrapper.cpp lines 283-305) compile unchanged with -1 sentinels, which is correct for those out-of-tower contexts.
+- `LibVGCodeWrapper.cpp`: 4 PathVertex aggregate-init sites (the ones converting from MoveVertex at lines 224, 231, 243, 251) extended to copy `curr.tower_id` and `curr.stack_index` from the source MoveVertex. Both `VGCODE_ENABLE_COG_AND_TOOL_MARKERS` branches updated.
+- Probe added at end of `convert(GCodeProcessorResult)` to count tagged-vs-untagged PathVertex. Removed in a later phase.
+- The build-time "color tower vertices red" debug flag was deferred — it requires renderer changes that conflict with the deliberately-inert phasing here. Visual verification will fall out of Phase 5 naturally; for Phase 2 the count probe is sufficient.
 
-**Verification**
-- Build the slicer, load tulip in preview, enable the debug flag. Towers visibly tinted red.
+**Verification (PASSED)**
+- Loaded tulip in slicer GUI Preview tab. Probe wrote:
+  ```
+  PathVertex tagged: 100927  untagged: 1295718  total: 1396645
+  ```
+- PathVertex count (1.4M) is ~40% higher than MoveVertex count (980k) because libvgcode adds phantom boundary vertices that inherit the source MoveVertex's fields. Tagged ratio matches: ~7.0% in MoveVertex vs ~7.2% in PathVertex — proportionality preserved.
 - `compare_slices.py`: 0 divergences (no slicer-side changes).
 
 ### Phase 3 — Slider tick coloring (no sub-ticks)
@@ -184,3 +189,4 @@ Discoveries that change the plan (e.g. libvgcode forces a Plan B in Phase 5) get
 - 2026-04-27 — Plan committed. Investigation done; ready to start Phase 1a.
 - 2026-04-27 — Phase 1a complete. 9 tower records correctly parsed on tulip; comparator clean. Probe log left compiled in (will be removed in a later phase). Note on stack_count semantics: it counts total physical layers (1 base + N extras); the original plan text said "8/8/8/8/8/8/8/4/8" but that was extras only — actual stored value is 9/9/9/9/9/9/9/5/9.
 - 2026-04-27 — Phase 1b complete. Per-move tower_id / stack_index tagging implemented and verified via histogram. Stack-0 of each tower has the biggest move count (toolchange dance + base layer content) — expected pattern. Comparator clean. Phase 2 next: propagate these tags into libvgcode's PathVertex.
+- 2026-04-28 — Phase 2 complete. PathVertex extended; 4 aggregate-init sites in LibVGCodeWrapper.cpp updated. Verification via probe counted 100,927 tagged / 1,295,718 untagged PathVertex on tulip preview load — tagged ratio (7.2%) matches MoveVertex tagged ratio (7.0%), confirming clean propagation. Build-time "red tower" debug flag deferred to Phase 5 where renderer changes are natural. Phase 3 next: tint tower-base ticks in the slider.

@@ -93,6 +93,24 @@ struct PathVertex
     float pressure_advance{ 0.0f };
 
     //
+    // xyz fork: Filament Lookahead viewer tagging.
+    //
+    // tower_id: index into the gcode result's lookahead_towers vector
+    //   for the tower this vertex belongs to, or -1 if the vertex was
+    //   emitted OUTSIDE any LOOKAHEAD_BLOCK_BEGIN/END bracket.
+    // stack_index: 0 for the base layer + toolchange dance content,
+    //   1..N for each upper stack of the tower.
+    //
+    // Used by the layer slider to expand its tick model with one extra
+    // sub-tick per upper stack at each tower-base layer (Phase 4) and
+    // by the renderer to filter "stacks 0..K of tower T" so the user
+    // can scroll through emission order and watch the tower assemble
+    // bottom-up (Phase 5). See LOOKAHEAD_VIEWER.md.
+    //
+    int8_t tower_id{ -1 };
+    int8_t stack_index{ -1 };
+
+    //
     // Return true if the segment is an extrusion move
     //
     bool is_extrusion() const;
