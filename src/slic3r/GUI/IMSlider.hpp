@@ -81,6 +81,24 @@ public:
     void SetSliderValues(const std::vector<double> &values);
     void SetSliderAlternateValues(const std::vector<double> &values) { m_alternate_values = values; }
 
+    // xyz fork: Filament Lookahead viewer Phase 3 — slider tick coloring.
+    //
+    // Each entry is the slider index (0..max_value) where a lookahead
+    // tower's base layer starts. The renderer draws a small colored
+    // mark next to the slider track at each of these positions so the
+    // user can see at a glance where the towers are. Phase 4 will
+    // expand this with one extra mark per upper-stack; for now this is
+    // base-layer marks only.
+    //
+    // extruder_id_hint is the tower's filament extruder (matches
+    // GCodeProcessorResult::LookaheadTower::extruder_id) so the mark
+    // can be tinted to the tower's filament color. -1 if unknown.
+    struct LookaheadTowerMark {
+        int slider_index{ 0 };
+        int extruder_id_hint{ -1 };
+    };
+    void SetLookaheadTowerMarks(const std::vector<LookaheadTowerMark> &marks) { m_lookahead_tower_marks = marks; }
+
     Info GetTicksValues() const;
     void SetTicksValues(const Info &custom_gcode_per_print_z);
     void SetLayersTimes(const std::vector<float> &layers_times, float total_time);
@@ -148,6 +166,15 @@ protected:
     void draw_colored_band(const ImRect& groove, const ImRect& slideable_region);
     void draw_custom_label_block(const ImVec2 anchor, Type type);
     void draw_ticks(const ImRect& slideable_region);
+
+    // xyz fork: Filament Lookahead viewer Phase 3 — render small colored
+    // marks at every slider position where a lookahead tower's base layer
+    // sits. The marks are drawn beside the slider track (opposite side
+    // from custom-gcode ticks) so they don't conflict with any existing
+    // overlay. Tinted using the tower's filament color when available;
+    // falls back to a generic accent color otherwise. No-op when no
+    // tower marks have been registered (i.e. lookahead inactive).
+    void draw_lookahead_tower_marks(const ImRect& slideable_region);
     void draw_tick_on_mouse_position(const ImRect& slideable_region);
     void show_tooltip(const TickCode& tick); //menu
     void show_tooltip(const std::string tooltip); //menu
@@ -229,6 +256,11 @@ private:
     std::string              m_print_obj_idxs;
     bool                     m_is_need_post_tick_changed_event { false };
     Type                     m_tick_change_event_type;
+
+    // xyz fork: Filament Lookahead viewer Phase 3 — tower-base mark
+    // positions on the slider. Populated by GUI_Preview after each
+    // gcode load; rendered by draw_lookahead_tower_marks().
+    std::vector<LookaheadTowerMark> m_lookahead_tower_marks;
 
     std::vector<double> m_alternate_values;
 

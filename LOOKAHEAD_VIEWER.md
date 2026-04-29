@@ -1,7 +1,7 @@
 # GCode Viewer — Filament Lookahead Sub-Layer Display
 
 Branch: `filament-lookahead`
-Status: Phase 1a ✅ complete. Phase 1b ✅ complete. Phase 2 ✅ complete. Phase 3 next.
+Status: Phase 1a ✅ complete. Phase 1b ✅ complete. Phase 2 ✅ complete. Phase 3 ✅ complete. Phase 4 next.
 
 ## Goal
 
@@ -124,16 +124,25 @@ Each phase ends in a clean commit. Each must build, must not regress `compare_sl
 - PathVertex count (1.4M) is ~40% higher than MoveVertex count (980k) because libvgcode adds phantom boundary vertices that inherit the source MoveVertex's fields. Tagged ratio matches: ~7.0% in MoveVertex vs ~7.2% in PathVertex — proportionality preserved.
 - `compare_slices.py`: 0 divergences (no slicer-side changes).
 
-### Phase 3 — Slider tick coloring (no sub-ticks)
+### Phase 3 ✅ — Slider tick coloring (no sub-ticks)
 
 **Code changes**
-- `IMSlider`: read `LookaheadTower` records from the gcode result.
-- `IMSlider::draw_ticks()`: tint ticks at tower base layers.
+- `IMSlider.hpp`: new `LookaheadTowerMark` struct (`{slider_index, extruder_id_hint}`); `m_lookahead_tower_marks` member; `SetLookaheadTowerMarks()` setter; `draw_lookahead_tower_marks()` declaration.
+- `IMSlider.cpp`: `draw_lookahead_tower_marks()` paints small orange (IM_COL32(255,140,0,255)) horizontal bars (6×3 px scaled) on the LEFT side of the slider track, opposite the existing tick area. Called from both render paths (vertical multi-handle and one-layer modes) right after `draw_ticks()`.
+- `GUI_Preview.cpp`: after `SetSliderValues(layers_z)`, build the marks vector by iterating `m_gcode_result->lookahead_towers` and using `tower.base_layer` as the slider index directly.
 
-**Verification**
-- Load tulip in preview. Ticks at layers 233/242/244/251/253/260/262/269/271 visibly orange (or whatever color we pick).
-- Selecting an orange tick still shows the full physical layer (no semantic change yet).
-- `compare_slices.py`: 0 divergences.
+**Gotcha — why we use `base_layer`, not `base_z`**
+
+Initial implementation used `find_close_layer_idx(layers_z, tower.base_z, epsilon())` to map each tower to a slider slot. It returned -1 for every tower. Probe revealed two problems:
+1. `layers_z` is **not sorted**. libvgcode's `Layers::update()` adds one entry per `layer_id`, and `layer_id` increments on every Z change (including LA-block stack raises). The slider's Z list reflects gcode print order, not Z-sorted order. Excerpt around tower 0: `[232]=46.6, [233]=48.4, [234]=47.0, ...`. `find_close_layer_idx` uses `std::lower_bound` which is undefined on unsorted input.
+2. The pre-LA-block Z (e.g. `base_z=46.8`) doesn't appear as its own `layers_z` entry. `Layers::update()` keeps the LAST extrude Z for each layer_id bucket, so the bucket created at `base_layer=233` ends up holding the top stack's Z (48.4), not 46.8.
+
+The fix: `slider_index = tower.base_layer` directly. The mapping holds because the gcode emits each LA block at the start of its anchor layer, so `base_layer` lands on the slider's first entry for that tower. Verified empirically: tower 0 base_layer=233 ↔ `layers_z[233]=48.4` (the tower's first slider slot, holding its top stack); tower 1 base_layer=242 ↔ `layers_z[242]=50.2`; etc.
+
+**Verification (PASSED)**
+- 9 small orange marks visible on the slider's left side at indices 233/242/244/251/253/260/262/269/271. Cluster sits in the upper third of the slider where the towers are.
+- Selecting a marked tick still shows the full physical layer (no semantic change — Phase 4 is where sub-ticks get added).
+- `compare_slices.py`: 0 divergences (no slicer-side changes).
 
 ### Phase 4 — Sub-tick expansion in the slider model
 
@@ -190,3 +199,4 @@ Discoveries that change the plan (e.g. libvgcode forces a Plan B in Phase 5) get
 - 2026-04-27 — Phase 1a complete. 9 tower records correctly parsed on tulip; comparator clean. Probe log left compiled in (will be removed in a later phase). Note on stack_count semantics: it counts total physical layers (1 base + N extras); the original plan text said "8/8/8/8/8/8/8/4/8" but that was extras only — actual stored value is 9/9/9/9/9/9/9/5/9.
 - 2026-04-27 — Phase 1b complete. Per-move tower_id / stack_index tagging implemented and verified via histogram. Stack-0 of each tower has the biggest move count (toolchange dance + base layer content) — expected pattern. Comparator clean. Phase 2 next: propagate these tags into libvgcode's PathVertex.
 - 2026-04-28 — Phase 2 complete. PathVertex extended; 4 aggregate-init sites in LibVGCodeWrapper.cpp updated. Verification via probe counted 100,927 tagged / 1,295,718 untagged PathVertex on tulip preview load — tagged ratio (7.2%) matches MoveVertex tagged ratio (7.0%), confirming clean propagation. Build-time "red tower" debug flag deferred to Phase 5 where renderer changes are natural. Phase 3 next: tint tower-base ticks in the slider.
+- 2026-04-28 — Phase 3 complete. 9 orange marks render on the slider's left side at the correct base_layer indices on tulip. First attempt mapped via `find_close_layer_idx(layers_z, base_z)` and silently produced 0 marks because `layers_z` is not Z-sorted (libvgcode keys it by gcode print order) and the pre-LA Z doesn't appear as its own bucket. Switched to `slider_index = tower.base_layer` direct mapping; documented in the Phase 3 Gotcha section. Comparator clean. Phase 4 next: expand the slider's value model to add per-stack sub-ticks at each tower-base position.

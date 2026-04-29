@@ -563,6 +563,33 @@ void Preview::update_layers_slider(const std::vector<double>& layers_z, bool kee
     assert(m_layers_slider->GetMinValue() == 0);
     m_layers_slider->SetMaxValue(layers_z.empty() ? 0 : layers_z.size() - 1);
 
+    // xyz fork: Filament Lookahead viewer Phase 3 — register slider marks
+    // for each tower's base-layer position. The slider's layers_z is built
+    // by libvgcode's Layers::update() one entry per layer_id, and layer_id
+    // is incremented for every Z-change inside the gcode (including the
+    // tower-stack Z raises). LA blocks are emitted at the start of their
+    // anchor layer, so the slicer's tower.base_layer index lands directly
+    // on the slider's first entry for that tower (the slider's Z at that
+    // index is the tower's top stack, since Layers::update overwrites with
+    // the last extrude Z it sees in that layer_id bucket). We can use
+    // tower.base_layer as the slider index without remapping.
+    {
+        std::vector<IMSlider::LookaheadTowerMark> marks;
+        if (m_gcode_result && !layers_z.empty()) {
+            marks.reserve(m_gcode_result->lookahead_towers.size());
+            const int max_idx = static_cast<int>(layers_z.size()) - 1;
+            for (const auto &tower : m_gcode_result->lookahead_towers) {
+                int idx = static_cast<int>(tower.base_layer);
+                if (idx < 0 || idx > max_idx) continue;
+                IMSlider::LookaheadTowerMark mark;
+                mark.slider_index     = idx;
+                mark.extruder_id_hint = tower.extruder_id;
+                marks.push_back(mark);
+            }
+        }
+        m_layers_slider->SetLookaheadTowerMarks(marks);
+    }
+
     int idx_low  = 0;
     int idx_high = m_layers_slider->GetMaxValue();
     if (!layers_z.empty()) {

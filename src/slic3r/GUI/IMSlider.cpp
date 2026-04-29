@@ -769,6 +769,53 @@ void IMSlider::draw_ticks(const ImRect& slideable_region) {
     }
 }
 
+// xyz fork: Filament Lookahead viewer Phase 3 — draw small colored marks
+// at slider positions corresponding to lookahead tower base layers.
+//
+// Visual placement: a small filled triangle pointing INWARD (toward the
+// slider track) on the LEFT side of the slideable region, mirroring the
+// custom-gcode tick area on the right. Position on the Y axis is the
+// slider's pixel position for the tower's base-layer index, computed
+// the same way draw_ticks() computes its tick positions so visual
+// alignment is exact.
+//
+// Color: ideally the tower's filament color from m_extruder_colors,
+// fallback to a fixed orange accent if that's unavailable. The
+// extruder_id_hint is 0-based; m_extruder_colors is also 0-based.
+void IMSlider::draw_lookahead_tower_marks(const ImRect &slideable_region)
+{
+    if (m_lookahead_tower_marks.empty())
+        return;
+
+    // Compute slider Y for a tick index (same approach as draw_ticks).
+    auto get_tick_pos = [this, slideable_region](int tick) {
+        return get_pos_from_value(GetMinValue(), GetMaxValue(), tick, slideable_region);
+    };
+
+    // Mark dimensions. A small horizontal bar to the LEFT of the slider
+    // track. Bar width 6 px (scaled), height 3 px (scaled).
+    const ImVec2 mark_size = ImVec2(6.0f, 3.0f) * m_scale;
+    const float  mark_x_offset = 24.0f * m_scale;  // distance from slider center to mark's right edge
+
+    // Fixed accent color for the mark — bright orange so it's
+    // distinguishable from filament colors which can be arbitrary.
+    // (TODO future: use the tower's filament color from m_extruder_colors
+    // if a coloring preference would help readability further.)
+    const ImU32 mark_clr = IM_COL32(255, 140, 0, 255);
+
+    for (const auto &mark : m_lookahead_tower_marks) {
+        if (mark.slider_index < GetMinValue() || mark.slider_index > GetMaxValue())
+            continue;
+        const float y = get_tick_pos(mark.slider_index);
+        // Bar extends to the LEFT of slider center, opposite the tick area.
+        const float right_x = slideable_region.GetCenter().x - mark_x_offset;
+        const float left_x  = right_x - mark_size.x;
+        const ImRect bar(ImVec2(left_x, y - mark_size.y * 0.5f),
+                         ImVec2(right_x, y + mark_size.y * 0.5f));
+        ImGui::RenderFrame(bar.Min, bar.Max, mark_clr, false);
+    }
+}
+
 void IMSlider::show_tooltip(const std::string tooltip) {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, { 6 * m_scale, 3 * m_scale });
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, { 3 * m_scale });
@@ -974,6 +1021,8 @@ bool IMSlider::vertical_slider(const char* str_id, int* higher_value, int* lower
 
         // draw ticks
         draw_ticks(h_selected ? higher_slideable_region : lower_slideable_region);
+        // xyz fork: draw lookahead tower base-layer marks (Phase 3)
+        draw_lookahead_tower_marks(h_selected ? higher_slideable_region : lower_slideable_region);
         // draw colored band
         draw_colored_band(groove, h_selected ? higher_slideable_region : lower_slideable_region);
 
@@ -1049,6 +1098,8 @@ bool IMSlider::vertical_slider(const char* str_id, int* higher_value, int* lower
 
         // draw ticks
         draw_ticks(one_slideable_region);
+        // xyz fork: draw lookahead tower base-layer marks (Phase 3)
+        draw_lookahead_tower_marks(one_slideable_region);
         // draw colored band
         draw_colored_band(groove, one_slideable_region);
 
