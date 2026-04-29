@@ -94,7 +94,8 @@ public:
     // GCodeProcessorResult::LookaheadTower::extruder_id) so the mark
     // can be tinted to the tower's filament color. -1 if unknown.
     struct LookaheadTowerMark {
-        int slider_index{ 0 };
+        int slider_index{ 0 };     // first sub-tick of the tower (base stack)
+        int slider_index_end{ 0 }; // last sub-tick of the tower (top stack); inclusive
         int extruder_id_hint{ -1 };
     };
     void SetLookaheadTowerMarks(const std::vector<LookaheadTowerMark> &marks) { m_lookahead_tower_marks = marks; }
@@ -199,14 +200,13 @@ protected:
     void draw_custom_label_block(const ImVec2 anchor, Type type);
     void draw_ticks(const ImRect& slideable_region);
 
-    // xyz fork: Filament Lookahead viewer Phase 3 — render small colored
-    // marks at every slider position where a lookahead tower's base layer
-    // sits. The marks are drawn beside the slider track (opposite side
-    // from custom-gcode ticks) so they don't conflict with any existing
-    // overlay. Tinted using the tower's filament color when available;
-    // falls back to a generic accent color otherwise. No-op when no
-    // tower marks have been registered (i.e. lookahead inactive).
-    void draw_lookahead_tower_marks(const ImRect& slideable_region);
+    // xyz fork: Filament Lookahead viewer Phase 6 — render colored
+    // range bands directly inside the slider groove for each lookahead
+    // tower's stack span. Each band starts at the tower's base sub-tick
+    // and ends at its top sub-tick (inclusive). Drawn AFTER
+    // draw_colored_band so it overlays the per-tool-change band.
+    // No-op when no tower marks have been registered.
+    void draw_lookahead_tower_marks(const ImRect& groove, const ImRect& slideable_region);
     void draw_tick_on_mouse_position(const ImRect& slideable_region);
     void show_tooltip(const TickCode& tick); //menu
     void show_tooltip(const std::string tooltip); //menu

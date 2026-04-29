@@ -1,7 +1,7 @@
 # GCode Viewer — Filament Lookahead Sub-Layer Display
 
 Branch: `filament-lookahead`
-Status: Phase 1a ✅ complete. Phase 1b ✅ complete. Phase 2 ✅ complete. Phase 3 ✅ complete. Phase 4 ✅ complete. Phase 5 ✅ complete. Phase 6 (polish) next.
+Status: Phase 1a ✅ complete. Phase 1b ✅ complete. Phase 2 ✅ complete. Phase 3 ✅ complete. Phase 4 ✅ complete. Phase 5 ✅ complete. Phase 6a ✅ complete (range bands). Phase 6e ✅ complete (wipe tower truncation). Phase 6 hover labels and layer-stats polish skipped per user.
 
 ## Goal
 
@@ -196,17 +196,67 @@ The original sketch proposed a combined `set_layers_sub_view_range(...)` API. We
 - Travel moves around the object and tool-change Z-hops above the work are visible in the assembling tower — confirms the filter operates at vertex granularity, not just layer level.
 - `compare_slices.py --reuse-gcode`: 0 divergences across 392 Z buckets.
 
-### Phase 6 — Polish
+### Phase 6a ✅ — Slider range bands for towers
+
+**Implemented (deviation from original "side ticks" sketch)**
+
+Initial Phase 6 sketch had small side ticks indicating tower-base layers. User asked for the slider track itself to show colored ranges spanning each tower's stack range — much more legible. Replaced the side-tick draw with a groove range band.
 
 **Code changes**
-- Sub-tick visual distinction: smaller tick height, contrasting color, optional badge/glyph.
-- Hover labels: `Tower at layer 251 (ext=0), stack 3/8 → z=51.0`.
-- Layer-stats panel: handle sub-ticks (display "Tower stack" badge or skip stats — TBD).
-- Audit the `layer_count == m_values.size()` assumption sites discovered in Phase 4. Each needs to do the right thing under sub-ticks.
 
-**Verification**
-- Manual UI walkthrough.
-- `compare_slices.py`: still 0.
+- `IMSlider.hpp` — `LookaheadTowerMark` extended with `int slider_index_end` (last sub-tick of the tower; inclusive). `draw_lookahead_tower_marks(...)` now takes both the groove rect and the slideable region rect.
+- `IMSlider.cpp::draw_lookahead_tower_marks` — replaced the side-mounted bars with `ImGui::RenderFrame` painting a translucent orange (`IM_COL32(255,140,0,180)`) band inside the groove from the base sub-tick to the top sub-tick. Inset 1 px from the groove edges, rounded to match the groove's corners (`groove.GetWidth() * 0.5f`).
+- `IMSlider.cpp` — render order in both two-handle and one-layer modes adjusted: tower bands now draw **after** the existing colored band AND after the `scroll_line` (the highlight that fills the selected range between the two handles). This way the band appears on the selected-range UI element too, not just the unselected groove behind it.
+- `GUI_Preview.cpp::update_layers_slider` — when emitting a `LookaheadTowerMark`, capture the base sub-tick index *before* pushing stack extras, then capture `slider_index_end` *after* the extras are pushed. Mark covers `[base..top]` inclusive in the expanded slider's coordinate space.
+
+**Verification (tulip)**
+
+- 9 orange ranges visible on the slider at the towers' positions; each spans from the base layer up through that tower's full stack.
+- Selected range scroll-line still draws normally, with the tower bands overlaid on top in the overlap.
+- Scrubbing through a sub-tick range visually corresponds to its band — natural feedback that "you're inside a tower."
+- `compare_slices.py --reuse-gcode`: 0 divergences.
+
+### Phase 6e ✅ — Wipe tower truncation past the last tool change
+
+**Problem**
+
+User observed: "the purge tower does not need to be generated at all once we have hit a layer that there is no more filament changes going forward. on my rose model, it is pure red beyond about layer 275." The wipe tower kept getting drawn upward through the print even after the model had transitioned to a single filament for the rest of the part.
+
+**Root cause**
+
+xyz fork already had early-stop logic in `ToolOrdering::fill_wipe_tower_partitions()` (lines ~905-933) that walks the layer list back-to-front and clears `has_wipe_tower` on layers where no real tool change has happened above. But it ran **before** the Phase 6d filter that strips lookahead pre-stages from per-layer extruder lists. Pre-tower stages inflated `actual_partitions[i]`, so `any_changes_above` flipped to true on what looked like a tool-change layer but was actually just a tower's pre-stage. End result: tower kept extending upward past the last real change.
+
+**Fix**
+
+Re-run the same back-to-front truncation pass in `Print::_make_wipe_tower()` **after** Phase 6d's filter has run on the layer-tools' extruder lists. Operates on filtered data, so `actual_partitions[i]` reflects real tool changes only. Keeps `keep_for_timelapse` exception (tlSmooth) intact.
+
+- `src/libslic3r/Print.cpp` — added a new pass after the Phase 6d extruder-list filter (~line 3294+). Mirrors the structure of the `ToolOrdering` pass but operates on already-filtered data. Logs trimmed layer count at warning level for visibility.
+
+**Verification (tulip)**
+
+- User confirmed: wipe tower no longer drawn on layers above the last filament change. Single-filament cap of the rose now prints without phantom tower geometry above ~layer 275.
+- `compare_slices.py --reuse-gcode`: validates no per-(Z, filament) divergence below the truncation point. Above it, the lookahead-on side simply has fewer wipe-tower segments, which is the intended improvement (no object-region divergence).
+
+### Phase 6 (audit) ✅ — `m_values.size()` assumption sites
+
+Walked every site that consumes the slider's value array or `GetMaxValue()` to verify they degrade gracefully under Phase 4's sub-tick expansion.
+
+- `IMSlider.cpp` wipe-tower time dedup (line ~294): uses `std::unique` over the deduped Z list — duplicate Zs from sub-ticks collapse correctly.
+- `IMSlider.cpp::is_wipe_tower_layer` (line ~1637): Z-equality check returns false on equal-Z sub-ticks. Correct: sub-ticks aren't wipe-tower layers themselves.
+- `IMSlider.cpp` keyboard navigation (lines 1653/1697/1714/1718): operates on slider indices, not Z values — sub-ticks traverse naturally one tick at a time.
+- `GLCanvas3D.cpp` keyboard nav (line ~3795): same — index arithmetic, sub-tick safe.
+- `GUI_Preview.cpp::check_layers_slider_values` (line ~423): operates on the original `layers_z`, not the expanded vector — correct (boundary check is against physical layers).
+- `GUI_Preview.cpp::find_close_layer_idx(expanded_zs, ...)` (line ~638): when multiple sub-ticks share a Z, `lower_bound` returns the first match (the base sub-tick), which is the correct fallback for span preservation across reload.
+- `GUI_Preview.cpp` line 540 `span_changed` check: compares against `layers_z.back()` not `expanded_zs.back()` — correct (semantic Z range, not slider-index range).
+
+No problematic sites found. Sub-tick expansion is safe under existing consumers.
+
+### Phase 6 — Skipped polish items
+
+Per user direction (2026-04-29), the following Phase 6 items are explicitly not pursued:
+
+- Hover labels on sub-ticks (e.g. `Tower at layer 251 (ext=0), stack 3/8 → z=51.0`). The existing `T<n>\n<k>/<m>` tooltip from Phase 4 is sufficient.
+- Layer-stats panel sub-tick handling. The panel is rarely consulted on tower sub-ticks; current behavior is acceptable.
 
 ## Update mandate
 
@@ -226,3 +276,6 @@ Discoveries that change the plan (e.g. libvgcode forces a Plan B in Phase 5) get
 - 2026-04-28 — Phase 3 complete. 9 orange marks render on the slider's left side at the correct base_layer indices on tulip. First attempt mapped via `find_close_layer_idx(layers_z, base_z)` and silently produced 0 marks because `layers_z` is not Z-sorted (libvgcode keys it by gcode print order) and the pre-LA Z doesn't appear as its own bucket. Switched to `slider_index = tower.base_layer` direct mapping; documented in the Phase 3 Gotcha section. Comparator clean. Phase 4 next: expand the slider's value model to add per-stack sub-ticks at each tower-base position.
 - 2026-04-29 — Phase 4 complete. Slider grew from 392 → 460 entries on tulip (+68 sub-ticks). Tooltips show `T<n>\n<k>/<m>` on sub-ticks and normal layer/height on others. Viewer is inert across sub-tick scrubs as designed (all stacks resolve to base `layer_id` via `ToViewerLayerId`). Comparator clean (0 divergences across 392 Z buckets). Deviation from sketch: kept `m_values` as `vector<double>` and added a *parallel* `EntryMeta` vector instead of restructuring the value type — less invasive, same semantics. Phase 5 next: replace `ToViewerLayerId`'s passthrough with stack-by-stack viewer filtering so sub-ticks visually assemble the tower bottom-up.
 - 2026-04-29 — Phase 5 complete. Towers now assemble bottom-up as the user scrubs sub-ticks. Implemented as a separate `Viewer::set_lookahead_filter(tower_id, stack_index)` channel (orthogonal to the existing layer view range) — the per-vertex predicate `tower_id == filter && stack_index > stack` falls into the existing `update_enabled_entities()` chain in libvgcode. User confirmed visual: travel and tool-change Z-hops are also gated correctly per stack ("travel moves above things for tool changes" visible). Comparator clean. Also disabled the yellow exclusion-zone debug overlay (`render_lookahead_zones` now wrapped in `if (false)` — geometry build path retained for future debugging). Phase 6 (polish) next: sub-tick visual distinction in the slider, audit `m_values.size()` assumption sites under sub-ticks, optional layer-stats handling.
+- 2026-04-29 — Phase 6a complete. Replaced the side-mounted tower marks with translucent orange range bands painted inside the slider groove from each tower's base sub-tick to its top sub-tick. User originally asked: "i would love to have the slider body area itself have ranges of different colors." First pass drew under the scroll_line (selected-range highlight); reordered draws so bands paint after both the colored band and scroll_line — bands now appear on the selected range too. `LookaheadTowerMark` extended with `slider_index_end`. Comparator clean.
+- 2026-04-29 — Phase 6e complete. User noticed the wipe tower kept drawing upward past the last real tool change ("the purge tower does not need to be generated at all once we have hit a layer that there is no more filament changes going forward"). xyz fork already had ToolOrdering early-stop logic but it ran before Phase 6d's pre-stage filter, so inflated extruder lists made `any_changes_above` flip true on pre-stage-only layers. Fix: re-run the same back-to-front truncation in `Print::_make_wipe_tower()` after Phase 6d filtering. User confirmed: tower correctly truncates above the last tool change on the tulip (no more phantom tower geometry on the single-filament cap).
+- 2026-04-29 — Phase 6 audit pass complete. Walked every `m_values.size()` / `GetMaxValue()` consumer in IMSlider/GLCanvas3D/GUI_Preview; all degrade correctly under Phase 4 sub-tick expansion (Z dedup collapses duplicates, keyboard nav uses indices, span checks use original layers_z, find_close returns first-match base on duplicate Zs). No regressions found, no fixes needed. Hover-label and layer-stats polish items skipped per user direction.

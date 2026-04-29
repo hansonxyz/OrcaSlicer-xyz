@@ -3293,6 +3293,51 @@ void Print::_make_wipe_tower()
             << " tower-mode filament entries out of wipe tower's per-layer extruder lists.";
     }
 
+    // xyz fork: Phase 6e. Truncate the wipe tower at the last layer that
+    // contains a real tool change. The same logic in ToolOrdering's
+    // fill_wipe_tower_partitions runs before Phase 6d, so its
+    // actual_partitions count is inflated by upper-tower-stack pre-stages
+    // that haven't been filtered out yet. Re-run it here, on the
+    // post-filter extruder lists, to actually truncate the tower above the
+    // last real tool change. This is the only effective truncation pass
+    // when filament_lookahead is enabled; without lookahead the
+    // ToolOrdering pass already does the right thing and this is a no-op.
+    {
+        auto &lts = m_wipe_tower_data.tool_ordering.layer_tools();
+        // Per-layer tool change count, computed from the (filtered) extruders.
+        size_t last_ext = size_t(-1);
+        std::vector<size_t> actual_partitions(lts.size(), 0);
+        for (size_t i = 0; i < lts.size(); ++i) {
+            actual_partitions[i] = lts[i].extruders.size();
+            if (!lts[i].extruders.empty()) {
+                if (last_ext == size_t(-1) || last_ext == lts[i].extruders.front())
+                    --actual_partitions[i];
+                last_ext = lts[i].extruders.back();
+            }
+        }
+        // Scan top-down: clear has_wipe_tower / wipe_tower_partitions for
+        // layers above the last layer with a real tool change. Skip when
+        // smooth-timelapse needs the tower as a parking shelf.
+        const bool keep_for_timelapse = (m_config.timelapse_type.value == TimelapseType::tlSmooth);
+        bool any_changes_above = false;
+        size_t trimmed = 0;
+        for (int i = int(lts.size()) - 1; i >= 0; --i) {
+            if (actual_partitions[i] > 0)
+                any_changes_above = true;
+            if (!any_changes_above && !keep_for_timelapse) {
+                if (lts[i].has_wipe_tower) {
+                    lts[i].has_wipe_tower = false;
+                    ++trimmed;
+                }
+                lts[i].wipe_tower_partitions = 0;
+            }
+        }
+        if (trimmed > 0) {
+            BOOST_LOG_TRIVIAL(warning) << "[FLA] Phase 6e: trimmed wipe tower from "
+                << trimmed << " upper layer(s) with no remaining tool changes.";
+        }
+    }
+
     // Check whether there are any layers in m_tool_ordering, which are marked with has_wipe_tower,
     // they print neither object, nor support. These layers are above the raft and below the object, and they
     // shall be added to the support layers to be printed.

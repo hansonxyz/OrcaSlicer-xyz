@@ -812,37 +812,44 @@ int IMSlider::ToViewerLayerId(int slider_index) const
 // Color: ideally the tower's filament color from m_extruder_colors,
 // fallback to a fixed orange accent if that's unavailable. The
 // extruder_id_hint is 0-based; m_extruder_colors is also 0-based.
-void IMSlider::draw_lookahead_tower_marks(const ImRect &slideable_region)
+void IMSlider::draw_lookahead_tower_marks(const ImRect &groove, const ImRect &slideable_region)
 {
     if (m_lookahead_tower_marks.empty())
         return;
 
-    // Compute slider Y for a tick index (same approach as draw_ticks).
+    // Compute slider Y for a sub-tick index (same approach as draw_ticks /
+    // draw_colored_band).
     auto get_tick_pos = [this, slideable_region](int tick) {
         return get_pos_from_value(GetMinValue(), GetMaxValue(), tick, slideable_region);
     };
 
-    // Mark dimensions. A small horizontal bar to the LEFT of the slider
-    // track. Bar width 6 px (scaled), height 3 px (scaled).
-    const ImVec2 mark_size = ImVec2(6.0f, 3.0f) * m_scale;
-    const float  mark_x_offset = 24.0f * m_scale;  // distance from slider center to mark's right edge
+    // Semi-transparent orange accent — overlays the underlying tool-change
+    // colored band so the user can see both at once.
+    const ImU32 band_clr = IM_COL32(255, 140, 0, 180);
 
-    // Fixed accent color for the mark — bright orange so it's
-    // distinguishable from filament colors which can be arbitrary.
-    // (TODO future: use the tower's filament color from m_extruder_colors
-    // if a coloring preference would help readability further.)
-    const ImU32 mark_clr = IM_COL32(255, 140, 0, 255);
+    // Inset the band slightly inside the groove so the rounded groove
+    // borders remain visible (matches the visual feel of the colored band).
+    const float inset = 1.0f * m_scale;
 
     for (const auto &mark : m_lookahead_tower_marks) {
-        if (mark.slider_index < GetMinValue() || mark.slider_index > GetMaxValue())
+        const int idx_lo = mark.slider_index;
+        const int idx_hi = std::max(mark.slider_index_end, mark.slider_index);
+        if (idx_hi < GetMinValue() || idx_lo > GetMaxValue())
             continue;
-        const float y = get_tick_pos(mark.slider_index);
-        // Bar extends to the LEFT of slider center, opposite the tick area.
-        const float right_x = slideable_region.GetCenter().x - mark_x_offset;
-        const float left_x  = right_x - mark_size.x;
-        const ImRect bar(ImVec2(left_x, y - mark_size.y * 0.5f),
-                         ImVec2(right_x, y + mark_size.y * 0.5f));
-        ImGui::RenderFrame(bar.Min, bar.Max, mark_clr, false);
+
+        const float y_lo = get_tick_pos(idx_lo); // base sub-tick (lower index → higher Y in screen space)
+        const float y_hi = get_tick_pos(idx_hi); // top sub-tick
+
+        // Vertical-slider Y axis: bigger value sits lower on screen if the
+        // slider is direction-flipped, but get_pos_from_value handles that —
+        // just normalize min/max here.
+        const float y_top    = std::min(y_lo, y_hi);
+        const float y_bottom = std::max(y_lo, y_hi);
+
+        ImRect band(ImVec2(groove.Min.x + inset, y_top),
+                    ImVec2(groove.Max.x - inset, y_bottom));
+
+        ImGui::RenderFrame(band.Min, band.Max, band_clr, false, groove.GetWidth() * 0.5f);
     }
 }
 
@@ -1051,8 +1058,6 @@ bool IMSlider::vertical_slider(const char* str_id, int* higher_value, int* lower
 
         // draw ticks
         draw_ticks(h_selected ? higher_slideable_region : lower_slideable_region);
-        // xyz fork: draw lookahead tower base-layer marks (Phase 3)
-        draw_lookahead_tower_marks(h_selected ? higher_slideable_region : lower_slideable_region);
         // draw colored band
         draw_colored_band(groove, h_selected ? higher_slideable_region : lower_slideable_region);
 
@@ -1061,6 +1066,10 @@ bool IMSlider::vertical_slider(const char* str_id, int* higher_value, int* lower
             ImRect scroll_line = ImRect(ImVec2(groove.Min.x, higher_handle_center.y), ImVec2(groove.Max.x, lower_handle_center.y));
             window->DrawList->AddRectFilled(scroll_line.Min, scroll_line.Max, handle_clr);
         }
+        // xyz fork: draw lookahead tower range bands (Phase 6) — overlays
+        // the colored band AND the selected-range scroll line, so must
+        // come AFTER both.
+        draw_lookahead_tower_marks(groove, h_selected ? higher_slideable_region : lower_slideable_region);
 
         // draw handles
         window->DrawList->AddCircleFilled(higher_handle_center, handle_radius, handle_border_clr);
@@ -1128,10 +1137,11 @@ bool IMSlider::vertical_slider(const char* str_id, int* higher_value, int* lower
 
         // draw ticks
         draw_ticks(one_slideable_region);
-        // xyz fork: draw lookahead tower base-layer marks (Phase 3)
-        draw_lookahead_tower_marks(one_slideable_region);
         // draw colored band
         draw_colored_band(groove, one_slideable_region);
+        // xyz fork: draw lookahead tower range bands (Phase 6) — overlays
+        // the colored band, so must come AFTER draw_colored_band.
+        draw_lookahead_tower_marks(groove, one_slideable_region);
 
         // draw handle
         window->DrawList->AddLine(ImVec2(mid_x - 0.5 * bar_width, handle_center.y), ImVec2(mid_x + 0.5 * bar_width, handle_center.y), handle_clr, 2 * line_width);

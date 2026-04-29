@@ -606,7 +606,6 @@ void Preview::update_layers_slider(const std::vector<double>& layers_z, bool kee
                 IMSlider::LookaheadTowerMark mark;
                 mark.slider_index     = static_cast<int>(expanded_zs.size() - 1);
                 mark.extruder_id_hint = tower.extruder_id;
-                marks.push_back(mark);
 
                 for (size_t s = 1; s < tower.stack_count; ++s) {
                     expanded_zs.push_back(layers_z[i]);
@@ -617,6 +616,8 @@ void Preview::update_layers_slider(const std::vector<double>& layers_z, bool kee
                     em_extra.viewer_layer_id = static_cast<int>(i);
                     entry_meta.push_back(em_extra);
                 }
+                mark.slider_index_end = static_cast<int>(expanded_zs.size() - 1);
+                marks.push_back(mark);
                 ++tower_cursor;
             } else {
                 entry_meta.push_back(em);
