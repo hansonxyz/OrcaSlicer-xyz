@@ -559,46 +559,86 @@ void Preview::update_layers_slider(const std::vector<double>& layers_z, bool kee
 
     // first of all update extruder colors to avoid crash, when we are switching printer preset from MM to SM
     m_layers_slider->SetExtruderColors(plater->get_extruder_colors_from_plater_config(wxGetApp().is_editor() ? nullptr : m_gcode_result));
-    m_layers_slider->SetSliderValues(layers_z);
-    assert(m_layers_slider->GetMinValue() == 0);
-    m_layers_slider->SetMaxValue(layers_z.empty() ? 0 : layers_z.size() - 1);
 
-    // xyz fork: Filament Lookahead viewer Phase 3 — register slider marks
-    // for each tower's base-layer position. The slider's layers_z is built
-    // by libvgcode's Layers::update() one entry per layer_id, and layer_id
-    // is incremented for every Z-change inside the gcode (including the
-    // tower-stack Z raises). LA blocks are emitted at the start of their
-    // anchor layer, so the slicer's tower.base_layer index lands directly
-    // on the slider's first entry for that tower (the slider's Z at that
-    // index is the tower's top stack, since Layers::update overwrites with
-    // the last extrude Z it sees in that layer_id bucket). We can use
-    // tower.base_layer as the slider index without remapping.
+    // xyz fork: Filament Lookahead viewer Phase 4 — expand the slider's
+    // value list with one entry per tower stack. For each tower whose
+    // base_layer maps to slider index L, insert (stack_count - 1) extra
+    // entries immediately after L. Each new entry shares the base layer's
+    // Z (since libvgcode buckets all stacks under the base layer_id and
+    // overwrites with the last extrude Z it saw). The parallel EntryMeta
+    // vector lets ToViewerLayerId collapse all stack entries back to the
+    // base libvgcode layer_id when forwarding to the viewer — Phase 4 is
+    // visually inert; Phase 5 will replace that translator with stack-by-
+    // stack viewer filtering.
+    std::vector<double>                       expanded_zs;
+    std::vector<IMSlider::EntryMeta>          entry_meta;
+    std::vector<IMSlider::LookaheadTowerMark> marks;
     {
-        std::vector<IMSlider::LookaheadTowerMark> marks;
-        if (m_gcode_result && !layers_z.empty()) {
-            marks.reserve(m_gcode_result->lookahead_towers.size());
-            const int max_idx = static_cast<int>(layers_z.size()) - 1;
-            for (const auto &tower : m_gcode_result->lookahead_towers) {
-                int idx = static_cast<int>(tower.base_layer);
-                if (idx < 0 || idx > max_idx) continue;
+        const auto *towers = (m_gcode_result ? &m_gcode_result->lookahead_towers : nullptr);
+        size_t      reserve_extra = 0;
+        if (towers) {
+            for (const auto &t : *towers)
+                if (t.stack_count > 1) reserve_extra += t.stack_count - 1;
+        }
+        expanded_zs.reserve(layers_z.size() + reserve_extra);
+        entry_meta.reserve(layers_z.size() + reserve_extra);
+        if (towers) marks.reserve(towers->size());
+
+        size_t tower_cursor = 0;
+        for (size_t i = 0; i < layers_z.size(); ++i) {
+            // Append the original layer entry first.
+            expanded_zs.push_back(layers_z[i]);
+            IMSlider::EntryMeta em;
+            em.viewer_layer_id = static_cast<int>(i);
+
+            // Tower whose base_layer == i: tag this entry as stack 0 and
+            // insert extras for the remaining stacks. Towers are emitted
+            // in print order so base_layer is monotonically non-decreasing;
+            // a `while` covers the (unexpected but harmless) case of
+            // multiple towers anchored at the same base layer.
+            if (towers && tower_cursor < towers->size() && (*towers)[tower_cursor].base_layer == i) {
+                const auto &tower = (*towers)[tower_cursor];
+                em.tower_id    = static_cast<int8_t>(tower_cursor);
+                em.stack_index = 0;
+                em.stack_count = static_cast<int8_t>(tower.stack_count);
+                entry_meta.push_back(em);
+
                 IMSlider::LookaheadTowerMark mark;
-                mark.slider_index     = idx;
+                mark.slider_index     = static_cast<int>(expanded_zs.size() - 1);
                 mark.extruder_id_hint = tower.extruder_id;
                 marks.push_back(mark);
+
+                for (size_t s = 1; s < tower.stack_count; ++s) {
+                    expanded_zs.push_back(layers_z[i]);
+                    IMSlider::EntryMeta em_extra;
+                    em_extra.tower_id        = static_cast<int8_t>(tower_cursor);
+                    em_extra.stack_index     = static_cast<int8_t>(s);
+                    em_extra.stack_count     = static_cast<int8_t>(tower.stack_count);
+                    em_extra.viewer_layer_id = static_cast<int>(i);
+                    entry_meta.push_back(em_extra);
+                }
+                ++tower_cursor;
+            } else {
+                entry_meta.push_back(em);
             }
         }
-        m_layers_slider->SetLookaheadTowerMarks(marks);
     }
+
+    m_layers_slider->SetSliderValues(expanded_zs);
+    assert(m_layers_slider->GetMinValue() == 0);
+    m_layers_slider->SetMaxValue(expanded_zs.empty() ? 0 : expanded_zs.size() - 1);
+    m_layers_slider->SetEntryMeta(entry_meta);
+    m_layers_slider->SetLookaheadTowerMarks(marks);
 
     int idx_low  = 0;
     int idx_high = m_layers_slider->GetMaxValue();
-    if (!layers_z.empty()) {
+    if (!expanded_zs.empty()) {
         if (!snap_to_min) {
-            int idx_new = find_close_layer_idx(layers_z, z_low, epsilon() /*1e-6*/);
+            int idx_new = find_close_layer_idx(expanded_zs, z_low, epsilon() /*1e-6*/);
             if (idx_new != -1) idx_low = idx_new;
         }
         if (!snap_to_max) {
-            int idx_new = find_close_layer_idx(layers_z, z_high, epsilon() /*1e-6*/);
+            int idx_new = find_close_layer_idx(expanded_zs, z_high, epsilon() /*1e-6*/);
             if (idx_new != -1) idx_high = idx_new;
         }
     }

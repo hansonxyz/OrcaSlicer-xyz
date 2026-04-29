@@ -99,6 +99,31 @@ public:
     };
     void SetLookaheadTowerMarks(const std::vector<LookaheadTowerMark> &marks) { m_lookahead_tower_marks = marks; }
 
+    // xyz fork: Filament Lookahead viewer Phase 4 — sub-tick model.
+    //
+    // The slider's value list grows so that each lookahead tower
+    // contributes N entries (one per stack) instead of one. This lets
+    // the user scrub within a tower instead of jumping over it. Each
+    // slider index gets a parallel EntryMeta record:
+    //
+    //   - tower_id / stack_index: -1 for normal layers; (T, K) for the
+    //     K-th stack of tower T.
+    //   - viewer_layer_id: the libvgcode layer_id this slider position
+    //     should resolve to when the viewer is asked to render the
+    //     range. For normal layers this equals the libvgcode layer_id
+    //     directly; for tower stacks it's the tower's base layer_id
+    //     (since libvgcode buckets all stacks together — Phase 5 is
+    //     where stack-by-stack filtering gets wired through a separate
+    //     channel; until then sub-ticks are visually inert).
+    struct EntryMeta {
+        int8_t tower_id{ -1 };
+        int8_t stack_index{ -1 };
+        int8_t stack_count{ 0 };      // total stacks in this tower (for "K/M" tooltip display)
+        int    viewer_layer_id{ -1 }; // libvgcode layer_id; -1 means "same as slider index"
+    };
+    void SetEntryMeta(const std::vector<EntryMeta> &meta) { m_entry_meta = meta; }
+    int  ToViewerLayerId(int slider_index) const;
+
     Info GetTicksValues() const;
     void SetTicksValues(const Info &custom_gcode_per_print_z);
     void SetLayersTimes(const std::vector<float> &layers_times, float total_time);
@@ -261,6 +286,11 @@ private:
     // positions on the slider. Populated by GUI_Preview after each
     // gcode load; rendered by draw_lookahead_tower_marks().
     std::vector<LookaheadTowerMark> m_lookahead_tower_marks;
+
+    // xyz fork: Filament Lookahead viewer Phase 4 — per-slider-index
+    // metadata. Same length as m_values when populated; empty otherwise.
+    // See `EntryMeta` documentation in the public section.
+    std::vector<EntryMeta> m_entry_meta;
 
     std::vector<double> m_alternate_values;
 

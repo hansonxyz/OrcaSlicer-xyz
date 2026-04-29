@@ -1,7 +1,7 @@
 # GCode Viewer — Filament Lookahead Sub-Layer Display
 
 Branch: `filament-lookahead`
-Status: Phase 1a ✅ complete. Phase 1b ✅ complete. Phase 2 ✅ complete. Phase 3 ✅ complete. Phase 4 next.
+Status: Phase 1a ✅ complete. Phase 1b ✅ complete. Phase 2 ✅ complete. Phase 3 ✅ complete. Phase 4 ✅ complete. Phase 5 next.
 
 ## Goal
 
@@ -144,18 +144,29 @@ The fix: `slider_index = tower.base_layer` directly. The mapping holds because t
 - Selecting a marked tick still shows the full physical layer (no semantic change — Phase 4 is where sub-ticks get added).
 - `compare_slices.py`: 0 divergences (no slicer-side changes).
 
-### Phase 4 — Sub-tick expansion in the slider model
+### Phase 4 ✅ — Sub-tick expansion in the slider model
+
+**Implemented (deviation from original sketch)**
+
+The original sketch proposed a structured `SliderEntry` value type. We kept `m_values` as `std::vector<double>` (the rest of `IMSlider` and its consumers depend on its primitive shape) and instead added a *parallel* metadata vector. The duplicate-Z entries are correctly handled by the existing slider mechanics; only the label/tooltip path is conditionally rerouted.
 
 **Code changes**
-- Change `IMSlider`'s value model: `m_values` becomes a `std::vector<SliderEntry>` where each entry is `{layer_idx, stack_idx_or_-1, z}`.
-- Tower base layer 251 (base + 8 stacks) becomes 9 entries in the model.
-- `SetSliderValues(...)` accepts the new structure.
-- `GUI_Preview.cpp`: build the structured list from `m_viewer.get_layers_zs()` + tower records.
-- Tooltip / readout: `Layer 251 stack 3/8 (z=51.0)`.
 
-**Verification**
-- Load tulip; the slider has more positions than physical layer count (tulip has 9 towers contributing extras — net ~+72 sub-ticks). Tooltip shows correct stack info.
-- Viewer rendering still unchanged — the new sub-ticks all show the same scene as the base layer (deliberately inert). `compare_slices.py`: still 0.
+- `IMSlider.hpp` — added:
+  - `struct EntryMeta { int8_t tower_id, stack_index, stack_count; int viewer_layer_id; }`. Default-constructed = `{-1, -1, 0, -1}` (passthrough).
+  - `void SetEntryMeta(const std::vector<EntryMeta> &)` and parallel member `m_entry_meta`.
+  - `int ToViewerLayerId(int slider_index) const` — collapses sub-tick slider indices to the tower's base libvgcode layer_id (Phase 4 is deliberately inert; Phase 5 replaces this with stack-by-stack viewer filtering).
+- `IMSlider.cpp` — `ToViewerLayerId` impl; `get_label` short-circuits to `"T<n>\n<k>/<m>"` for sub-tick entries when called with `ltHeightWithLayer` or `ltHeight`.
+- `GLCanvas3D.cpp` — `set_layers_z_range` now routes the slider's lower/higher values through `ToViewerLayerId` before forwarding to `m_gcode_viewer`. Phase 4 makes this a no-op for non-tower entries; Phase 5 will repurpose this path.
+- `GUI_Preview.cpp::update_layers_slider` — replaced the Phase 3 marks block: walks the `lookahead_towers` cursor while iterating `layers_z`, builds parallel `expanded_zs` and `entry_meta` vectors, inserts `(stack_count - 1)` duplicate entries after each tower's base, and emits `LookaheadTowerMark`s at the post-expansion slider index. `find_close_layer_idx` for span preservation now uses `expanded_zs`.
+
+**Verification (tulip)**
+
+- Slider values expand from 392 → 460 entries (+68 sub-ticks: 8 towers × 8 + 1 tower × 4).
+- Marks remain at the correct (now-shifted) tower-base positions — orange ticks visible.
+- Tooltip on sub-tick entries reads `T<n>\n<k>/<m>` (e.g. `T7\n3/5`); normal layers retain `<layer>\n<height>`.
+- Viewer is visually inert across sub-tick scrubs (all stacks render identically). Confirmed manually.
+- `compare_slices.py --reuse-gcode`: 0 divergences across 392 Z buckets.
 
 ### Phase 5 — Wire viewer filter to sub-ticks (progressive build)
 
@@ -200,3 +211,4 @@ Discoveries that change the plan (e.g. libvgcode forces a Plan B in Phase 5) get
 - 2026-04-27 — Phase 1b complete. Per-move tower_id / stack_index tagging implemented and verified via histogram. Stack-0 of each tower has the biggest move count (toolchange dance + base layer content) — expected pattern. Comparator clean. Phase 2 next: propagate these tags into libvgcode's PathVertex.
 - 2026-04-28 — Phase 2 complete. PathVertex extended; 4 aggregate-init sites in LibVGCodeWrapper.cpp updated. Verification via probe counted 100,927 tagged / 1,295,718 untagged PathVertex on tulip preview load — tagged ratio (7.2%) matches MoveVertex tagged ratio (7.0%), confirming clean propagation. Build-time "red tower" debug flag deferred to Phase 5 where renderer changes are natural. Phase 3 next: tint tower-base ticks in the slider.
 - 2026-04-28 — Phase 3 complete. 9 orange marks render on the slider's left side at the correct base_layer indices on tulip. First attempt mapped via `find_close_layer_idx(layers_z, base_z)` and silently produced 0 marks because `layers_z` is not Z-sorted (libvgcode keys it by gcode print order) and the pre-LA Z doesn't appear as its own bucket. Switched to `slider_index = tower.base_layer` direct mapping; documented in the Phase 3 Gotcha section. Comparator clean. Phase 4 next: expand the slider's value model to add per-stack sub-ticks at each tower-base position.
+- 2026-04-29 — Phase 4 complete. Slider grew from 392 → 460 entries on tulip (+68 sub-ticks). Tooltips show `T<n>\n<k>/<m>` on sub-ticks and normal layer/height on others. Viewer is inert across sub-tick scrubs as designed (all stacks resolve to base `layer_id` via `ToViewerLayerId`). Comparator clean (0 divergences across 392 Z buckets). Deviation from sketch: kept `m_values` as `vector<double>` and added a *parallel* `EntryMeta` vector instead of restructuring the value type — less invasive, same semantics. Phase 5 next: replace `ToViewerLayerId`'s passthrough with stack-by-stack viewer filtering so sub-ticks visually assemble the tower bottom-up.

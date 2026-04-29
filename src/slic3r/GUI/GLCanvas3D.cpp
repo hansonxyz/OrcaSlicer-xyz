@@ -7661,7 +7661,13 @@ void GLCanvas3D::_render_gcode(int canvas_width, int canvas_height)
     if (layers_slider->is_dirty()) {
         set_volumes_z_range({layers_slider->GetLowerValueD(), layers_slider->GetHigherValueD()});
         if (m_gcode_viewer.has_data()) {
-            m_gcode_viewer.set_layers_z_range({static_cast<unsigned int>(layers_slider->GetLowerValue()), static_cast<unsigned int>(layers_slider->GetHigherValue())});
+            // xyz fork (Phase 4): translate slider indices back to libvgcode
+            // layer_ids in case sub-ticks have been added for lookahead
+            // towers. ToViewerLayerId is a passthrough when no sub-ticks are
+            // present.
+            const int lo = layers_slider->ToViewerLayerId(layers_slider->GetLowerValue());
+            const int hi = layers_slider->ToViewerLayerId(layers_slider->GetHigherValue());
+            m_gcode_viewer.set_layers_z_range({static_cast<unsigned int>(lo), static_cast<unsigned int>(hi)});
         }
         layers_slider->set_as_dirty(false);
         post_event(SimpleEvent(EVT_GLCANVAS_UPDATE));

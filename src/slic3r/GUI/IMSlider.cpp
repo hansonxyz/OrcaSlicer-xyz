@@ -769,6 +769,24 @@ void IMSlider::draw_ticks(const ImRect& slideable_region) {
     }
 }
 
+// xyz fork: Filament Lookahead viewer Phase 4 — translate a slider index
+// to the libvgcode layer_id used for viewer rendering.
+//
+// Without sub-ticks the slider's index space is 1:1 with libvgcode's
+// layer_id space. With Phase 4 sub-ticks, slider indices for tower
+// stacks (the synthetic extras after each tower's base entry) collapse
+// back to the tower's base layer_id — so the viewer keeps showing the
+// full tower bucket while the user scrubs through stacks. Phase 5
+// replaces this with stack-by-stack filtering.
+int IMSlider::ToViewerLayerId(int slider_index) const
+{
+    if (slider_index < 0) return slider_index;
+    if (m_entry_meta.empty() || slider_index >= static_cast<int>(m_entry_meta.size()))
+        return slider_index;
+    const int lid = m_entry_meta[slider_index].viewer_layer_id;
+    return (lid >= 0) ? lid : slider_index;
+}
+
 // xyz fork: Filament Lookahead viewer Phase 3 — draw small colored marks
 // at slider positions corresponding to lookahead tower base layers.
 //
@@ -1611,6 +1629,23 @@ std::string IMSlider::get_label(int tick, LabelType label_type)
         return std::to_string(value);
     }
     if (value >= m_values.size()) return "error";
+
+    // xyz fork: Filament Lookahead viewer Phase 4 — sub-tick tooltip.
+    // For slider entries tagged as part of a lookahead tower, replace
+    // the standard label with "T<tower>\n<stack>/<count>" so the user
+    // can see which stack of which tower they're scrubbing through.
+    if (tick >= 0 && static_cast<size_t>(tick) < m_entry_meta.size()) {
+        const EntryMeta &em = m_entry_meta[tick];
+        if (em.tower_id >= 0 && em.stack_count > 0 &&
+            (label_type == ltHeightWithLayer || label_type == ltHeight)) {
+            char buffer[64];
+            ::sprintf(buffer, "T%d\n%d/%d",
+                      static_cast<int>(em.tower_id),
+                      static_cast<int>(em.stack_index) + 1,
+                      static_cast<int>(em.stack_count));
+            return std::string(buffer);
+        }
+    }
 
     auto get_layer_number = [this](int value, LabelType label_type) {
         if (label_type == ltEstimatedTime && m_layers_times.empty()) return size_t(-1);
