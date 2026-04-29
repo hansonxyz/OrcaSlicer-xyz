@@ -124,6 +124,13 @@ public:
     void SetEntryMeta(const std::vector<EntryMeta> &meta) { m_entry_meta = meta; }
     int  ToViewerLayerId(int slider_index) const;
 
+    // xyz fork: Filament Lookahead viewer Phase 5 — read the EntryMeta
+    // for the slider's higher (active) value. Returns {-1, -1} when the
+    // active position is a normal layer or no meta has been set, in
+    // which case the libvgcode viewer should disable its sub-tick
+    // filter (see Viewer::set_lookahead_filter).
+    void GetActiveLookaheadFilter(int &tower_id, int &stack_index) const;
+
     Info GetTicksValues() const;
     void SetTicksValues(const Info &custom_gcode_per_print_z);
     void SetLayersTimes(const std::vector<float> &layers_times, float total_time);

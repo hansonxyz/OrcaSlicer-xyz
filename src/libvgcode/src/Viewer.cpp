@@ -202,6 +202,11 @@ void Viewer::set_layers_view_range(Interval::value_type min, Interval::value_typ
     m_impl->set_layers_view_range(min, max);
 }
 
+void Viewer::set_lookahead_filter(int tower_id, int stack_index)
+{
+    m_impl->set_lookahead_filter(static_cast<int8_t>(tower_id), static_cast<int8_t>(stack_index));
+}
+
 const Interval& Viewer::get_view_visible_range() const
 {
     return m_impl->get_view_visible_range();

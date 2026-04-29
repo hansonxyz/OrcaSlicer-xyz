@@ -1,7 +1,7 @@
 # GCode Viewer — Filament Lookahead Sub-Layer Display
 
 Branch: `filament-lookahead`
-Status: Phase 1a ✅ complete. Phase 1b ✅ complete. Phase 2 ✅ complete. Phase 3 ✅ complete. Phase 4 ✅ complete. Phase 5 next.
+Status: Phase 1a ✅ complete. Phase 1b ✅ complete. Phase 2 ✅ complete. Phase 3 ✅ complete. Phase 4 ✅ complete. Phase 5 ✅ complete. Phase 6 (polish) next.
 
 ## Goal
 
@@ -168,20 +168,33 @@ The original sketch proposed a structured `SliderEntry` value type. We kept `m_v
 - Viewer is visually inert across sub-tick scrubs (all stacks render identically). Confirmed manually.
 - `compare_slices.py --reuse-gcode`: 0 divergences across 392 Z buckets.
 
-### Phase 5 — Wire viewer filter to sub-ticks (progressive build)
+### Phase 5 ✅ — Wire viewer filter to sub-ticks
+
+**Implemented (deviation from sketch)**
+
+The original sketch proposed a combined `set_layers_sub_view_range(...)` API. We kept the existing `set_layers_view_range(min, max)` (called from Phase 4 via `ToViewerLayerId`) and added a *separate* `set_lookahead_filter(tower_id, stack_index)` channel. The two are orthogonal: layer range bounds the rendered Z slice, the filter culls within it. Cleaner and minimally invasive — the existing `update_enabled_entities()` predicate chain absorbs one new check.
 
 **Code changes**
-- New API on libvgcode `Viewer`: `set_layers_sub_view_range(layer_min, layer_max, in_progress_tower_id, in_progress_stack)`.
-- libvgcode side: when filtering vertices, layer 251 vertices are visible iff `tower_id == -1` (normal content) OR `tower_id == TID && stack_index <= K` (in-progress tower up to current sub-tick).
-- For layers > 251 with already-printed towers: render all stacks of past towers + normal content for the current layer.
-- `GCodeViewer::set_layers_z_range()` reroutes through the new sub-view API when current slider position is on a sub-tick.
 
-**Verification**
-- Load tulip. At slider position `{layer=251, stack=0}`: only the cluster's base content visible inside the LA block. At `stack=3`: 3 stacks visible. At `stack=8`: full tower. At slider position `{layer=252, stack=-1}`: full tower 251 + layer 252's normal content visible.
-- `compare_slices.py`: still 0.
-- Manual: scrub the slider; visually confirm the tower assembles bottom-up.
+- `libvgcode/include/Viewer.hpp` — added `void set_lookahead_filter(int tower_id, int stack_index)`. tower_id < 0 disables the filter (default).
+- `libvgcode/src/Viewer.cpp` — delegation to `ViewerImpl`.
+- `libvgcode/src/ViewerImpl.hpp` — declared the setter and getters; added two `int8_t` state members `m_lookahead_filter_tower_id`/`m_lookahead_filter_stack_index` (both default -1).
+- `libvgcode/src/ViewerImpl.cpp` —
+  - `set_lookahead_filter`: stores state, marks `m_settings.update_enabled_entities = true` (no-op when state is unchanged).
+  - `update_enabled_entities()`: added a single predicate at the top of the per-vertex loop — `if (m_lookahead_filter_tower_id >= 0 && v.tower_id == filter && v.stack_index > stack) continue;`. Other towers' vertices and non-tower (`tower_id == -1`) vertices fall through to the existing checks.
+- `IMSlider.hpp/cpp` — added `void GetActiveLookaheadFilter(int &tower_id, int &stack_index) const`. Reads `m_entry_meta[m_higher_value]` and returns `(-1, -1)` for normal layers / no meta.
+- `GCodeViewer.hpp` — added inline `set_lookahead_filter(...)` that delegates to `m_viewer.set_lookahead_filter(...)`.
+- `GLCanvas3D.cpp::on_idle` slider→viewer wiring: in addition to the Phase 4 layer-id translation, also reads `GetActiveLookaheadFilter` and pushes the result through `m_gcode_viewer.set_lookahead_filter`.
+- `GCodeViewer.cpp::render_lookahead_zones()` — debug exclusion-zone box overlay disabled (wrapped in `if (false) { ... }`) since the towers themselves are now legible in the preview. Geometry/build path left intact for re-enabling.
 
-**Risk:** if libvgcode's bucket structure resists augmentation, fall back to client-side culling — keep all vertices loaded, set per-layer visibility flags in the viewer's own state, do filtering at draw time. Slower but works.
+**Verification (tulip)**
+
+- At slider position on tower base (stack 0): only stack 0 visible — toolchange dance + base layer content. Upper stacks of that tower are hidden, including their travel/wipe moves.
+- Scrubbing 0 → N-1: tower assembles bottom-up; one stack's worth of content reappears per sub-tick.
+- Other towers in view are unaffected (only the active tower is filtered).
+- Past the tower (next normal-layer entry): filter clears, tower fully visible alongside the next layer's content.
+- Travel moves around the object and tool-change Z-hops above the work are visible in the assembling tower — confirms the filter operates at vertex granularity, not just layer level.
+- `compare_slices.py --reuse-gcode`: 0 divergences across 392 Z buckets.
 
 ### Phase 6 — Polish
 
@@ -212,3 +225,4 @@ Discoveries that change the plan (e.g. libvgcode forces a Plan B in Phase 5) get
 - 2026-04-28 — Phase 2 complete. PathVertex extended; 4 aggregate-init sites in LibVGCodeWrapper.cpp updated. Verification via probe counted 100,927 tagged / 1,295,718 untagged PathVertex on tulip preview load — tagged ratio (7.2%) matches MoveVertex tagged ratio (7.0%), confirming clean propagation. Build-time "red tower" debug flag deferred to Phase 5 where renderer changes are natural. Phase 3 next: tint tower-base ticks in the slider.
 - 2026-04-28 — Phase 3 complete. 9 orange marks render on the slider's left side at the correct base_layer indices on tulip. First attempt mapped via `find_close_layer_idx(layers_z, base_z)` and silently produced 0 marks because `layers_z` is not Z-sorted (libvgcode keys it by gcode print order) and the pre-LA Z doesn't appear as its own bucket. Switched to `slider_index = tower.base_layer` direct mapping; documented in the Phase 3 Gotcha section. Comparator clean. Phase 4 next: expand the slider's value model to add per-stack sub-ticks at each tower-base position.
 - 2026-04-29 — Phase 4 complete. Slider grew from 392 → 460 entries on tulip (+68 sub-ticks). Tooltips show `T<n>\n<k>/<m>` on sub-ticks and normal layer/height on others. Viewer is inert across sub-tick scrubs as designed (all stacks resolve to base `layer_id` via `ToViewerLayerId`). Comparator clean (0 divergences across 392 Z buckets). Deviation from sketch: kept `m_values` as `vector<double>` and added a *parallel* `EntryMeta` vector instead of restructuring the value type — less invasive, same semantics. Phase 5 next: replace `ToViewerLayerId`'s passthrough with stack-by-stack viewer filtering so sub-ticks visually assemble the tower bottom-up.
+- 2026-04-29 — Phase 5 complete. Towers now assemble bottom-up as the user scrubs sub-ticks. Implemented as a separate `Viewer::set_lookahead_filter(tower_id, stack_index)` channel (orthogonal to the existing layer view range) — the per-vertex predicate `tower_id == filter && stack_index > stack` falls into the existing `update_enabled_entities()` chain in libvgcode. User confirmed visual: travel and tool-change Z-hops are also gated correctly per stack ("travel moves above things for tool changes" visible). Comparator clean. Also disabled the yellow exclusion-zone debug overlay (`render_lookahead_zones` now wrapped in `if (false)` — geometry build path retained for future debugging). Phase 6 (polish) next: sub-tick visual distinction in the slider, audit `m_values.size()` assumption sites under sub-ticks, optional layer-stats handling.

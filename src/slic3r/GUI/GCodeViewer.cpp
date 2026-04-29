@@ -4510,37 +4510,44 @@ void GCodeViewer::update_lookahead_zones()
 
 void GCodeViewer::render_lookahead_zones()
 {
-    if (!m_lookahead_zones_visible) return;
-    if (!m_gcode_result) return;
-    if (m_gcode_result->lookahead_exclusion_zones.empty())
-        return;
+    // xyz fork: exclusion-zone debug overlay disabled now that the
+    // Filament Lookahead viewer (Phase 5) makes the towers themselves
+    // legible in the gcode preview. The geometry/build path is left
+    // intact below so flipping this guard back on re-enables the
+    // yellow exclusion-zone boxes for future debugging.
+    if (false) {
+        if (!m_lookahead_zones_visible) return;
+        if (!m_gcode_result) return;
+        if (m_gcode_result->lookahead_exclusion_zones.empty())
+            return;
 
-    if (m_lookahead_zones_dirty)
-        update_lookahead_zones();
+        if (m_lookahead_zones_dirty)
+            update_lookahead_zones();
 
-    if (!m_lookahead_zones_model.is_initialized())
-        return;
+        if (!m_lookahead_zones_model.is_initialized())
+            return;
 
-    auto *shader = wxGetApp().get_shader("flat");
-    if (!shader)
-        return;
+        auto *shader = wxGetApp().get_shader("flat");
+        if (!shader)
+            return;
 
-    shader->start_using();
+        shader->start_using();
 
-    glsafe(::glEnable(GL_BLEND));
-    glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
-    glsafe(::glLineWidth(2.0f));
+        glsafe(::glEnable(GL_BLEND));
+        glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
+        glsafe(::glLineWidth(2.0f));
 
-    const Camera &camera = wxGetApp().plater()->get_camera();
-    shader->set_uniform("view_model_matrix", camera.get_view_matrix());
-    shader->set_uniform("projection_matrix", camera.get_projection_matrix());
+        const Camera &camera = wxGetApp().plater()->get_camera();
+        shader->set_uniform("view_model_matrix", camera.get_view_matrix());
+        shader->set_uniform("projection_matrix", camera.get_projection_matrix());
 
-    m_lookahead_zones_model.set_color(ColorRGBA(1.0f, 0.9f, 0.0f, 0.3f));
-    m_lookahead_zones_model.render();
+        m_lookahead_zones_model.set_color(ColorRGBA(1.0f, 0.9f, 0.0f, 0.3f));
+        m_lookahead_zones_model.render();
 
-    glsafe(::glDisable(GL_BLEND));
+        glsafe(::glDisable(GL_BLEND));
 
-    shader->stop_using();
+        shader->stop_using();
+    }
 }
 
 } // namespace GUI

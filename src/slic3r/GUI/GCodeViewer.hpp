@@ -335,6 +335,9 @@ public:
     libvgcode::EViewType get_view_type() const { return m_viewer.get_view_type(); }
 
     void set_layers_z_range(const std::array<unsigned int, 2>& layers_z_range);
+    // xyz fork: Filament Lookahead viewer Phase 5 — forward the slider's
+    // sub-tick filter state to libvgcode. Pass tower_id < 0 to disable.
+    void set_lookahead_filter(int tower_id, int stack_index) { m_viewer.set_lookahead_filter(tower_id, stack_index); }
 
     bool is_legend_shown() const { return m_legend_visible && m_legend_enabled; }
     void show_legend(bool show) { m_legend_visible = show; }

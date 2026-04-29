@@ -7667,6 +7667,15 @@ void GLCanvas3D::_render_gcode(int canvas_width, int canvas_height)
             // present.
             const int lo = layers_slider->ToViewerLayerId(layers_slider->GetLowerValue());
             const int hi = layers_slider->ToViewerLayerId(layers_slider->GetHigherValue());
+            // xyz fork (Phase 5): when the slider's higher value is on a
+            // sub-tick of an in-progress tower, push the (tower, stack)
+            // pair to libvgcode so it hides that tower's vertices beyond
+            // the active stack — letting the user scrub the tower
+            // assembling bottom-up. tower_id < 0 disables the filter.
+            int la_tower = -1;
+            int la_stack = -1;
+            layers_slider->GetActiveLookaheadFilter(la_tower, la_stack);
+            m_gcode_viewer.set_lookahead_filter(la_tower, la_stack);
             m_gcode_viewer.set_layers_z_range({static_cast<unsigned int>(lo), static_cast<unsigned int>(hi)});
         }
         layers_slider->set_as_dirty(false);

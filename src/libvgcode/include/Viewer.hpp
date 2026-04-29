@@ -232,6 +232,16 @@ public:
     //
     void set_layers_view_range(Interval::value_type min, Interval::value_type max);
     //
+    // xyz fork: Filament Lookahead viewer Phase 5 — sub-tick filter.
+    // When the slider's active position is on a lookahead tower stack
+    // sub-tick, the GUI sets this filter so the viewer hides vertices
+    // belonging to that tower whose stack_index exceeds the active
+    // stack — letting the user scrub the tower assembling bottom-up.
+    // tower_id < 0 disables the filter (passthrough — the viewer ignores
+    // the per-vertex tower_id metadata and renders everything in range).
+    //
+    void set_lookahead_filter(int tower_id, int stack_index);
+    //
     // Return the current visible range.
     // Three ranges are defined: full, enabled and visible.
     // For all of them the range endpoints represent:

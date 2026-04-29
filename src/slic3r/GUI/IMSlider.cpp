@@ -778,6 +778,18 @@ void IMSlider::draw_ticks(const ImRect& slideable_region) {
 // back to the tower's base layer_id — so the viewer keeps showing the
 // full tower bucket while the user scrubs through stacks. Phase 5
 // replaces this with stack-by-stack filtering.
+void IMSlider::GetActiveLookaheadFilter(int &tower_id, int &stack_index) const
+{
+    tower_id    = -1;
+    stack_index = -1;
+    const int idx = m_higher_value;
+    if (idx < 0 || idx >= static_cast<int>(m_entry_meta.size())) return;
+    const EntryMeta &em = m_entry_meta[idx];
+    if (em.tower_id < 0) return;
+    tower_id    = static_cast<int>(em.tower_id);
+    stack_index = static_cast<int>(em.stack_index);
+}
+
 int IMSlider::ToViewerLayerId(int slider_index) const
 {
     if (slider_index < 0) return slider_index;

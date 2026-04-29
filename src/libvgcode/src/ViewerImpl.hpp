@@ -82,6 +82,15 @@ public:
     void set_layers_view_range(const Interval& range) { set_layers_view_range(range[0], range[1]); }
     void set_layers_view_range(Interval::value_type min, Interval::value_type max);
 
+    // xyz fork: Filament Lookahead viewer Phase 5 — sub-tick filter.
+    // When the slider's active position is on a lookahead tower stack
+    // sub-tick, the GUI sets this filter so the viewer hides vertices
+    // belonging to that tower whose stack_index exceeds the active
+    // stack. tower_id < 0 disables the filter (passthrough).
+    void set_lookahead_filter(int8_t tower_id, int8_t stack_index);
+    int8_t get_lookahead_filter_tower_id() const { return m_lookahead_filter_tower_id; }
+    int8_t get_lookahead_filter_stack_index() const { return m_lookahead_filter_stack_index; }
+
     bool is_top_layer_only_view_range() const { return m_settings.top_layer_only_view_range; }
     void toggle_top_layer_only_view_range();
 
@@ -246,6 +255,11 @@ private:
     std::array<Color, size_t(EOptionType::COUNT)> m_options_colors;
 
     bool m_initialized{ false };
+
+    // xyz fork: Filament Lookahead viewer Phase 5 — sub-tick filter state.
+    // See set_lookahead_filter(). -1 sentinel disables the filter.
+    int8_t m_lookahead_filter_tower_id{ -1 };
+    int8_t m_lookahead_filter_stack_index{ -1 };
 
     //
     // The OpenGL element used to represent all toolpath segments

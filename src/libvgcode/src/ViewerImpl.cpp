@@ -1158,6 +1158,14 @@ void ViewerImpl::update_enabled_entities()
 
         if (!m_valid_lines_bitset[i] && !v.is_option())
             continue;
+        // xyz fork: Filament Lookahead viewer Phase 5 — when the GUI
+        // pins the slider on a sub-tick of an in-progress tower, hide
+        // tower vertices whose stack_index is beyond the active stack.
+        // Non-tower vertices and other towers' vertices are unaffected.
+        if (m_lookahead_filter_tower_id >= 0 &&
+            v.tower_id == m_lookahead_filter_tower_id &&
+            v.stack_index > m_lookahead_filter_stack_index)
+            continue;
         if (v.is_travel()) {
             if (!m_settings.options_visibility[size_t(EOptionType::Travels)])
                 continue;
@@ -1337,6 +1345,19 @@ void ViewerImpl::set_layers_view_range(Interval::value_type min, Interval::value
     m_settings.update_enabled_entities = true;
     //m_settings.update_colors = true;
     update_colors_texture();
+}
+
+void ViewerImpl::set_lookahead_filter(int8_t tower_id, int8_t stack_index)
+{
+    // xyz fork: Filament Lookahead viewer Phase 5 — sub-tick filter.
+    // tower_id < 0 disables the filter; otherwise vertices in the
+    // active layer range whose tower_id matches but whose stack_index
+    // exceeds the given threshold are skipped by update_enabled_entities.
+    if (tower_id == m_lookahead_filter_tower_id && stack_index == m_lookahead_filter_stack_index)
+        return;
+    m_lookahead_filter_tower_id    = tower_id;
+    m_lookahead_filter_stack_index = stack_index;
+    m_settings.update_enabled_entities = true;
 }
 
 void ViewerImpl::toggle_top_layer_only_view_range()
