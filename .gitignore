@@ -46,6 +46,8 @@ test.js
 internal_docs/
 *.flatpak
 /flatpak-repo/
-# Test gcode exports (not tracked)
-test.gcode
-/*.gcode
+# Test gcode exports (not tracked). Broad: catches any stray
+# .gcode files dropped into the repo while iterating. Upstream's
+# resources/printers/ams_*.gcode were committed before this rule
+# and are unaffected (gitignore doesn't untrack already-tracked files).
+*.gcode

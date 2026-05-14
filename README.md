@@ -6,6 +6,14 @@ A community fork of [OrcaSlicer](https://github.com/SoftFever/OrcaSlicer). The p
 
 ---
 
+## Status
+
+This entire fork — features, plumbing, fixes, this README — was written by Claude Code, with the maintainer testing and refining the output. The code has not been given any particular thought as to organization, architecture, or how it would be reviewed as an upstream pull request. Files are added where they were convenient to add, abstractions are ad-hoc, and naming is inconsistent in places.
+
+At this stage the changes are published **as-is, as a reference for how these features can work** — not as something polished. A later release is planned where individual features are reimplemented more carefully, with attention to structure and PR-friendliness so they can be proposed upstream cleanly.
+
+---
+
 ## What's different from upstream OrcaSlicer
 
 ### Filament Lookahead (multi-layer batched printing)
