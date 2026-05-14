@@ -63,6 +63,12 @@ void MqttClient::set_on_connect(OnConnect cb)
     m_on_connect = std::move(cb);
 }
 
+void MqttClient::fire_connect_status(ConnectStatus status)
+{
+    std::lock_guard<std::mutex> lock(m_callback_mutex);
+    if (m_on_connect) m_on_connect(status);
+}
+
 std::vector<uint8_t> MqttClient::encode_remaining_length(uint32_t len)
 {
     std::vector<uint8_t> result;
@@ -240,6 +246,7 @@ bool MqttClient::connect(const std::string &host, uint16_t port,
     m_ca_pem_path = ca_pem_path;
     m_reconnect_attempts = 0;
     m_auto_reconnect = true;
+    m_auth_failed.store(false);
 
     m_serial = serial;
     m_report_topic = "device/" + serial + "/report";
@@ -367,10 +374,34 @@ bool MqttClient::connect(const std::string &host, uint16_t port,
         disconnect();
         return false;
     }
-    if ((connack[0] & 0xF0) != MQTT_CONNACK || connack[3] != 0) {
-        fprintf(stderr, "MQTT: CONNACK failed, return code=%d\n", connack[3]);
+    if ((connack[0] & 0xF0) != MQTT_CONNACK) {
+        fprintf(stderr, "MQTT: malformed CONNACK header (got 0x%02X)\n", connack[0]);
         disconnect();
         return false;
+    }
+    {
+        // MQTT 3.1.1 CONNACK return codes:
+        //   0 = accepted
+        //   1 = unacceptable protocol version
+        //   2 = identifier rejected
+        //   3 = server unavailable
+        //   4 = bad user name or password
+        //   5 = not authorized
+        uint8_t rc = connack[3];
+        if (rc == 4 || rc == 5) {
+            fprintf(stderr, "MQTT: authentication rejected (CONNACK rc=%d) — stale access code?\n", rc);
+            BOOST_LOG_TRIVIAL(error) << "OpenBambu MQTT: CONNACK auth rejected, rc=" << (int)rc;
+            m_auth_failed.store(true);
+            m_auto_reconnect = false; // do not hammer with bad code
+            fire_connect_status(ConnectStatus::AuthFailed);
+            disconnect();
+            return false;
+        }
+        if (rc != 0) {
+            fprintf(stderr, "MQTT: CONNACK failed, return code=%d\n", rc);
+            disconnect();
+            return false;
+        }
     }
 
     {
@@ -390,10 +421,7 @@ bool MqttClient::connect(const std::string &host, uint16_t port,
     m_connected.store(true);
 
     // Fire connect callback
-    {
-        std::lock_guard<std::mutex> lock(m_callback_mutex);
-        if (m_on_connect) m_on_connect(true);
-    }
+    fire_connect_status(ConnectStatus::Connected);
 
     // Spawn reader thread
     m_reader_thread = std::thread(&MqttClient::reader_thread_func, this);
@@ -418,17 +446,24 @@ void MqttClient::disconnect()
 
     close_socket();
 
-    // Fire disconnect callback only if we were actually connected
-    if (was_connected) {
-        std::lock_guard<std::mutex> lock(m_callback_mutex);
-        if (m_on_connect) m_on_connect(false);
-    }
+    // Fire disconnect callback only if we were actually connected.
+    // Skip if we already fired AuthFailed — that's the terminal status the
+    // caller should act on, and a trailing Disconnected would just confuse
+    // the UI's state machine.
+    if (was_connected && !m_auth_failed.load())
+        fire_connect_status(ConnectStatus::Disconnected);
 }
 
 bool MqttClient::reconnect()
 {
     if (m_stop_requested.load() || m_host.empty())
         return false;
+
+    // Don't hammer the printer with a stale access code after auth was already rejected.
+    if (m_auth_failed.load()) {
+        BOOST_LOG_TRIVIAL(error) << "OpenBambu MQTT: auth previously failed, skipping reconnect";
+        return false;
+    }
 
     if (m_reconnect_attempts >= MAX_RECONNECT_ATTEMPTS) {
         BOOST_LOG_TRIVIAL(error) << "OpenBambu MQTT: max reconnect attempts (" << MAX_RECONNECT_ATTEMPTS << ") reached, giving up";
@@ -499,9 +534,27 @@ bool MqttClient::reconnect()
     }
 
     uint8_t connack[4];
-    if (!tls_read(connack, 4) || (connack[0] & 0xF0) != MQTT_CONNACK || connack[3] != 0) {
+    if (tls_read(connack, 4) != 1 || (connack[0] & 0xF0) != MQTT_CONNACK) {
+        BOOST_LOG_TRIVIAL(error) << "OpenBambu MQTT: reconnect CONNACK read failed or malformed";
         close_socket();
         return false;
+    }
+    {
+        uint8_t rc = connack[3];
+        if (rc == 4 || rc == 5) {
+            // Access code rotated since the last successful connect. Stop trying.
+            BOOST_LOG_TRIVIAL(error) << "OpenBambu MQTT: reconnect CONNACK auth rejected, rc=" << (int)rc;
+            m_auth_failed.store(true);
+            m_auto_reconnect = false;
+            close_socket();
+            fire_connect_status(ConnectStatus::AuthFailed);
+            return false;
+        }
+        if (rc != 0) {
+            BOOST_LOG_TRIVIAL(error) << "OpenBambu MQTT: reconnect CONNACK rc=" << (int)rc;
+            close_socket();
+            return false;
+        }
     }
 
     auto sub_pkt = build_subscribe_packet(m_next_packet_id++, m_report_topic);
@@ -514,11 +567,7 @@ bool MqttClient::reconnect()
     m_reconnect_attempts = 0; // reset on success
     BOOST_LOG_TRIVIAL(info) << "OpenBambu MQTT: reconnected successfully";
 
-    // Fire connect callback
-    {
-        std::lock_guard<std::mutex> lock(m_callback_mutex);
-        if (m_on_connect) m_on_connect(true);
-    }
+    fire_connect_status(ConnectStatus::Connected);
 
     // Request fresh status
     request_pushall();
@@ -649,14 +698,13 @@ void MqttClient::reader_thread_func()
         if (m_stop_requested.load() || !m_auto_reconnect)
             break;
 
-        // Fire disconnect callback
-        {
-            std::lock_guard<std::mutex> lock(m_callback_mutex);
-            if (m_on_connect) m_on_connect(false);
-        }
+        // Fire disconnect callback (network drop, not an auth issue)
+        fire_connect_status(ConnectStatus::Disconnected);
 
-        if (!reconnect())
+        if (!reconnect()) {
+            BOOST_LOG_TRIVIAL(error) << "OpenBambu MQTT: reconnect gave up; reader thread exiting";
             break; // reconnect failed or gave up
+        }
     }
 }
 

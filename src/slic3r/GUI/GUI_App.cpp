@@ -2178,7 +2178,14 @@ void GUI_App::init_networking_callbacks()
                                 if (msg == "5") {
                                     obj->set_access_code("");
                                     obj->erase_user_access_code();
-                                    text = wxString::Format(_L("Incorrect password"));
+                                    // xyz fork: friendlier copy. The most common cause of MQTT
+                                    // CONNACK code 5 in LAN mode is a printer firmware update
+                                    // rotating the access code — tell the user that instead of
+                                    // just "Incorrect password".
+                                    text = _L("The printer rejected the saved access code. "
+                                              "This usually means the code changed (for example, "
+                                              "after a printer firmware update). "
+                                              "Please re-enter the printer's access code.");
                                     wxGetApp().show_dialog(text);
                                 } else {
                                 text = wxString::Format(_L("Connect %s failed! [SN:%s, code=%s]"), from_u8(obj->get_dev_name()), obj->get_dev_id(), msg);

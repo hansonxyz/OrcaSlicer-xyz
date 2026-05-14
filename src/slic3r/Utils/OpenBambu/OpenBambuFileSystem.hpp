@@ -37,7 +37,7 @@ private:
     std::atomic<bool> m_stop_flag{false};
     std::thread m_worker;
 
-    bool EnsureConnected();
+    OpenBambu::FtpResult EnsureConnected();
     std::string GetFtpDirectory() const;
     static bool ParseListLine(const std::string &line,
                               std::string &name, uint64_t &size, time_t &mtime,

@@ -20,10 +20,16 @@
 
 namespace OpenBambu {
 
+// Connection outcome reported via OnConnect callback.
+// AuthFailed distinguishes credential rejection (MQTT CONNACK return code 4/5)
+// from generic network failure — the caller is expected to surface a "bad
+// access code" prompt and stop retrying.
+enum class ConnectStatus { Connected, Disconnected, AuthFailed };
+
 class MqttClient {
 public:
     using OnMessage = std::function<void(const std::string &topic, const std::string &payload)>;
-    using OnConnect = std::function<void(bool connected)>;
+    using OnConnect = std::function<void(ConnectStatus status)>;
 
     MqttClient();
     ~MqttClient();
@@ -88,6 +94,9 @@ private:
     bool reconnect();
     void close_socket(); // close SSL/socket without firing callbacks
 
+    // Fire the OnConnect callback under m_callback_mutex.
+    void fire_connect_status(ConnectStatus status);
+
     // Connection parameters (saved for reconnect)
     std::string m_host;
     uint16_t m_port = 0;
@@ -102,6 +111,10 @@ private:
     std::thread m_reader_thread;
     std::atomic<bool> m_connected{false};
     std::atomic<bool> m_stop_requested{false};
+    // Set when CONNACK return code 4/5 (bad credentials) is observed.
+    // Stops the reconnect loop from hammering the printer with a stale code
+    // after the user rotates the LAN access code.
+    std::atomic<bool> m_auth_failed{false};
     std::mutex m_write_mutex; // serialize TLS writes
 
     uint16_t m_next_packet_id = 1;

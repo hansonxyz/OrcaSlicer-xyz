@@ -134,12 +134,32 @@ int Agent::connect_printer(const std::string &dev_id, const std::string &dev_ip,
             m_on_local_message_fn(dev_id, topic, payload);
     });
 
-    // Wire up connection status callback
-    m_mqtt.set_on_connect([this, dev_id, dev_ip](bool connected) {
+    // Wire up connection status callback.
+    // Translate MqttClient ConnectStatus → GUI's OnLocalConnectedFn(int, dev_id, msg) format
+    // used by bambu_networking.hpp (ConnectStatusOk=0, ConnectStatusFailed=1, ConnectStatusLost=2).
+    // For AuthFailed we emit msg="5" so the existing GUI_App handler (which already understands
+    // BBL's "incorrect password" path) clears the saved access code and shows the prompt.
+    // m_has_been_connected lets us distinguish initial-connect failures from later drops.
+    m_has_been_connected = false;
+    m_mqtt.set_on_connect([this, dev_id](ConnectStatus status) {
         std::lock_guard<std::mutex> lock(m_callback_mutex);
-        if (m_on_local_connect_fn) {
-            int status = connected ? 0 : -1;
-            m_on_local_connect_fn(status, dev_id, connected ? "connected" : "disconnected");
+        if (!m_on_local_connect_fn) return;
+        switch (status) {
+        case ConnectStatus::Connected:
+            m_has_been_connected = true;
+            m_on_local_connect_fn(/*ConnectStatusOk*/ 0, dev_id, "connected");
+            break;
+        case ConnectStatus::AuthFailed:
+            // GUI_App.cpp keys on msg=="5" to mean "incorrect password"
+            m_on_local_connect_fn(/*ConnectStatusFailed*/ 1, dev_id, "5");
+            break;
+        case ConnectStatus::Disconnected:
+            if (m_has_been_connected) {
+                m_on_local_connect_fn(/*ConnectStatusLost*/ 2, dev_id, "lost");
+            } else {
+                m_on_local_connect_fn(/*ConnectStatusFailed*/ 1, dev_id, "network");
+            }
+            break;
         }
     });
 
@@ -199,7 +219,7 @@ int Agent::start_local_print(const std::string &dev_ip, const std::string &acces
     // Step 1: Upload file via FTPS
     if (update_fn) update_fn(0, 0, "Uploading...");
 
-    bool uploaded = FtpUpload::upload(dev_ip, access_code, local_file, remote_name,
+    FtpResult upload_rc = FtpUpload::upload(dev_ip, access_code, local_file, remote_name,
         [&update_fn, &cancel_fn](size_t uploaded, size_t total) -> bool {
             if (cancel_fn && cancel_fn()) return false;
             if (update_fn && total > 0) {
@@ -209,8 +229,9 @@ int Agent::start_local_print(const std::string &dev_ip, const std::string &acces
             return true;
         });
 
-    if (!uploaded) {
-        if (update_fn) update_fn(-1, 0, "Upload failed");
+    if (upload_rc != FtpResult::Ok) {
+        const char *msg = (upload_rc == FtpResult::AuthFailed) ? "Bad access code" : "Upload failed";
+        if (update_fn) update_fn(-1, 0, msg);
         return BAMBU_NETWORK_ERR_SEND_MSG_FAILED;
     }
 
@@ -235,7 +256,7 @@ int Agent::send_gcode_to_sdcard(const std::string &dev_ip, const std::string &ac
 {
     if (update_fn) update_fn(0, 0, "Uploading...");
 
-    bool uploaded = FtpUpload::upload(dev_ip, access_code, local_file, remote_name,
+    FtpResult upload_rc = FtpUpload::upload(dev_ip, access_code, local_file, remote_name,
         [&update_fn, &cancel_fn](size_t uploaded, size_t total) -> bool {
             if (cancel_fn && cancel_fn()) return false;
             if (update_fn && total > 0) {
@@ -245,8 +266,9 @@ int Agent::send_gcode_to_sdcard(const std::string &dev_ip, const std::string &ac
             return true;
         });
 
-    if (!uploaded) {
-        if (update_fn) update_fn(-1, 0, "Upload failed");
+    if (upload_rc != FtpResult::Ok) {
+        const char *msg = (upload_rc == FtpResult::AuthFailed) ? "Bad access code" : "Upload failed";
+        if (update_fn) update_fn(-1, 0, msg);
         return BAMBU_NETWORK_ERR_SEND_MSG_FAILED;
     }
 

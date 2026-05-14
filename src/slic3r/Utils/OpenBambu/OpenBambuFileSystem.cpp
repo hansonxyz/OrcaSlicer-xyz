@@ -96,9 +96,9 @@ void OpenBambuFileSystem::SetFileType(FileType type, std::string const &storage)
     if (!m_host.empty()) ListAllFiles();
 }
 
-bool OpenBambuFileSystem::EnsureConnected()
+OpenBambu::FtpResult OpenBambuFileSystem::EnsureConnected()
 {
-    if (m_ctrl.ssl) return true;
+    if (m_ctrl.ssl) return OpenBambu::FtpResult::Ok;
     return OpenBambu::ftp_connect(m_ctrl, m_host, m_access_code);
 }
 
@@ -205,13 +205,16 @@ void OpenBambuFileSystem::ListAllFiles()
         std::vector<std::string> lines;
         {
             std::lock_guard<std::mutex> lock(self->m_ftp_mutex);
-            if (!self->EnsureConnected()) {
-                self->CallAfter([weak_self]() {
+            OpenBambu::FtpResult conn_rc = self->EnsureConnected();
+            if (conn_rc != OpenBambu::FtpResult::Ok) {
+                self->CallAfter([weak_self, conn_rc]() {
                     auto s = boost::dynamic_pointer_cast<OpenBambuFileSystem>(weak_self.lock());
                     if (!s) return;
                     s->m_status = Failed;
                     s->m_last_error = 1;
-                    s->SendChangedEvent(EVT_STATUS_CHANGED, (size_t)Failed, "Connection failed", 1);
+                    const char *err = (conn_rc == OpenBambu::FtpResult::AuthFailed)
+                        ? "Bad access code" : "Connection failed";
+                    s->SendChangedEvent(EVT_STATUS_CHANGED, (size_t)Failed, err, 1);
                 });
                 return;
             }
@@ -327,7 +330,7 @@ void OpenBambuFileSystem::DeleteFiles(size_t index)
         std::vector<size_t> deleted;
         {
             std::lock_guard<std::mutex> lock(self->m_ftp_mutex);
-            if (!self->EnsureConnected()) return;
+            if (self->EnsureConnected() != OpenBambu::FtpResult::Ok) return;
 
             for (size_t i = 0; i < paths.size(); i++) {
                 if (self->m_stop_flag) break;
@@ -385,7 +388,7 @@ void OpenBambuFileSystem::DownloadFiles(size_t index, std::string const &path)
 
     m_worker = std::thread([self, items, host]() {
         std::lock_guard<std::mutex> lock(self->m_ftp_mutex);
-        if (!self->EnsureConnected()) return;
+        if (self->EnsureConnected() != OpenBambu::FtpResult::Ok) return;
 
         for (auto &item : items) {
             if (self->m_stop_flag) break;

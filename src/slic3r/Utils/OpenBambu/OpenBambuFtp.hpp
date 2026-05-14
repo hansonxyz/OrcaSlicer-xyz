@@ -17,6 +17,11 @@ typedef struct ssl_ctx_st SSL_CTX;
 
 namespace OpenBambu {
 
+// Outcome of an FTPS authentication attempt. AuthFailed is distinguished from
+// NetworkError so the upload UI can surface "bad access code" instead of a
+// generic upload failure when the printer's LAN access code has rotated.
+enum class FtpResult { Ok, AuthFailed, NetworkError };
+
 // ============================================================================
 // TLS connection helper (shared by all FTP operations)
 // ============================================================================
@@ -46,8 +51,10 @@ int         parse_pasv_port(const std::string &response);
 // ============================================================================
 
 // Establish an authenticated FTPS control connection.
-// Returns true if ctrl is connected, authenticated, and PROT P set.
-bool ftp_connect(TlsConn &ctrl, const std::string &host, const std::string &access_code);
+// Returns FtpResult::Ok if ctrl is connected, authenticated, and PROT P set.
+// AuthFailed is reserved for FTP response code 530 ("Login incorrect"); all
+// other failures (TCP, TLS, malformed responses) return NetworkError.
+FtpResult ftp_connect(TlsConn &ctrl, const std::string &host, const std::string &access_code);
 
 // List directory contents. Returns raw LIST output lines.
 std::vector<std::string> ftp_list(TlsConn &ctrl, const std::string &host,
@@ -70,17 +77,20 @@ class FtpUpload {
 public:
     using OnProgress = std::function<bool(size_t uploaded, size_t total)>;
 
-    static bool upload(const std::string &host,
-                       const std::string &access_code,
-                       const std::string &local_path,
-                       const std::string &remote_path,
-                       OnProgress progress = nullptr);
+    // Returns FtpResult::Ok on success. AuthFailed signals that the printer
+    // rejected the access code (FTP 530); callers should surface a "bad access
+    // code" message rather than a generic upload failure.
+    static FtpResult upload(const std::string &host,
+                            const std::string &access_code,
+                            const std::string &local_path,
+                            const std::string &remote_path,
+                            OnProgress progress = nullptr);
 
-    static bool upload_buffer(const std::string &host,
-                              const std::string &access_code,
-                              const void *data, size_t size,
-                              const std::string &remote_path,
-                              OnProgress progress = nullptr);
+    static FtpResult upload_buffer(const std::string &host,
+                                   const std::string &access_code,
+                                   const void *data, size_t size,
+                                   const std::string &remote_path,
+                                   OnProgress progress = nullptr);
 };
 
 } // namespace OpenBambu

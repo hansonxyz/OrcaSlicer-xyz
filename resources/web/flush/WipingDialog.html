@@ -281,6 +281,10 @@
         >
           Re-Calculate
       </div>
+        <!-- xyz fork: Calibration Test Print disabled for release —
+             feature is incomplete (gcode post-process / preview flow needs
+             more work). The JS handler and the C++ side of openCalibration
+             are left in place so we can re-enable by uncommenting this block.
         <div
           class="ButtonStyleRegular ButtonTypeWindow"
           onclick="openCalibrationTestPrint()"
@@ -288,6 +292,8 @@
         >
           Calibration Test Print
       </div>
+        -->
+
         <select
           id="extruders"
           onchange="handleExtruderSelect(document.getElementById('extruders').value)"

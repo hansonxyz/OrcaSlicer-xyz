@@ -159,7 +159,7 @@ int parse_pasv_port(const std::string &response)
 // FTP high-level operations
 // ============================================================================
 
-bool ftp_connect(TlsConn &ctrl, const std::string &host, const std::string &access_code)
+FtpResult ftp_connect(TlsConn &ctrl, const std::string &host, const std::string &access_code)
 {
 #ifdef _WIN32
     WSADATA wsa;
@@ -169,23 +169,43 @@ bool ftp_connect(TlsConn &ctrl, const std::string &host, const std::string &acce
 
     if (!ctrl.connect(host, 990)) {
         fprintf(stderr, "FTP: failed to connect to %s:990\n", host.c_str());
-        return false;
+        return FtpResult::NetworkError;
     }
 
     std::string resp;
     int code;
 
+    // 220 Welcome banner
     code = ftp_read_response(ctrl.ssl, resp);
-    if (code != 220) { ctrl.close(); return false; }
+    if (code != 220) { ctrl.close(); return FtpResult::NetworkError; }
 
+    // USER → expect 331 (need password) or 230 (no password required).
+    // Anything else, including 530 "Not logged in", is a network/protocol failure here.
     ftp_send_cmd(ctrl.ssl, "USER bblp");
     code = ftp_read_response(ctrl.ssl, resp);
-    if (code != 331 && code != 230) { ctrl.close(); return false; }
+    if (code != 331 && code != 230) {
+        if (code == 530) {
+            fprintf(stderr, "FTP: USER bblp rejected (530)\n");
+            ctrl.close();
+            return FtpResult::AuthFailed;
+        }
+        ctrl.close();
+        return FtpResult::NetworkError;
+    }
 
     if (code == 331) {
+        // PASS → 230 ok, 530 means the access code is wrong.
         ftp_send_cmd(ctrl.ssl, "PASS " + access_code);
         code = ftp_read_response(ctrl.ssl, resp);
-        if (code != 230) { ctrl.close(); return false; }
+        if (code == 530) {
+            fprintf(stderr, "FTP: PASS rejected (530) — stale access code?\n");
+            ctrl.close();
+            return FtpResult::AuthFailed;
+        }
+        if (code != 230) {
+            ctrl.close();
+            return FtpResult::NetworkError;
+        }
     }
 
     ftp_send_cmd(ctrl.ssl, "TYPE I");
@@ -197,7 +217,7 @@ bool ftp_connect(TlsConn &ctrl, const std::string &host, const std::string &acce
     ftp_send_cmd(ctrl.ssl, "PROT P");
     ftp_read_response(ctrl.ssl, resp);
 
-    return true;
+    return FtpResult::Ok;
 }
 
 std::vector<std::string> ftp_list(TlsConn &ctrl, const std::string &host,
@@ -351,16 +371,16 @@ bool ftp_delete(TlsConn &ctrl, const std::string &path)
 // FTP upload (existing functionality, refactored to use shared helpers)
 // ============================================================================
 
-bool FtpUpload::upload(const std::string &host,
-                        const std::string &access_code,
-                        const std::string &local_path,
-                        const std::string &remote_path,
-                        OnProgress progress)
+FtpResult FtpUpload::upload(const std::string &host,
+                            const std::string &access_code,
+                            const std::string &local_path,
+                            const std::string &remote_path,
+                            OnProgress progress)
 {
     std::ifstream ifs(local_path, std::ios::binary);
     if (!ifs) {
         fprintf(stderr, "FTP: cannot open %s\n", local_path.c_str());
-        return false;
+        return FtpResult::NetworkError;
     }
     std::string data((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
     ifs.close();
@@ -368,14 +388,15 @@ bool FtpUpload::upload(const std::string &host,
     return upload_buffer(host, access_code, data.data(), data.size(), remote_path, progress);
 }
 
-bool FtpUpload::upload_buffer(const std::string &host,
-                               const std::string &access_code,
-                               const void *data, size_t size,
-                               const std::string &remote_path,
-                               OnProgress progress)
+FtpResult FtpUpload::upload_buffer(const std::string &host,
+                                   const std::string &access_code,
+                                   const void *data, size_t size,
+                                   const std::string &remote_path,
+                                   OnProgress progress)
 {
     TlsConn ctrl;
-    if (!ftp_connect(ctrl, host, access_code)) return false;
+    FtpResult conn_rc = ftp_connect(ctrl, host, access_code);
+    if (conn_rc != FtpResult::Ok) return conn_rc;
 
     std::string resp;
     int code;
@@ -383,10 +404,10 @@ bool FtpUpload::upload_buffer(const std::string &host,
     // PASV
     ftp_send_cmd(ctrl.ssl, "PASV");
     code = ftp_read_response(ctrl.ssl, resp);
-    if (code != 227) { ctrl.close(); return false; }
+    if (code != 227) { ctrl.close(); return FtpResult::NetworkError; }
 
     int data_port = parse_pasv_port(resp);
-    if (data_port < 0) { ctrl.close(); return false; }
+    if (data_port < 0) { ctrl.close(); return FtpResult::NetworkError; }
 
     // STOR command first
     ftp_send_cmd(ctrl.ssl, "STOR " + remote_path);
@@ -395,14 +416,14 @@ bool FtpUpload::upload_buffer(const std::string &host,
     if (!data_conn.connect(host, data_port, ctrl.ctx, ctrl.ssl)) {
         fprintf(stderr, "FTP: failed to connect data channel on port %d\n", data_port);
         ctrl.close();
-        return false;
+        return FtpResult::NetworkError;
     }
 
     code = ftp_read_response(ctrl.ssl, resp);
     if (code != 150 && code != 125) {
         data_conn.close();
         ctrl.close();
-        return false;
+        return FtpResult::NetworkError;
     }
 
     const uint8_t *buf = static_cast<const uint8_t *>(data);
@@ -413,25 +434,25 @@ bool FtpUpload::upload_buffer(const std::string &host,
         if (w <= 0) {
             data_conn.close();
             ctrl.close();
-            return false;
+            return FtpResult::NetworkError;
         }
         sent += w;
         if (progress && !progress(sent, size)) {
             data_conn.close();
             ctrl.close();
-            return false;
+            return FtpResult::NetworkError;
         }
     }
 
     data_conn.close();
     code = ftp_read_response(ctrl.ssl, resp);
-    if (code != 226) { ctrl.close(); return false; }
+    if (code != 226) { ctrl.close(); return FtpResult::NetworkError; }
 
     ftp_send_cmd(ctrl.ssl, "QUIT");
     ftp_read_response(ctrl.ssl, resp);
     ctrl.close();
 
-    return true;
+    return FtpResult::Ok;
 }
 
 } // namespace OpenBambu

@@ -137,6 +137,11 @@ private:
     std::string m_connected_dev_id;
     std::string m_connected_dev_ip;
     std::string m_connected_access_code;
+
+    // True once the MQTT layer has successfully completed CONNACK at least once for
+    // the current dev_id. Used to distinguish "initial connect failed" (Failed)
+    // from "we were connected and lost it" (Lost).
+    bool m_has_been_connected = false;
 };
 
 } // namespace OpenBambu

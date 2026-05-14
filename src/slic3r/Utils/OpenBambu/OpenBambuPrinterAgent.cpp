@@ -205,7 +205,7 @@ int OpenBambuPrinterAgent::start_local_print(PrintParams params, OnUpdateStatusF
         << " ip=" << ip << " file=" << params.filename << " remote=" << remote_name;
     if (update_fn) update_fn(SendingPrintJobStage::PrintingStageCreate, 0, "");
 
-    bool uploaded = OpenBambu::FtpUpload::upload(ip, code, params.filename, remote_name,
+    OpenBambu::FtpResult upload_rc = OpenBambu::FtpUpload::upload(ip, code, params.filename, remote_name,
         [&update_fn, &cancel_fn](size_t uploaded, size_t total) -> bool {
             if (cancel_fn && cancel_fn()) return false;
             if (update_fn && total > 0) {
@@ -215,9 +215,19 @@ int OpenBambuPrinterAgent::start_local_print(PrintParams params, OnUpdateStatusF
             return true;
         });
 
-    if (!uploaded) {
-        BOOST_LOG_TRIVIAL(error) << "OpenBambuPrinterAgent: FTPS upload failed for " << remote_name;
-        if (update_fn) update_fn(SendingPrintJobStage::PrintingStageERROR, BAMBU_NETWORK_ERR_PRINT_LP_UPLOAD_FTP_FAILED, "Upload failed");
+    if (upload_rc != OpenBambu::FtpResult::Ok) {
+        if (upload_rc == OpenBambu::FtpResult::AuthFailed) {
+            BOOST_LOG_TRIVIAL(error) << "OpenBambuPrinterAgent: FTPS auth rejected for " << remote_name
+                << " — access code may have been rotated";
+            if (update_fn) update_fn(SendingPrintJobStage::PrintingStageERROR,
+                BAMBU_NETWORK_ERR_PRINT_LP_UPLOAD_FTP_FAILED,
+                "Bad access code");
+        } else {
+            BOOST_LOG_TRIVIAL(error) << "OpenBambuPrinterAgent: FTPS upload failed for " << remote_name;
+            if (update_fn) update_fn(SendingPrintJobStage::PrintingStageERROR,
+                BAMBU_NETWORK_ERR_PRINT_LP_UPLOAD_FTP_FAILED,
+                "Upload failed");
+        }
         return BAMBU_NETWORK_ERR_PRINT_LP_UPLOAD_FTP_FAILED;
     }
 

@@ -399,8 +399,9 @@ bool PurgeCalibrationGenerator::generate(const Options &opts)
 
         if (sliced_gcode_path.empty() || !boost::filesystem::exists(sliced_gcode_path)) {
             BOOST_LOG_TRIVIAL(warning) << "PurgeCalibration: no gcode file found";
-            plater->deselect_all();
-            plater->undo();
+            // DEBUG: leave plate in place so we can inspect what slicing produced
+            // plater->deselect_all();
+            // plater->undo();
             wxMessageBox(_L("Slicing did not produce gcode. Please try again."),
                 _L("Purge Calibration"), wxOK | wxICON_WARNING);
             delete timer;
@@ -420,8 +421,9 @@ bool PurgeCalibrationGenerator::generate(const Options &opts)
 
         if (raw_gcode.empty()) {
             BOOST_LOG_TRIVIAL(error) << "PurgeCalibration: failed to read gcode file";
-            plater->deselect_all();
-            plater->undo();
+            // DEBUG: leave plate in place
+            // plater->deselect_all();
+            // plater->undo();
             wxMessageBox(_L("Failed to read sliced gcode."),
                 _L("Purge Calibration"), wxOK | wxICON_WARNING);
             delete timer;
@@ -492,9 +494,10 @@ bool PurgeCalibrationGenerator::generate(const Options &opts)
                 });
             });
         } else {
-            // Slicing failed — clear selection and undo
-            plater->deselect_all();
-            plater->undo();
+            // Slicing failed
+            // DEBUG: leave plate in place
+            // plater->deselect_all();
+            // plater->undo();
             wxMessageBox(_L("Slicing did not produce gcode. Please try again."),
                 _L("Purge Calibration"), wxOK | wxICON_WARNING);
         }
@@ -608,11 +611,14 @@ static DynamicConfig build_toolchange_config(
     }
 
     // Outer wall volumetric speed (used for dynamic extrusion calibration)
+    // nozzle_diameter is per-extruder (coFloats) — index required.
+    // outer_wall_speed / outer_wall_line_width / layer_height are scalar (coFloat / coFloatOrPercent) —
+    // passing an index forces dynamic_cast<ConfigOptionFloats*> which returns null and crashes.
     float nozzle_diameter = full_config.opt_float("nozzle_diameter", 0);
-    float outer_wall_speed = full_config.opt_float("outer_wall_speed", 0);
-    float outer_wall_line_width = full_config.opt_float("outer_wall_line_width", 0);
+    float outer_wall_speed = full_config.opt_float("outer_wall_speed");
+    float outer_wall_line_width = (float)full_config.get_abs_value("outer_wall_line_width", nozzle_diameter);
     if (outer_wall_line_width <= 0) outer_wall_line_width = nozzle_diameter;
-    float layer_height = full_config.opt_float("layer_height", 0);
+    float layer_height = full_config.opt_float("layer_height");
     if (layer_height <= 0) layer_height = 0.2f;
     float outer_wall_vol_speed = outer_wall_speed * outer_wall_line_width * layer_height;
     config.set_key_value("outer_wall_volumetric_speed", new ConfigOptionFloat(outer_wall_vol_speed));
