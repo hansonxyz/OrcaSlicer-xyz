@@ -18,11 +18,13 @@ At this stage the changes are published **as-is, as a reference for how these fe
 
 ### Filament Lookahead (multi-layer batched printing)
 
+> **Alpha quality.** This feature has been validated against a small handful of test models and is known to work on them — but it has not been exercised against the wide variety of geometries, support strategies, and multi-material configurations that real-world printing throws at a slicer. Expect bugs. Inspect the gcode preview carefully before sending to the printer. Off by default for a reason; opt in deliberately.
+
 When a region uses a single filament for many consecutive layers, the slicer normally still does a tool change every layer because of how layers are ordered. Lookahead detects spatially isolated single-filament clusters and prints multiple layers of that filament back-to-back as a "tower stack" before switching. On four-color prints with tall single-color regions this can eliminate a large fraction of the tool changes and the associated wipe-tower purge volume.
 
 It is implemented in three stages: an analysis pass on the per-layer extruder graph (`src/libslic3r/GCode/FilamentLookahead.cpp`) that plans candidate stacks under a set of containment / reachability rules, a gcode emission path in `src/libslic3r/GCode.cpp` that emits stacks as a batched block at the base layer, and a post-processor (`src/libslic3r/GCode/FilamentLookaheadPostProcessor.cpp`) that tags the output with marker comments. The gcode previewer parses those tags so the layer slider can expand sub-ticks for each tower stack — you can scroll through the emission order, not just the physical-Z order. The full spec lives in `FILAMENT_LOOKAHEAD.md`; viewer details are in `LOOKAHEAD_VIEWER.md`.
 
-The feature is off by default. Enable via the **Filament Lookahead** process setting. Treat it as experimental — it has been driven against several test prints (see `debug-tools/` for the slice comparator) but edge cases around tree supports and complex multi-material interfaces are still being shaken out.
+Enable via the **Filament Lookahead** process setting (off by default).
 
 ### OpenBambu — open-source LAN replacement for the Bambu Lab DLL
 
